@@ -51,6 +51,7 @@ export interface TreeSitterGoProofCall extends TreeSitterRawCall {
 }
 
 export interface TreeSitterPythonProofCall extends TreeSitterRawCall {
+  /** Pytest nodeid suffix: `test_name` or `TestClass::test_name`. Structural metadata only. */
   testName: string;
   assertion: "pytest_assert";
 }
@@ -1314,16 +1315,24 @@ function extractPythonProofCalls(root: Node): TreeSitterPythonProofCall[] {
       }
     }
   };
-  const walk = (node: Node, insideFunction: boolean): void => {
+  const walk = (node: Node, insideFunction: boolean, testClass: string | null): void => {
+    if (!insideFunction && node.type === "class_definition") {
+      const name = node.childForFieldName("name")?.text;
+      const nextTestClass = name && /^Test[A-Za-z0-9_]*$/.test(name) ? name : null;
+      for (const child of namedChildren(node)) walk(child, false, nextTestClass);
+      return;
+    }
     if (node.type === "function_definition") {
       const name = functionName(node, "python");
       const body = node.childForFieldName("body");
-      if (name && /^test_/.test(name) && body) processBlock(body, name, localBindings(node, "python"));
+      if (name && /^test_[A-Za-z0-9_]*$/.test(name) && body) {
+        processBlock(body, testClass ? `${testClass}::${name}` : name, localBindings(node, "python"));
+      }
       if (insideFunction) return;
     }
-    for (const child of namedChildren(node)) walk(child, insideFunction || node.type === "function_definition");
+    for (const child of namedChildren(node)) walk(child, insideFunction || node.type === "function_definition", testClass);
   };
-  walk(root, false);
+  walk(root, false, null);
   return out;
 }
 

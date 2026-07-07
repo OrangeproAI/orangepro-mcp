@@ -432,6 +432,25 @@ describe("autoProve — #164 fix regressions", () => {
     expect(a[0].prove_run?.args.test_path).not.toBe(b[0].prove_run?.args.test_path);
   });
 
+  it("2b. Python generated tests carry a pytest dynamic-proof handoff, not static-only record_run", () => {
+    const t = fakeTest({
+      framework_hint: "pytest",
+      target_symbol_external_id: "sym:src/app/calc.py#add",
+      body: ["from app.calc import add", "", "def test_add():", "    assert add(1, 2) == 3", ""].join("\n")
+    });
+    const [hint] = runHintsFor([t], undefined, 0);
+    expect(hint.prove_run).toEqual({
+      tool: "orangepro_prove",
+      args: {
+        target_symbol: "sym:src/app/calc.py#add",
+        test_path: "orangepro_generated/01_creates_order_id.py",
+        replacement: "return 0",
+        runner: "pytest"
+      }
+    });
+    expect(hint.record_run).toBeDefined();
+  });
+
   // Fix 3: an empty first window (transient generation hiccup) must NOT abandon
   // lower-ranked candidates — the loop continues to the next window.
   it("3. an empty first window does not abandon a provable later-window candidate", async () => {
@@ -660,6 +679,39 @@ describe("autoProve — PR 1.5 existing-associated-tests-first", () => {
     expect(map.has(infra.external_id)).toBe(false);
     // A WEAK-only association to a not_entry_point_adjacent symbol stays strict → not selected.
     expect(map.has(weakOnly.external_id)).toBe(false);
+  });
+
+  it("4c. Python hard edges preserve exact pytest selectors through the existing-tests queue", () => {
+    const target = {
+      kind: "CodeSymbol",
+      external_id: "sym:src/app/calc.py#add",
+      title: "add",
+      denominator_eligible: false,
+      properties: { file: "src/app/calc.py", symbol_kind: "function", denominator_reason_code: "not_entry_point_adjacent" }
+    };
+    const testCase = { kind: "TestCase", external_id: "test:src/app/test_calc.py", title: "test_calc.py", properties: { file: "src/app/test_calc.py" } };
+    const graph = {
+      nodes: [target, testCase],
+      edges: [
+        {
+          relationship_type: "COVERS",
+          from_external_id: testCase.external_id,
+          to_external_id: target.external_id,
+          properties: { test_name: "TestCalc::test_add" }
+        }
+      ],
+      candidate_edges: []
+    } as unknown as LocalGraph;
+    const nodeById = new Map(graph.nodes.map((n) => [n.external_id, n as unknown as GraphNode]));
+
+    const map = existingAssociatedTests(graph, nodeById);
+    expect(map.get(target.external_id)).toEqual([{ test: "src/app/test_calc.py", hard: true, testName: "TestCalc::test_add" }]);
+    expect(orderExistingAttempts(map)[0]).toEqual({
+      symId: target.external_id,
+      testRel: "src/app/test_calc.py",
+      hard: true,
+      testName: "TestCalc::test_add"
+    });
   });
 
   it("5. report refresh reflects the Proven delta (before 0 → after N)", async () => {
