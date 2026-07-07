@@ -19,7 +19,7 @@ Add OrangePro as an MCP server in your user or workspace MCP config:
   "servers": {
     "orangepro-local": {
       "command": "npx",
-      "args": ["-y", "@orangepro/orangepro-mcp@latest", "mcp"]
+      "args": ["-y", "@orangepro/mcp-server@latest", "mcp"]
     }
   }
 }

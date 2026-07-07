@@ -5,7 +5,7 @@
 `opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. Runs as a CLI and an MCP server.
 
 ```bash
-npx @orangepro/orangepro-mcp
+npx @orangepro/mcp-server
 cd /path/to/your/repo
 opro
 ```
@@ -25,7 +25,7 @@ That's it. You get:
 
 ```bash
 # No install needed (npx)
-npx @orangepro/orangepro-mcp
+npx @orangepro/mcp-server
 
 # Or global install
 npm install -g @orangepro/orangepro-mcp
@@ -50,7 +50,7 @@ Add to your client's MCP config:
   "mcpServers": {
     "orangepro-local": {
       "command": "npx",
-      "args": ["-y", "@orangepro/orangepro-mcp@latest", "mcp"]
+      "args": ["-y", "@orangepro/mcp-server@latest", "mcp"]
     }
   }
 }

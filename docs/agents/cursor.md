@@ -18,7 +18,7 @@ Install OrangePro from the Cursor Marketplace when it is listed. Until then, use
 plugins/orangepro
 ```
 
-The plugin starts the `orangepro-local` MCP server through `npx -y @orangepro/orangepro-mcp@latest mcp` and applies OrangePro rules for gap/test workflows. It does not pin a model; provider keys and model defaults come from your environment, `.env.provider.local`, `.env.local`, `.env`, or `opro setup`.
+The plugin starts the `orangepro-local` MCP server through `npx -y @orangepro/mcp-server@latest mcp` and applies OrangePro rules for gap/test workflows. It does not pin a model; provider keys and model defaults come from your environment, `.env.provider.local`, `.env.local`, `.env`, or `opro setup`.
 
 ## MCP Setup
 
