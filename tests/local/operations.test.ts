@@ -180,7 +180,7 @@ describe("start orchestration", () => {
     writeStartFixture(W);
     const provider = new PromptLinkProvider();
 
-    const res = await opStart(W, { source: W, aiFlows: false }, { ...deps, aiProvider: provider });
+    const res = await opStart(W, { source: W, aiFlows: false, noAuto: true }, { ...deps, aiProvider: provider });
     const graph = loadGraph(workspacePaths(W).graphPath);
 
     expect(provider.calls).toBe(1);
@@ -214,7 +214,7 @@ describe("start orchestration", () => {
     );
     const provider = new HybridAiProvider();
 
-    const res = await opStart(W, { source: W }, { ...deps, aiProvider: provider });
+    const res = await opStart(W, { source: W, noAuto: true }, { ...deps, aiProvider: provider });
     const graph = loadGraph(workspacePaths(W).graphPath);
 
     expect(provider.calls).toEqual(["flows"]);
@@ -265,7 +265,7 @@ describe("start orchestration", () => {
 
     const res = await opStart(
       W,
-      { source: W, generateCoverage: true, aiFlows: false },
+      { source: W, generateCoverage: true, aiFlows: false, noAuto: true },
       {
         ...deps,
         aiProvider: provider,

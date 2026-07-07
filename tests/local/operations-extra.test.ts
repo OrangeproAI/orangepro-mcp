@@ -11,9 +11,11 @@ import {
   opGenerate,
   opExplain,
   opChanged,
-  opUpdate
+  opUpdate,
+  opStart
 } from "../../src/local/operations.js";
 import { redactSecrets, containsSecret } from "../../src/local/util/redact.js";
+import type { ModelCompletionRequest, ModelProvider } from "../../src/local/types.js";
 
 // Generation defaults to opt-in deterministic stand-in for offline determinism.
 const deps = { clock: () => "2026-06-07T00:00:00Z", env: { ORANGEPRO_ALLOW_DETERMINISTIC: "1" } as NodeJS.ProcessEnv };
@@ -41,6 +43,62 @@ function scaffold(root: string): void {
       '"Save a card","Customer saves a card","Card is validated; Saved card appears",buyer,high,PAY-1'
     ].join("\n")
   );
+}
+
+function scaffoldRiskTargets(root: string, count = 7): void {
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "risk-fixture", devDependencies: { vitest: "^3" } }));
+  writeFileSync(
+    join(root, "src/risk.ts"),
+    Array.from({ length: count }, (_, i) => `export function behavior${i}(value: string) { return value + "${i}"; }`).join("\n") + "\n"
+  );
+}
+
+class StartV5Provider implements ModelProvider {
+  readonly providerName = "fake";
+  readonly modelName = "fake-v5";
+
+  async complete(req: ModelCompletionRequest): Promise<string> {
+    if (req.user.includes("BEHAVIOR_CANDIDATES:")) {
+      const behaviorId = /"id":\s*"([^"]+)"/.exec(req.user)?.[1] ?? "REQ-missing";
+      const symbolId = /"id":\s*"(sym:[^"]+)"/.exec(req.user)?.[1] ?? "sym:src/risk.ts#behavior0";
+      return JSON.stringify({ links: [{ behavior_id: behaviorId, symbol_id: symbolId, confidence: 0.7, rationale: "closed-set fixture link" }] });
+    }
+
+    const fn =
+      /^BEHAVIOR:\s*([A-Za-z0-9_]+)/m.exec(req.user)?.[1] ??
+      /src\/risk\.ts:([A-Za-z0-9_]+)/.exec(req.user)?.[1] ??
+      /ASSERT:\s*\n\s*-\s*([A-Za-z0-9_]+)/.exec(req.user)?.[1] ??
+      "behavior0";
+    if (req.user.includes("Find missing test scenarios")) {
+      return JSON.stringify([
+        {
+          id: 1,
+          title: `${fn} preserves observable output`,
+          concern: "contract",
+          technique: "contract_verification",
+          rationale: "exercise the top risk symbol through a real assertion",
+          assertion_targets: [fn],
+          complexity: "basic",
+          risk_rank: 1
+        }
+      ]);
+    }
+
+    if (req.user.includes("═══ SCENARIOS")) {
+      return [
+        "// ═══ SCENARIO 1 ═══",
+        "import { expect, it } from \"vitest\";",
+        `import { ${fn} } from "../src/risk";`,
+        "",
+        `it("${fn} preserves observable output", () => {`,
+        `  expect(${fn}("value")).toBe("value${fn.replace("behavior", "")}");`,
+        "});"
+      ].join("\n");
+    }
+
+    return "[]";
+  }
 }
 
 afterEach(() => {
@@ -116,6 +174,35 @@ describe("operation-level coverage", () => {
     const bodyFragment = gen.generated_tests[0].body.split("\n").find((l) => l.trim().length > 8) ?? "";
     expect(bodyFragment.length).toBeGreaterThan(8);
     expect(html).toContain(JSON.stringify(bodyFragment).slice(1, -1).slice(0, 30));
+  });
+
+  it("opStart with a provider writes generated tests into the behavior report independently of the proof budget", async () => {
+    const root = temp();
+    opInit(root, deps);
+    scaffoldRiskTargets(root, 7);
+    const res = await opStart(
+      root,
+      { source: root, aiFlows: false, autoLimit: 1, promptVersion: "v5" },
+      {
+        ...deps,
+        env: {},
+        aiProvider: new StartV5Provider(),
+        dynamicProofRunner: () => ({
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({ status: "associated_survived", proven: false, reason: "stubbed for start generation test" })
+        })
+      }
+    );
+
+    const graph = opGaps(root, { limit: 20 });
+    expect(graph.top_risk_gaps?.length).toBeGreaterThanOrEqual(7);
+    expect(res.warnings.some((w) => w.includes("provider returned no accepted tests")), res.warnings.join("\n")).toBe(false);
+
+    const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
+    expect(html).toContain('"generatedTotal":7');
+    expect(html).toContain("behavior0 preserves observable output");
+    expect(html).toContain("behavior6 preserves observable output");
   });
 
   it("opExplain throws for an unknown test id", () => {

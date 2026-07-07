@@ -167,7 +167,6 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .risk-rank{font-size:10px;color:var(--orange);font-weight:700;margin-bottom:3px}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
 .risk-ep .v{color:var(--green);font-weight:700}
-.risk-desc{font-size:12px;color:var(--muted);margin:0 0 8px;max-width:72ch}
 .risk-tags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px}
 .todo{background:var(--gbg);border:1px solid var(--gbd);border-radius:6px;padding:8px 11px;font-size:11.5px;color:var(--ink2)}
 
@@ -513,7 +512,6 @@ function riskCardHtml(r){
   }
   return `<div class="risk-rank">#${r.rank}</div>
      <div class="risk-ep"><span class="v">${esc(r.verb)}</span> ${esc(r.path)}</div>
-     <div class="risk-desc">${esc(r.desc)}</div>
      <div class="risk-tags">${tags}</div>
      <div class="todo">${esc(r.todo)}</div>${testsHtml}${catHtml}`;
 }
