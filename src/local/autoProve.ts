@@ -72,6 +72,8 @@ function isRunnablePythonTestPath(testRel: string): boolean {
   return /(^|\/)(test_[^/]+|[^/]+_test)\.py$/i.test(file);
 }
 
+const PYTHON_TEST_NODEID_SUFFIX_RE = /^(?:Test[A-Za-z0-9_]*::)?test_[A-Za-z0-9_]+$/;
+
 function isRunnableTestForTarget(node: GraphNode, testRel: string): boolean {
   const file = codeSymbolFile(node);
   if (isPythonFile(file)) return isRunnablePythonTestPath(testRel);
@@ -106,6 +108,13 @@ function pytestNodeidsForFile(sourceRoot: string, testRel: string): string[] {
     else out.push(`${testRel}::${fnMatch[2]}`);
   }
   return out.length ? out.slice(0, 25) : [testRel];
+}
+
+function pytestNodeidsForTarget(sourceRoot: string, testRel: string, testName?: string): string[] {
+  if (testName && PYTHON_TEST_NODEID_SUFFIX_RE.test(testName) && !testRel.includes("::")) {
+    return [`${testRel}::${testName}`];
+  }
+  return pytestNodeidsForFile(sourceRoot, testRel);
 }
 
 /**
@@ -610,30 +619,30 @@ export function existingAssociatedTests(graph: LocalGraph, nodeById: Map<string,
   // `hard` = TESTED_BY/COVERS (the confirmer's structural links); weak = MAY_* candidate
   // edges. Hard is recorded before weak (graph.edges scanned first), so a test already
   // linked hard is never downgraded; a later weak dup only upgrades an existing weak to hard.
-  const add = (symId: string, testRel: string, hard: boolean): void => {
+  const add = (symId: string, testRel: string, hard: boolean, testName?: string): void => {
     // A HARD TESTED_BY/COVERS edge is a real derivable test; admit it even when the symbol
     // is not_entry_point_adjacent (relaxed shape-only guard). Weak MAY_* fan-out stays strict.
     const node = nodeById.get(symId);
     if (!(hard ? isEligibleHardExistingTarget(node) : isEligibleProvableTarget(node))) return;
     const list = out.get(symId);
     if (!list) {
-      out.set(symId, [{ test: testRel, hard }]);
+      out.set(symId, [{ test: testRel, hard, ...(testName ? { testName } : {}) }]);
       return;
     }
-    const existing = list.find((t) => t.test === testRel);
+    const existing = list.find((t) => t.test === testRel && t.testName === testName);
     if (existing) {
       if (hard) existing.hard = true;
       return;
     }
-    list.push({ test: testRel, hard });
+    list.push({ test: testRel, hard, ...(testName ? { testName } : {}) });
   };
   // A sym↔test edge joins one TestCase endpoint to one CodeSymbol endpoint; resolve
   // whichever side is the symbol so both edge directions are handled uniformly.
-  const link = (a: string, b: string, hard: boolean): void => {
+  const link = (a: string, b: string, hard: boolean, testName?: string): void => {
     const tb = testFileOf(b);
-    if (tb && nodeById.get(a)?.kind === "CodeSymbol") return add(a, tb, hard);
+    if (tb && nodeById.get(a)?.kind === "CodeSymbol") return add(a, tb, hard, testName);
     const ta = testFileOf(a);
-    if (ta && nodeById.get(b)?.kind === "CodeSymbol") add(b, ta, hard);
+    if (ta && nodeById.get(b)?.kind === "CodeSymbol") add(b, ta, hard, testName);
   };
 
   // Eligible symbols grouped by source file, for the file-level MAY_RELATE_TO expansion.
@@ -653,7 +662,10 @@ export function existingAssociatedTests(graph: LocalGraph, nodeById: Map<string,
   };
 
   for (const e of graph.edges) {
-    if (e.relationship_type === "TESTED_BY" || e.relationship_type === "COVERS") link(e.from_external_id, e.to_external_id, true);
+    if (e.relationship_type === "TESTED_BY" || e.relationship_type === "COVERS") {
+      const testName = typeof e.properties?.test_name === "string" ? e.properties.test_name : undefined;
+      link(e.from_external_id, e.to_external_id, true, testName);
+    }
   }
   for (const e of graph.candidate_edges ?? []) {
     if (e.review_status === "ai_suggested") continue;
@@ -673,6 +685,8 @@ export function existingAssociatedTests(graph: LocalGraph, nodeById: Map<string,
 export interface AssocTest {
   test: string;
   hard: boolean;
+  /** Structural exact test selector from a hard edge (Python: `test_name` or `TestClass::test_name`). */
+  testName?: string;
 }
 
 /** A single (symbol, test) attempt reference in the ordered existing-tests queue. */
@@ -680,6 +694,7 @@ export interface ExistingAttemptRef {
   symId: string;
   testRel: string;
   hard: boolean;
+  testName?: string;
 }
 
 /**
@@ -699,7 +714,7 @@ export function orderExistingAttempts(
   for (const [symId, tests] of testsBySymbol) {
     let weakCount = 0;
     for (const t of tests) {
-      if (t.hard) hard.push({ symId, testRel: t.test, hard: true });
+      if (t.hard) hard.push({ symId, testRel: t.test, hard: true, ...(t.testName ? { testName: t.testName } : {}) });
       else if (weakCount++ < maxWeakPerSymbol) weak.push({ symId, testRel: t.test, hard: false });
     }
   }
@@ -750,7 +765,7 @@ function proveExistingAssociatedTests(
   // Fix 3: hard TESTED_BY/COVERS pairs first, weak MAY_* pairs after and capped per symbol.
   const queue = orderExistingAttempts(existingAssociatedTests(graph, nodeById));
 
-  for (const { symId, testRel, hard } of queue) {
+  for (const { symId, testRel, hard, testName } of queue) {
     if (attempted >= budget) break;
     const node = nodeById.get(symId);
     // Redundant with existingAssociatedTests' own filter, but the eligibility barrier is
@@ -770,7 +785,7 @@ function proveExistingAssociatedTests(
     // needs_setup WITHOUT re-running (and WITHOUT consuming the attempt budget).
     const isPython = isPythonFile(targetFileRel);
     const candidateTestRels = isPython
-      ? pytestNodeidsForFile(sourceRoot, testRel).filter((candidate) => isRunnableTestForTarget(node!, candidate))
+      ? pytestNodeidsForTarget(sourceRoot, testRel, testName).filter((candidate) => isRunnableTestForTarget(node!, candidate))
       : [testRel];
     if (candidateTestRels.length === 0) continue;
     const proofTestRel = candidateTestRels[0]!;

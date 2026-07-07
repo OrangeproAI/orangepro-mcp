@@ -95,6 +95,17 @@ describe.skipIf(!HAS_PYTEST)("python dynamic proof spike (P-1)", () => {
     expect(verdict.mutant.assertionFailure).toBe(true);
   }, TEST_TIMEOUT);
 
+  it("binds an unparameterized pytest selector to its generated [case] nodeid", () => {
+    const verdict = runSpike(path.join(fixtures, "parametrized"), {
+      test: "tests/test_app.py::test_value",
+      target: "app.py",
+      func: "value"
+    });
+    expect(verdict.status).toBe("proven");
+    expect(verdict.proven).toBe(true);
+    expect(verdict.mutant.assertionFailure).toBe(true);
+  }, TEST_TIMEOUT);
+
   it("keeps an equivalent mutation associated_survived (no false Proven)", () => {
     const verdict = runSpike(path.join(fixtures, "proven"), { mode: "equivalent" });
     expect(verdict.status).toBe("associated_survived");

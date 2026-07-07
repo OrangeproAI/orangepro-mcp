@@ -1654,30 +1654,31 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     };
     const resolvePythonProofTarget = (testRel: string, structure: TreeSitterStructure, qualifier: string | undefined, callee: string, shadowed: Set<string>): string | null => {
       const conv = conventionSibling(testRel, "python", codeFileSet);
-      const targetRel = conv?.relPath ?? null;
-      if (!targetRel || isNonProductFile(targetRel)) return null;
+      const conventionTargetRel = conv?.relPath && !isNonProductFile(conv.relPath) ? conv.relPath : null;
       const hasWildcardImport = structure.imports.some((i) => i.imported === "*");
       if (!qualifier) {
         if (shadowed.has(callee)) return null;
         const binding = pythonProofImportBinding(testRel, structure, callee);
         if (binding === null) return null;
         if (binding) {
-          if (binding.kind !== "named" || binding.targetRel !== targetRel || binding.imported !== callee) return null;
-          return eligiblePythonSymbol(targetRel, callee);
+          if (binding.kind !== "named" || !binding.targetRel || isNonProductFile(binding.targetRel) || binding.imported !== callee) return null;
+          return eligiblePythonSymbol(binding.targetRel, callee);
         }
+        if (!conventionTargetRel) return null;
         if (hasWildcardImport) return null;
-        return eligiblePythonSymbol(targetRel, callee);
+        return eligiblePythonSymbol(conventionTargetRel, callee);
       }
       const rootQualifier = pythonQualifierRoot(qualifier);
       if (shadowed.has(rootQualifier)) return null;
       const binding = pythonProofImportBinding(testRel, structure, rootQualifier);
       if (binding === null) return null;
       if (binding?.kind === "module") {
-        return binding.targetRel === targetRel ? eligiblePythonSymbol(targetRel, callee) : null;
+        return binding.targetRel && !isNonProductFile(binding.targetRel) ? eligiblePythonSymbol(binding.targetRel, callee) : null;
       }
-      if (binding?.kind === "named" && (binding.targetRel !== targetRel || binding.imported !== rootQualifier)) return null;
-      if (symbolKind(targetRel, rootQualifier) !== "class") return null;
-      return eligiblePythonSymbol(targetRel, callee);
+      const classTargetRel = binding?.kind === "named" ? binding.targetRel : conventionTargetRel;
+      if (binding?.kind === "named" && (!classTargetRel || isNonProductFile(classTargetRel) || binding.imported !== rootQualifier)) return null;
+      if (!classTargetRel || symbolKind(classTargetRel, rootQualifier) !== "class") return null;
+      return eligiblePythonSymbol(classTargetRel, callee);
     };
 
     for (const [rel, { language, structure }] of nonTsStructureByFile) {
@@ -1847,12 +1848,16 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         if (seenPythonProof.has(edgeKey)) continue;
         seenPythonProof.add(edgeKey);
         pythonProofConfirmedPairs++;
+        const pythonEdgeProps = /^(?:Test[A-Za-z0-9_]*::)?test_[A-Za-z0-9_]+$/.test(proof.testName)
+          ? { test_name: proof.testName }
+          : undefined;
         edges.push(
           ...makeProofEdges({
             testRel,
             symId,
             provenance: prov(testRel, hashString(`${symId}:${proof.assertion}`)),
-            lastVerified: proofVerifiedAt
+            lastVerified: proofVerifiedAt,
+            ...(pythonEdgeProps ? { properties: pythonEdgeProps } : {})
           })
         );
       }
