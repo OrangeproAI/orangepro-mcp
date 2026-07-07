@@ -99,7 +99,8 @@ function runPytest(repoRoot, nodeid, timeoutMs) {
 
 function exactNodeIdPattern(nodeid) {
   const escaped = nodeid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\//g, "[/\\\\]");
-  return new RegExp(`FAILED\\s+${escaped}(?:\\s|$)`);
+  const selectedParamSet = /\[[^\]]+\]$/.test(nodeid);
+  return new RegExp(`FAILED\\s+${escaped}${selectedParamSet ? "" : "(?:\\[[^\\]\\n]+\\])?"}(?:\\s|$)`);
 }
 
 function isExactPytestNodeId(nodeid) {
