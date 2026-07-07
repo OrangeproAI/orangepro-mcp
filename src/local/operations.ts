@@ -324,8 +324,9 @@ export interface StartOptions extends ProviderOverride {
   ai?: boolean;
   aiAll?: boolean;
   aiFlows?: boolean;
-  /** Auto-prove: unified dynamic-proof budget — the top N viable TS/JS targets (default 5). Existing
-   *  associated tests run first WITHOUT a key; generation fills the remaining budget when a key is present. */
+  /** Auto-prove: dynamic-proof budget — the top N viable targets (default 5).
+   *  Existing associated tests run first WITHOUT a key. With a key, start also
+   *  generates report-visible test drafts for the local top risk rows. */
   autoLimit?: number;
   /** --no-auto: skip auto-prove and restore analyze-only behavior. */
   noAuto?: boolean;
@@ -2049,6 +2050,41 @@ export async function opStart(
     warnings.push(`auto-prove skipped: ${reason}`);
   }
 
+  if (!opts.noAuto && providerConfigured && opts.ai !== false) {
+    try {
+      const graphForGeneration = loadGraph(workspacePaths(root).graphPath);
+      const generatedTargets = new Set(
+        (graphForGeneration.generated_tests ?? []).map((t) => t.target_symbol_external_id).filter((id): id is string => Boolean(id))
+      );
+      const targetIds = rankRiskGaps(graphForGeneration, { repoRoot: root, limit: START_GENERATE_RISK_LIMIT })
+        .map((gap) => gap.id)
+        .filter((id) => !generatedTargets.has(id));
+      if (targetIds.length) {
+        reportProgress(`generate: drafting tests for top ${targetIds.length} risk target(s)`, { current: 6, total: 8 });
+        let accepted = 0;
+        for (let i = 0; i < targetIds.length; i += START_GENERATE_BATCH_LIMIT) {
+          const batch = targetIds.slice(i, i + START_GENERATE_BATCH_LIMIT);
+          const generated = await opGenerate(
+            root,
+            {
+              ...providerOpts,
+              target_ids: batch,
+              limit: batch.length,
+              prompt_version: opts.promptVersion ?? "v5"
+            },
+            providerDeps
+          );
+          accepted += generated.generated_tests.length;
+          warnings.push(...generated.warnings.map((w) => `generate: ${w}`));
+        }
+        if (accepted === 0) warnings.push("generate: provider returned no accepted tests for the top risk targets.");
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      warnings.push(`generate skipped: ${reason}`);
+    }
+  }
+
   // G1: persist the distilled, already-redacted attempt classifications so
   // `opro doctor --proof` and standalone report regens can explain blockers
   // after this process exits. Sidecar only — never read by the oracle, RTM,
@@ -2166,6 +2202,8 @@ export async function opStart(
 const NO_PROVIDER_MESSAGE =
   'No model provider configured. Set OPENAI_API_KEY (or OLLAMA_BASE_URL / ANTHROPIC_API_KEY) in your shell environment or a .env.provider.local file to generate with your own model, or pass provider="deterministic" (or set ORANGEPRO_ALLOW_DETERMINISTIC=1) to use the offline deterministic stand-in. No tests were generated.';
 const START_RTM_LIMIT = 500;
+const START_GENERATE_RISK_LIMIT = 20;
+const START_GENERATE_BATCH_LIMIT = 5;
 
 const EMPTY_EVIDENCE_SUMMARY: EvidenceSummary = {
   tests: 0,
@@ -2202,7 +2240,7 @@ export async function opGenerate(
   // deterministic stand-in is opt-in only; otherwise return setup guidance
   // instead of silently degrading.
   const providerEnv = loadProviderEnv([root], deps.env);
-  const provider = resolveGenerationProvider(providerEnv, opts);
+  const provider = deps.aiProvider ?? resolveGenerationProvider(providerEnv, opts);
   if (!provider) {
     return {
       run_id: null,
