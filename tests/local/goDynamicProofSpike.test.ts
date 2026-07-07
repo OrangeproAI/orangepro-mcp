@@ -118,6 +118,21 @@ describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
     expect(status).toBe(0);
   }, TEST_TIMEOUT);
 
+  it("proves through a sentinel that orphans an import (blank-import repair keeps the mutant buildable)", async () => {
+    const { verdict, status } = await runSpike(path.join(fixtures, "unused-import"));
+
+    // Without blankUnusedImports the sentinel body strands `strings` and the
+    // mutant FAILS TO BUILD (honest refusal, but no verdict on the test). The
+    // repair lets the real verdict through — and it must still be a genuine
+    // trusted-assertion kill, never a build-side shortcut.
+    expect(verdict.status).toBe("proven");
+    expect(verdict.proven).toBe(true);
+    expect(verdict.baseline.targetTestPassed).toBe(true);
+    expect("targetTestFailed" in verdict.mutant && verdict.mutant.targetTestFailed).toBe(true);
+    expect("trustedAssertion" in verdict.mutant && verdict.mutant.trustedAssertion).toBe(true);
+    expect(status).toBe(0);
+  }, TEST_TIMEOUT);
+
   it("keeps an equivalent-value mutation associated_survived (no false Proven)", async () => {
     const { verdict } = await runSpike(path.join(fixtures, "proven"), { mode: "equivalent" });
 
