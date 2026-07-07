@@ -50,7 +50,7 @@ Add to your client's MCP config:
   "mcpServers": {
     "orangepro-local": {
       "command": "npx",
-      "args": ["-y", "-p", "@orangepro/orangepro-mcp@latest", "opro", "mcp"]
+      "args": ["-y", "@orangepro/orangepro-mcp@latest", "mcp"]
     }
   }
 }
