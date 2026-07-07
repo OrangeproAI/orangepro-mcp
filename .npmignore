@@ -1,0 +1,2 @@
+# Keep npm packaging controlled by package.json#files.
+# Without this file, npm falls back to .gitignore and drops the built dist/local CLI.
