@@ -1,0 +1,41 @@
+{
+  "name": "@orangepro/mcp-server",
+  "version": "0.2.0",
+  "private": false,
+  "description": "Compatibility launcher for OrangePro (`opro`) CLI and MCP server.",
+  "license": "MIT",
+  "author": "OrangePro",
+  "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OrangeproAI/orangepro-mcp.git",
+    "directory": "packages/mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/OrangeproAI/orangepro-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "orangepro",
+    "opro",
+    "test-generation"
+  ],
+  "type": "module",
+  "bin": {
+    "mcp-server": "bin/mcp-server.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "dependencies": {
+    "@orangepro/orangepro-mcp": "^0.2.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
