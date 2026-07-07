@@ -267,6 +267,8 @@ npm run typecheck   # type check without emitting
 
 See [docs/local-proof-kit.md](docs/local-proof-kit.md) for the full development reference.
 
+<!-- public-ci-smoke: validates GitHub Actions on the public mirror. -->
+
 ## License
 
 [MIT](LICENSE) © OrangePro
