@@ -308,6 +308,144 @@ describe("Go hard proof", () => {
     expect(hardCoverEdges(root)).toEqual([]);
   });
 
+  // ── Block-level short-var dataflow (ONE hop, same block): the dominant real-Go
+  //    idiom `got, err := F(...)` as a standalone statement, checked by a LATER
+  //    if-fail or testify assert on a declared name. Metadata-only widening —
+  //    the oracle still re-verifies every edge before anything is Proven. ──
+  it("confirms a standalone short-var call checked by a later t.Errorf if-guard", () => {
+    const root = repo({
+      "svc/calc.go": "package svc\nfunc Compute(a int) int { return a * 2 }\n",
+      "svc/calc_test.go": [
+        "package svc",
+        'import "testing"',
+        "func TestCompute(t *testing.T) {",
+        "  got := Compute(2)",
+        "  if got != 4 {",
+        '    t.Errorf("got %d", got)',
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/calc_test.go -> sym:svc/calc.go#Compute"]);
+    expect(hardCoverTestNames(root)).toEqual(["TestCompute"]);
+    // Exactly one witnessing check → its t.Errorf line is bound for the oracle's line gate.
+    expect(hardCoverAssertionLines(root)).toEqual([6]);
+  });
+
+  it("confirms the got,err := F(...) idiom with separate err/value checks (single edge)", () => {
+    const root = repo({
+      "svc/parse.go": "package svc\nfunc ParseChecked(s string) (string, error) { return s, nil }\n",
+      "svc/parse_test.go": [
+        "package svc",
+        'import "testing"',
+        "func TestParseChecked(t *testing.T) {",
+        '  got, err := ParseChecked("ab1")',
+        "  if err != nil {",
+        '    t.Fatalf("err %v", err)',
+        "  }",
+        '  if got != "ab1" {',
+        '    t.Errorf("got %s", got)',
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parse_test.go -> sym:svc/parse.go#ParseChecked"]);
+    expect(hardCoverTestNames(root)).toEqual(["TestParseChecked"]);
+    // TWO checks witness the call (err + value) — the line is dropped so the
+    // oracle's frame-line gate can never refuse the real kill at either check.
+    expect(hardCoverAssertionLines(root)).toEqual([undefined]);
+  });
+
+  it("confirms a short-var call whose declared name is a later testify assert subject", () => {
+    const root = repo({
+      "svc/calc.go": "package svc\nfunc Compute(a int) int { return a * 2 }\n",
+      "svc/calc_test.go": [
+        "package svc",
+        "import (",
+        '  "testing"',
+        '  "github.com/stretchr/testify/require"',
+        ")",
+        "func TestCompute(t *testing.T) {",
+        "  got := Compute(3)",
+        "  require.Equal(t, 6, got)",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/calc_test.go -> sym:svc/calc.go#Compute"]);
+  });
+
+  it("confirms a short-var result compared in Equal's EXPECTED slot (symmetric equality, Mattermost idiom)", () => {
+    const root = repo({
+      "svc/enc.go": "package svc\nfunc URLEncode(s string) string { return s }\n",
+      "svc/enc_test.go": [
+        "package svc",
+        "import (",
+        '  "testing"',
+        '  "github.com/stretchr/testify/require"',
+        ")",
+        "func TestURLEncode(t *testing.T) {",
+        '  encoded := URLEncode("a b")',
+        '  require.Equal(t, encoded, "a%20b")',
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/enc_test.go -> sym:svc/enc.go#URLEncode"]);
+    expect(hardCoverTestNames(root)).toEqual(["TestURLEncode"]);
+  });
+
+  it("does not confirm a short-var call whose result is never checked", () => {
+    const root = repo({
+      "svc/calc.go": "package svc\nfunc Compute(a int) int { return a * 2 }\n",
+      "svc/calc_test.go": [
+        "package svc",
+        'import "testing"',
+        "func TestCompute(t *testing.T) {",
+        "  got := Compute(2)",
+        "  _ = got",
+        '  t.Log("setup only")',
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("refuses ambiguous multi-call short-var statements (single-call discipline)", () => {
+    const root = repo({
+      "svc/calc.go": "package svc\nfunc Compute(a int) int { return a * 2 }\nfunc Other(a int) int { return a + 1 }\n",
+      "svc/calc_test.go": [
+        "package svc",
+        'import "testing"',
+        "func TestCompute(t *testing.T) {",
+        "  a, b := Compute(1), Other(2)",
+        "  if a != 2 || b != 3 {",
+        '    t.Errorf("got %d %d", a, b)',
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("rebinding a name before the check credits the LATEST call only", () => {
+    const root = repo({
+      "svc/calc.go": "package svc\nfunc Compute(a int) int { return a * 2 }\nfunc Other(a int) int { return a + 1 }\n",
+      "svc/calc_test.go": [
+        "package svc",
+        'import "testing"',
+        "func TestCompute(t *testing.T) {",
+        "  got := Compute(1)",
+        "  got = 0",
+        "  got2 := Other(2)",
+        "  if got2 != 3 {",
+        '    t.Errorf("got %d", got2)',
+        "  }",
+        "  _ = got",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/calc_test.go -> sym:svc/calc.go#Other"]);
+  });
+
   it("does not confirm unasserted Go calls", () => {
     const root = repo({
       "svc/add.go": "package svc\nfunc Add(a, b int) int { return a + b }\n",

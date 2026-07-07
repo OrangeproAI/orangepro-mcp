@@ -772,6 +772,16 @@ function goAssertionCalls(node: Node | null, assertLocals: Set<string>, dotAsser
   });
 }
 
+function goAssertionIdentifierArgs(assertion: Node, testingParams: Set<string>): string[] {
+  const sel = callFunctionSelector(assertion);
+  const name = sel?.name ?? assertion.childForFieldName("function")?.text;
+  const args = namedChildren(assertion.childForFieldName("arguments") ?? assertion).filter((n) => n.type !== "comment");
+  if (!name || args.length < 2) return [];
+  if (!testingParams.has(args[0]?.text ?? "")) return [];
+  const slots = name === "Equal" || name === "NotEqual" ? [args[1], args[2]] : [args[1]];
+  return slots.filter((n): n is Node => n?.type === "identifier").map((n) => n.text);
+}
+
 function goAssertionSubject(assertion: Node, testingParams: Set<string>): Node | null {
   const sel = callFunctionSelector(assertion);
   const name = sel?.name ?? assertion.childForFieldName("function")?.text;
@@ -870,9 +880,41 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
     }
   };
   const processBlock = (block: Node, testName: string, testingParams: Set<string>, shadowed: Set<string>): void => {
+    // ONE-HOP block-local dataflow: a standalone `x, err := F(...)` statement is
+    // credited when a LATER statement in the SAME block checks a declared name
+    // (if-fail condition or assert subject). This covers the dominant real-Go
+    // idiom the if-initializer shape misses. Discipline kept: single product
+    // call per statement (goShortVarCalls), last write wins, plain reassignment
+    // invalidates, never crosses block boundaries. Metadata only — the dynamic
+    // oracle still re-verifies every edge before anything is Proven.
+    const pending = new Map<string, Array<{ callee: string; qualifier?: string; via: "free" | "qualified" }>>();
+    // Deferred pending credits: witness lines are collected per call and flushed
+    // after the block — one witness keeps its exact line (subtest binding),
+    // several witnesses drop the line (the oracle's frame-line gate must never
+    // refuse a real kill firing at a sibling check).
+    const pendingHits = new Map<
+      string,
+      { assertion: TreeSitterGoProofCall["assertion"]; calls: Array<{ callee: string; qualifier?: string; via: "free" | "qualified" }>; lines: Set<number> }
+    >();
+    const hitPending = (
+      assertion: TreeSitterGoProofCall["assertion"],
+      calls: Array<{ callee: string; qualifier?: string; via: "free" | "qualified" }>,
+      line: number | undefined
+    ): void => {
+      for (const c of calls) {
+        const key = `${assertion}|${c.qualifier ?? ""}|${c.callee}`;
+        const hit = pendingHits.get(key) ?? { assertion, calls: [c], lines: new Set<number>() };
+        if (line !== undefined) hit.lines.add(line);
+        pendingHits.set(key, hit);
+      }
+    };
     for (const stmt of blockStatements(block)) {
       for (const assertion of goAssertionCalls(stmt, assertLocals, dotAssertMethods, shadowed)) {
-        add(testName, shadowed, "assert_helper", singleGoProductCallIn(goAssertionSubject(assertion, testingParams)), assertion.startPosition.row + 1);
+        const subject = goAssertionSubject(assertion, testingParams);
+        add(testName, shadowed, "assert_helper", singleGoProductCallIn(subject), assertion.startPosition.row + 1);
+        for (const argName of goAssertionIdentifierArgs(assertion, testingParams)) {
+          if (pending.has(argName)) hitPending("assert_helper", pending.get(argName)!, assertion.startPosition.row + 1);
+        }
       }
       if (stmt.type === "if_statement" && hasGoTestingFailure(stmt.childForFieldName("consequence"), testingParams)) {
         const condition = stmt.childForFieldName("condition");
@@ -883,6 +925,9 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
         const init = stmt.childForFieldName("initializer");
         const initCalls = init ? goShortVarCalls(init) : null;
         if (initCalls && containsIdentifier(condition, initCalls.names)) add(testName, shadowed, "testing_fail", initCalls.calls, failLine);
+        for (const [name, calls] of pending) {
+          if (containsIdentifier(condition, new Set([name]))) hitPending("testing_fail", calls, failLine);
+        }
       }
       for (const child of namedChildren(stmt)) {
         if (child.type === "block") processBlock(child, testName, testingParams, shadowed);
@@ -892,6 +937,20 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
         const subTestName = subtest.subName ? `${testName}/${subtest.subName}` : testName;
         processBlock(subtest.body, subTestName, subtest.testingParams, shadowed);
       }
+      // Record declarations AFTER uses: a declaration is never its own check.
+      const sv = stmt.type === "short_var_declaration" ? goShortVarCalls(stmt) : null;
+      if (sv) {
+        for (const name of sv.names) pending.set(name, sv.calls);
+      } else if (stmt.type === "assignment_statement") {
+        // Plain reassignment kills the binding — the checked value is no longer F's.
+        const reassigned = new Set<string>();
+        collectNames(stmt.childForFieldName("left") ?? stmt.namedChild(0), reassigned);
+        for (const name of reassigned) pending.delete(name);
+      }
+    }
+    for (const hit of pendingHits.values()) {
+      const line = hit.lines.size === 1 ? [...hit.lines][0] : undefined;
+      add(testName, shadowed, hit.assertion, hit.calls, line);
     }
   };
   const processSuiteBlock = (block: Node, testName: string, receiver: string, shadowed: Set<string>): void => {
