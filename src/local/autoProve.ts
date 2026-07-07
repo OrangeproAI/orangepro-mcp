@@ -23,6 +23,7 @@ import { buildProvider } from "./generate/providers.js";
 import { resolveContained } from "./reprove/paths.js";
 import { buildRtm } from "./rtm.js";
 import { loadLedger } from "./ledger.js";
+import { reportProgress } from "./util/progress.js";
 import { loadGraph, workspacePaths } from "./workspace.js";
 import { systemClock } from "./util/time.js";
 import { redactSecrets } from "./util/redact.js";
@@ -802,6 +803,19 @@ function proveExistingAssociatedTests(
     // target references node:sqlite. Makes the baseline runnable only; never mints Proven.
     const testEnv = isGo || isJava || isPython ? undefined : experimentalSqliteTestEnv(reader, targetFileRel);
     const displayTest = nativeTestRun ?? proofTestRel;
+    // G5: name the plan before the attempt — detected runner/selector + target —
+    // so a detection miss is a visible, named thing instead of a mysterious 0.
+    reportProgress(
+      `proof plan: ${symId} → ${
+        isGo
+          ? `go test -run '${nativeTestRun}'`
+          : isJava
+            ? `mvn test -Dtest=${nativeTestRun}`
+            : isPython
+              ? `pytest ${displayTest}`
+              : `js test file ${displayTest}`
+      }`
+    );
     let result: ProveLoopResult;
     try {
       result = proveLoop(
@@ -1071,6 +1085,8 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
 
       // R-2: inject the node:sqlite env profile when the TARGET source references the builtin.
       const testEnv = experimentalSqliteTestEnv(reader, targetFileRel);
+      // G5: plan line for the generated-test attempt (runner from the run hint).
+      reportProgress(`proof plan: ${hint.prove_run.args.target_symbol} → ${hint.prove_run.args.runner ?? "auto"} on ${writeRel}`);
       let result: ProveLoopResult;
       try {
         result = proveLoop(
