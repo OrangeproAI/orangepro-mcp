@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "baseUrl": "./src",
+    "paths": {
+      "@app/*": ["app/*"],
+      "@vendor/*": ["../node_modules/@vendor/*"]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@app/*": ["src/*"],
+      "@pkg/orders": ["packages/orders/index.ts"]
+    },
+    "target": "ES2022",
+    "jsx": "preserve",
+    "allowJs": true,
+    "strict": true
+  }
+}

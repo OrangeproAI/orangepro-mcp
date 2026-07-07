@@ -1,0 +1,11 @@
+{
+  "name": "@wspkg/b",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./extra": "./dist/extra.js"
+  }
+}

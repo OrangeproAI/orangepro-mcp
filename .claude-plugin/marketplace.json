@@ -1,0 +1,18 @@
+{
+  "name": "orangepro",
+  "description": "OrangePro local evidence graph and grounded test-generation tools.",
+  "owner": {
+    "name": "OrangePro"
+  },
+  "plugins": [
+    {
+      "name": "orangepro",
+      "source": "./plugins/orangepro",
+      "description": "Find behavioral test gaps, generate grounded tests, and re-prove them through the local OrangePro MCP server.",
+      "version": "0.1.0",
+      "author": {
+        "name": "OrangePro"
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+---
+description: Guidelines for using the OrangePro MCP tools to find behavioral test gaps and generate grounded tests.
+globs:
+alwaysApply: true
+---
+
+# OrangePro
+
+Use OrangePro before writing tests when the user asks for coverage, behavioral gaps, generated tests, or PR test impact.
+
+## Workflow
+
+1. Call `orangepro_start` for the current checkout.
+2. For PR work, use `orangepro_generate_tests` with `base_ref=main`.
+3. For baseline gaps, use `orangepro_find_test_gaps`, choose a high-priority gap, then call `orangepro_generate_tests`.
+4. Write only tests that include `run_hints`.
+5. Run the suggested command from the owning package directory.
+6. After a passing run, call the returned `prove_run` args for Dynamically Proven. Use `record_run` only for static diagnostics.
+7. Report status as Proven, Reproven, Runtime-covered, Associated signal, or No link.
+
+Drafts are context, not runnable claims. Associated signal and AI links are not Proven.

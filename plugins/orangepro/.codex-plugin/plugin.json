@@ -1,0 +1,26 @@
+{
+  "name": "orangepro",
+  "version": "0.1.0",
+  "description": "OrangePro local evidence graph, runtime coverage, and grounded test-generation MCP tools.",
+  "author": {
+    "name": "OrangePro"
+  },
+  "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
+  "repository": "https://github.com/OrangeproAI/orangepro-mcp",
+  "license": "MIT",
+  "keywords": ["orangepro", "mcp", "coverage", "test-generation", "evidence-graph"],
+  "interface": {
+    "displayName": "OrangePro",
+    "shortDescription": "Find behavioral test gaps and generate grounded tests.",
+    "longDescription": "OrangePro runs locally as an MCP server. It builds an evidence graph, ingests repo-native runtime coverage, exposes Proven / Runtime-covered / Associated / No-link status, and returns grounded test drafts with run hints. Model keys stay in your environment; no model is pinned by the plugin.",
+    "developerName": "OrangePro",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": [
+      "Run OrangePro on this repo and show test gaps.",
+      "Generate grounded tests for this PR with OrangePro.",
+      "Use OrangePro to write and run one missing test."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

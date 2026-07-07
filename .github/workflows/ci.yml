@@ -1,0 +1,235 @@
+# CI gates for orangepro-mcp.
+#
+# Keep wall-clock low by running independent proof-profile suites in parallel.
+# Privacy remains a required gate: test:rest includes export/package privacy tests,
+# and the smoke job verifies the offline analyze -> report/export path.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-typecheck:
+    name: build + typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+
+  rest-privacy:
+    name: rest tests + privacy/package gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:rest
+
+  tsjs-proof:
+    name: TS/JS proof spike
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:spike:core
+
+  tsjs-monorepo:
+    name: TS/JS monorepo proof isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:spike:mono
+
+  go-spike:
+    name: Go proof spike ${{ matrix.part }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: false
+      - run: go version
+      - run: npm ci
+      - run: npm run test:spike:go:${{ matrix.part }}
+
+  go-integration-mint:
+    name: Go proof integration mint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: false
+      - run: go version
+      - run: npm ci
+      - run: npm run test:integration:go:mint
+
+  go-integration-auto:
+    name: Go proof integration auto-drive
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: false
+      - run: go version
+      - run: npm ci
+      - run: npm run test:integration:go:auto:slow
+
+  java-spike:
+    name: Java proof spike
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+      - run: java -version && mvn -v
+      - run: npm ci
+      - run: npm run test:spike:java
+
+  java-integration:
+    name: Java proof integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+      - run: java -version && mvn -v
+      - run: npm ci
+      - run: npm run test:integration:java:1
+      - run: npm run test:integration:java:2
+      - run: npm run test:integration:java:3
+
+  python-proof:
+    name: Python proof profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: npm ci
+      - run: python3 -m pip install pytest
+      - run: python3 -m pytest --version
+      - run: npm run test:spike:python
+
+  smoke-package:
+    name: smoke + npm package surface
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/smoke-local.mjs
+      - run: npm pack --dry-run
+
+  ci-ok:
+    name: ci-ok (all lanes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - build-typecheck
+      - rest-privacy
+      - tsjs-proof
+      - tsjs-monorepo
+      - go-spike
+      - go-integration-mint
+      - go-integration-auto
+      - java-spike
+      - java-integration
+      - python-proof
+      - smoke-package
+    if: always()
+    steps:
+      - run: |
+          test "${{ needs.build-typecheck.result }}" = "success"
+          test "${{ needs.rest-privacy.result }}" = "success"
+          test "${{ needs.tsjs-proof.result }}" = "success"
+          test "${{ needs.tsjs-monorepo.result }}" = "success"
+          test "${{ needs.go-spike.result }}" = "success"
+          test "${{ needs.go-integration-mint.result }}" = "success"
+          test "${{ needs.go-integration-auto.result }}" = "success"
+          test "${{ needs.java-spike.result }}" = "success"
+          test "${{ needs.java-integration.result }}" = "success"
+          test "${{ needs.python-proof.result }}" = "success"
+          test "${{ needs.smoke-package.result }}" = "success"

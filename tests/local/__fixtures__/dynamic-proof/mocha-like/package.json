@@ -1,0 +1,11 @@
+{
+  "name": "opro-mocha-like",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "mocha": "*"
+  },
+  "scripts": {
+    "test": "mocha test/*.test.js"
+  }
+}

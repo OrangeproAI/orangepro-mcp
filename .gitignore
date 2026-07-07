@@ -1,0 +1,25 @@
+node_modules/
+/node_modules
+dist/
+.env
+.env.*
+coverage/
+.DS_Store
+*.log
+.mcp.json
+.orangepro/
+.orangeproignore
+orangepro-evidence-pack.json
+orangepro-evidence-pack.md
+/tmp-validation/
+# Internal validation utilities are kept private and never committed.
+scripts/internal/
+
+# Internal-only artifacts are not part of the public local kit checkout.
+private/
+
+# Local agentic-stack / assistant tooling — untracked scaffolding, never part of the repo.
+.agent/
+.claude/
+.omc/
+.paul/

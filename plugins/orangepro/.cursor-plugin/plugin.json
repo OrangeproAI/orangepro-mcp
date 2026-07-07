@@ -1,0 +1,14 @@
+{
+  "name": "OrangePro",
+  "version": "0.1.0",
+  "description": "Find behavioral test gaps, generate grounded tests, and re-prove them through the local OrangePro MCP server.",
+  "author": {
+    "name": "OrangePro"
+  },
+  "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
+  "repository": "https://github.com/OrangeproAI/orangepro-mcp",
+  "license": "MIT",
+  "keywords": ["orangepro", "mcp", "coverage", "test-generation", "evidence-graph"],
+  "rules": "rules",
+  "mcpServers": ".mcp.json"
+}

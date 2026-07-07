@@ -1,0 +1,9 @@
+{
+  "name": "generated-polyglot-fixture",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "typescript": "^5.8.3"
+  }
+}

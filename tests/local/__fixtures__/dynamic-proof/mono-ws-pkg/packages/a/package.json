@@ -1,0 +1,10 @@
+{
+  "name": "@wspkg/a",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@wspkg/b": "*",
+    "@wspkg/root-entry": "*",
+    "@wspkg/src-only": "*"
+  }
+}

@@ -1,0 +1,223 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
+import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
+import { rankRiskGaps } from "../../src/local/score/risk.js";
+
+const dirs: string[] = [];
+
+afterEach(() => {
+  while (dirs.length) {
+    const d = dirs.pop();
+    if (d) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+function graph(root = ""): LocalGraph {
+  return {
+    schema_version: LOCAL_GRAPH_SCHEMA_VERSION,
+    workspace: { name: "risk", root, root_hash: "sha256:x", source_upload_policy: "metadata_only" },
+    created_at: "",
+    updated_at: "",
+    sources: [],
+    nodes: [],
+    edges: [],
+    candidate_edges: [],
+    generation_runs: [],
+    generated_tests: [],
+    manifest: { generated_at: "", git: null, files: {} }
+  };
+}
+
+function symbol(id: string, title: string, file: string, eligible = true): LocalGraph["nodes"][number] {
+  return makeNode({
+    kind: "CodeSymbol",
+    external_id: id,
+    title,
+    properties: { file },
+    evidence_strength: "hard",
+    review_status: "auto_detected",
+    confidence: 1,
+    provenance: { source_scope_id: "src", source_ref: file },
+    denominator_eligible: eligible,
+    denominator_reason: eligible ? "Exported symbol — countable behavior surface." : "Non-product symbol."
+  });
+}
+
+function testCase(id: string): LocalGraph["nodes"][number] {
+  return makeNode({
+    kind: "TestCase",
+    external_id: id,
+    title: id,
+    properties: { file: id.replace(/^test:/, "") },
+    evidence_strength: "hard",
+    review_status: "auto_detected",
+    confidence: 1,
+    provenance: { source_scope_id: "test", source_ref: id.replace(/^test:/, "") }
+  });
+}
+
+function edge(from: string, to: string, relationship_type: "CALLS" | "IMPORTS" | "TESTED_BY" | "COVERS"): LocalGraph["edges"][number] {
+  return makeEdge({
+    from_external_id: from,
+    to_external_id: to,
+    relationship_type,
+    evidence_strength: "hard",
+    review_status: "auto_detected",
+    confidence: 1,
+    provenance: { source_scope_id: "graph", source_ref: "graph" }
+  });
+}
+
+function candidate(from: string, to: string, relationship_type: "MAY_BE_TESTED_BY" | "MAY_COVER" | "MAY_RELATE_TO"): LocalGraph["candidate_edges"][number] {
+  return makeCandidateEdge({
+    from_external_id: from,
+    to_external_id: to,
+    relationship_type,
+    evidence_strength: "candidate",
+    reason: "test candidate",
+    confidence: 0.5,
+    provenance: { source_scope_id: "graph", source_ref: "graph" }
+  });
+}
+
+// Mirrors `candidate()` but with the AI-lane shape: evidence_strength "weak" + review_status
+// "ai_suggested" (what src/local/aiGraph/links.ts emits). Used to assert AI guesses never count as
+// a real "associated" test signal in the risk ranking (#105 invariant: AI never poses as evidence).
+function aiCandidate(from: string, to: string, relationship_type: "MAY_BE_TESTED_BY" | "MAY_COVER" | "MAY_RELATE_TO"): LocalGraph["candidate_edges"][number] {
+  const edge = makeCandidateEdge({
+    from_external_id: from,
+    to_external_id: to,
+    relationship_type,
+    evidence_strength: "weak",
+    reason: "ai suggested",
+    confidence: 0.5,
+    provenance: { source_scope_id: "ai", source_ref: "ai" }
+  });
+  edge.review_status = "ai_suggested";
+  return edge;
+}
+
+describe("rankRiskGaps", () => {
+  it("ranks only unconfirmed denominator symbols and treats risk as prioritization", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/api/users.ts#handleUser", "handleUser", "src/api/users.ts"),
+      symbol("sym:src/core/save.ts#saveUser", "saveUser", "src/core/save.ts"),
+      symbol("sym:src/core/caller.ts#caller", "caller", "src/core/caller.ts"),
+      symbol("sym:src/core/confirmed.ts#confirmed", "confirmed", "src/core/confirmed.ts"),
+      symbol("sym:src/test/helpers.ts#helper", "helper", "src/test/helpers.ts", false),
+      testCase("test:confirmed.test.ts")
+    ];
+    g.edges = [
+      edge("sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveUser", "CALLS"),
+      edge("src/web/page.ts", "src/api/users.ts", "IMPORTS"),
+      edge("sym:src/core/confirmed.ts#confirmed", "test:confirmed.test.ts", "TESTED_BY"),
+      edge("sym:src/core/caller.ts#caller", "sym:src/test/helpers.ts#helper", "CALLS")
+    ];
+
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    // ORS = P × I × D. handleUser (entry point, high impact) and caller (fan-out, high probability)
+    // both outrank saveUser. Confirmed and non-eligible symbols are excluded.
+    expect(ranked.map((r) => r.id)).toEqual(["sym:src/api/users.ts#handleUser", "sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveUser"]);
+    expect(ranked[0]).toMatchObject({ entry_point: true, incoming_refs: 1, git_churn: 0 });
+    expect(ranked[0].reasons).toContain("near an API/route/handler entry point");
+    expect(ranked[0].reasons[0]).toMatch(/^ORS \d+ = P\d+ × I\d+ × D\d+$/);
+    expect(ranked[0].detection_difficulty).toBe(10);
+    expect(ranked.some((r) => r.id.includes("confirmed"))).toBe(false);
+    expect(ranked.some((r) => r.id.includes("helper"))).toBe(false);
+  });
+
+  it("derives detection difficulty from proof/association tier, not symbol extraction strength", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/api/orders.ts#POST", "POST", "src/api/orders.ts"),
+      symbol("sym:src/api/payments.ts#POST", "POST", "src/api/payments.ts"),
+      testCase("test:payments.test.ts")
+    ];
+    // Analyzer extraction may be hard evidence, but that is not proof or association.
+    g.nodes[0].evidence_strength = "hard";
+    g.nodes[1].evidence_strength = "hard";
+    g.candidate_edges = [candidate("sym:src/api/payments.ts#POST", "test:payments.test.ts", "MAY_BE_TESTED_BY")];
+
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const byId = new Map(ranked.map((r) => [r.id, r]));
+
+    expect(byId.get("sym:src/api/orders.ts#POST")?.detection_difficulty).toBe(10);
+    expect(byId.get("sym:src/api/orders.ts#POST")?.integration_signal).toBe("none");
+    expect(byId.get("sym:src/api/payments.ts#POST")?.detection_difficulty).toBe(5);
+    expect(byId.get("sym:src/api/payments.ts#POST")?.integration_signal).toBe("associated");
+  });
+
+  // REGRESSION (#147 review): the proven set (confirmedBehaviorIds) filters evidence_strength==="hard",
+  // but associatedBehaviorIds filters neither review_status nor evidence_strength — so an AI-lane edge
+  // (MAY_RELATE_TO / weak / ai_suggested) leaks into the "associated" D-tier and halves a behavior's
+  // risk (5 vs 10), de-prioritizing it in "what to test first" based on an UNVERIFIED AI guess. That
+  // violates the #105 invariant (AI never poses as evidence).
+  it("does NOT treat an AI-suggested candidate edge as an 'associated' test signal", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/api/payments.ts#POST", "POST", "src/api/payments.ts"),
+      testCase("test:payments.test.ts")
+    ];
+    g.nodes[0].evidence_strength = "hard";
+    g.candidate_edges = [aiCandidate("sym:src/api/payments.ts#POST", "test:payments.test.ts", "MAY_RELATE_TO")];
+
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const byId = new Map(ranked.map((r) => [r.id, r]));
+
+    expect(byId.get("sym:src/api/payments.ts#POST")?.detection_difficulty).toBe(10);
+    expect(byId.get("sym:src/api/payments.ts#POST")?.integration_signal).toBe("none");
+  });
+
+  it("keeps the legacy linear formula available behind an explicit option", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/api/users.ts#handleUser", "handleUser", "src/api/users.ts"),
+      symbol("sym:src/core/save.ts#saveUser", "saveUser", "src/core/save.ts"),
+      symbol("sym:src/core/caller.ts#caller", "caller", "src/core/caller.ts")
+    ];
+    g.edges = [
+      edge("sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveUser", "CALLS"),
+      edge("src/web/page.ts", "src/api/users.ts", "IMPORTS")
+    ];
+
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "", legacy: true });
+
+    expect(ranked.map((r) => r.id)).toEqual(["sym:src/api/users.ts#handleUser", "sym:src/core/save.ts#saveUser", "sym:src/core/caller.ts#caller"]);
+    expect(ranked[0].risk_score).toBeGreaterThan(ranked[1].risk_score);
+    expect(ranked[0].probability).toBeUndefined();
+    expect(ranked[0].reasons.join(" ")).not.toContain("ORS");
+  });
+
+  it("uses recent git churn when a repository root is available", () => {
+    const root = mkdtempSync(join(tmpdir(), "opro-risk-"));
+    dirs.push(root);
+    mkdirSync(join(root, "src/api"), { recursive: true });
+    writeFileSync(join(root, "src/api/orders.ts"), "export function handleOrder() {\n  return 1;\n}\n");
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], {
+      cwd: root,
+      stdio: "ignore",
+      env: { ...process.env, GIT_AUTHOR_NAME: "OrangePro", GIT_AUTHOR_EMAIL: "opro@example.com", GIT_COMMITTER_NAME: "OrangePro", GIT_COMMITTER_EMAIL: "opro@example.com" }
+    });
+    writeFileSync(join(root, "src/api/orders.ts"), "export function handleOrder() {\n  return 2;\n}\n");
+    execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "change order"], {
+      cwd: root,
+      stdio: "ignore",
+      env: { ...process.env, GIT_AUTHOR_NAME: "OrangePro", GIT_AUTHOR_EMAIL: "opro@example.com", GIT_COMMITTER_NAME: "OrangePro", GIT_COMMITTER_EMAIL: "opro@example.com" }
+    });
+
+    const g = graph(root);
+    g.nodes = [symbol("sym:src/api/orders.ts#handleOrder", "handleOrder", "src/api/orders.ts")];
+
+    const [gap] = rankRiskGaps(g, { limit: 1 });
+    expect(gap.git_churn).toBeGreaterThan(0);
+    expect(gap.reasons.join(" ")).toContain("git churn");
+  });
+});

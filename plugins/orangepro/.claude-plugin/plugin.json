@@ -1,0 +1,10 @@
+{
+  "name": "orangepro",
+  "description": "OrangePro local evidence graph, runtime coverage, and grounded test-generation MCP tools.",
+  "version": "0.1.0",
+  "author": {
+    "name": "OrangePro"
+  },
+  "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
+  "mcpServers": "./.mcp.json"
+}

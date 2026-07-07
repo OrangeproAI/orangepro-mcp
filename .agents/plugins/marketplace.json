@@ -1,0 +1,20 @@
+{
+  "name": "orangepro",
+  "interface": {
+    "displayName": "OrangePro"
+  },
+  "plugins": [
+    {
+      "name": "orangepro",
+      "source": {
+        "source": "local",
+        "path": "./plugins/orangepro"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

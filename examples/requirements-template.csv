@@ -1,0 +1,4 @@
+behavior_name,description,acceptance_criteria,actor_or_role,priority_or_risk,source_ref,screen_api_service_or_job,known_bugs_or_incidents
+User can log in with valid credentials,Authenticated users reach their dashboard,A valid email and password returns a session token and redirects to the dashboard,end user,high,docs/auth.md,POST /api/login,Session not cleared on logout (#123)
+Invalid login is rejected,Bad credentials are refused without revealing which field failed,An invalid password returns 401 with a generic error and no session token,end user,high,docs/auth.md,POST /api/login,
+Password reset token is single-use and expiring,Reset links must not be replayable,An expired or already-used reset token is rejected with a clear error,end user,medium,docs/auth.md,POST /api/password-reset,Reset token reuse was allowed (#145)
