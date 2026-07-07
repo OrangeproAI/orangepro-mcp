@@ -28,7 +28,7 @@ For a direct OpenCode config, add this server under `mcp`:
     "orangepro-local": {
       "enabled": true,
       "command": "npx",
-      "args": ["-y", "-p", "@orangepro/orangepro-mcp@latest", "opro", "mcp"]
+      "args": ["-y", "@orangepro/orangepro-mcp@latest", "mcp"]
     }
   }
 }

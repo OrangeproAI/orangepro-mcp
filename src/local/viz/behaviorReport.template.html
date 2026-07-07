@@ -365,7 +365,7 @@ function tierOf(b){
 }
 function ctaOf(b){
   if(b.tier==="proven")return"This method is Dynamically Proven. A test breaks if you mutate it. Keep it green.";
-  if(b.tier==="assoc")return"A test calls this method, but doesn't prove breakage. Run <code>npx -y @orangepro/orangepro-mcp opro start</code> to attempt dynamic proof.";
+  if(b.tier==="assoc")return"A test calls this method, but doesn't prove breakage. Run <code>npx -y @orangepro/orangepro-mcp start</code> to attempt dynamic proof.";
   if(b.tier==="none"&&b.reachable)return"This method is reachable from a tested path but has no direct test. Write one.";
   return"Nothing in your test suite touches this method. Write a test that calls it and asserts the output.";
 }
