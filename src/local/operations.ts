@@ -261,6 +261,12 @@ export interface DynamicProofResult {
   ledger_path: string;
   record: LedgerRecord;
   oracle: DynamicProofOracleSummary;
+  /**
+   * G2 (informational): the module root the proof sandboxed, only when it
+   * differs from the analyzed source root. Display/diagnostics only — never
+   * part of the certificate or the ledger record.
+   */
+  module_root?: string;
 }
 
 /** A trusted-local repo-prep command run in the source checkout before the oracle. */
@@ -386,9 +392,24 @@ function dynamicProofSpikePath(): string {
  * never sandboxes a directory outside the trusted checkout.
  * ponytail: nearest-ancestor go.mod; multi-module edge cases (nested/replace) resolve to G-INT-3.
  */
-function goModuleRoot(sourceRoot: string, targetRel: string): string {
+/**
+ * G2 — confinement bound for module-root walk-up: the walk may pass ABOVE the
+ * analyzed source path (fixing `opro start ./subpkg` inside a bigger module)
+ * but never escapes the INVOCATION root the user ran opro from. If the analyzed
+ * path lies outside the invocation root, keep the old sourceRoot confinement.
+ * Discovery/scoping only — the proof gate is untouched, and when the chosen
+ * module root differs from the analyzed path it is named in progress output
+ * and on the result (module_root).
+ */
+function moduleRootBound(sourceRoot: string, workspaceRoot: string): string {
+  const src = resolve(sourceRoot);
+  const ws = resolve(workspaceRoot);
+  return src === ws || src.startsWith(ws + sep) ? ws : src;
+}
+
+function goModuleRoot(sourceRoot: string, targetRel: string, workspaceRoot: string): string {
   let dir = dirname(resolve(sourceRoot, targetRel));
-  const stop = resolve(sourceRoot);
+  const stop = moduleRootBound(sourceRoot, workspaceRoot);
   for (;;) {
     if (existsSync(join(dir, "go.mod"))) return dir;
     if (dir === stop) break;
@@ -396,7 +417,7 @@ function goModuleRoot(sourceRoot: string, targetRel: string): string {
     if (parent === dir) break;
     dir = parent;
   }
-  throw new Error(`No go.mod found for Go target ${targetRel} under ${sourceRoot}.`);
+  throw new Error(`No go.mod found for Go target ${targetRel} under ${stop}.`);
 }
 
 /**
@@ -407,9 +428,9 @@ function goModuleRoot(sourceRoot: string, targetRel: string): string {
  * spike never sandboxes a directory outside the trusted checkout.
  * ponytail: nearest-ancestor build file; multi-module reactor edge cases resolve to J-INT-3.
  */
-function javaModuleRoot(sourceRoot: string, targetRel: string): string {
+function javaModuleRoot(sourceRoot: string, targetRel: string, workspaceRoot: string): string {
   let dir = dirname(resolve(sourceRoot, targetRel));
-  const stop = resolve(sourceRoot);
+  const stop = moduleRootBound(sourceRoot, workspaceRoot);
   for (;;) {
     if (existsSync(join(dir, "pom.xml")) || existsSync(join(dir, "build.gradle")) || existsSync(join(dir, "build.gradle.kts"))) {
       return dir;
@@ -419,7 +440,7 @@ function javaModuleRoot(sourceRoot: string, targetRel: string): string {
     if (parent === dir) break;
     dir = parent;
   }
-  throw new Error(`No pom.xml or build.gradle found for Java target ${targetRel} under ${sourceRoot}.`);
+  throw new Error(`No pom.xml or build.gradle found for Java target ${targetRel} under ${stop}.`);
 }
 
 /** Route to the per-language spike. TS/JS keeps the original path; native profiles use their own mechanisms. */
@@ -1362,6 +1383,31 @@ export function opRecordRun(root: string, opts: RecordRunOptions, deps: Operatio
   });
 }
 
+/**
+ * G2 — Python sandbox NARROWING: the nearest pyproject.toml/setup.py/setup.cfg
+ * ancestor of the target, confined to sourceRoot, used only when the test also
+ * lives inside it. Falls back to sourceRoot (today's behavior) otherwise —
+ * this only ever shrinks the copied sandbox, never widens or breaks it.
+ */
+function pythonModuleRoot(sourceRoot: string, targetRel: string, testRel: string): string {
+  const stop = resolve(sourceRoot);
+  let dir = dirname(resolve(sourceRoot, targetRel));
+  let found: string | null = null;
+  for (;;) {
+    if (existsSync(join(dir, "pyproject.toml")) || existsSync(join(dir, "setup.py")) || existsSync(join(dir, "setup.cfg"))) {
+      found = dir;
+      break;
+    }
+    if (dir === stop) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (!found || found === stop) return stop;
+  const testAbs = resolve(sourceRoot, testRel);
+  return testAbs === found || testAbs.startsWith(found + sep) ? found : stop;
+}
+
 export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: OperationDeps = defaultDeps()): DynamicProofResult {
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
@@ -1387,6 +1433,7 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
   // DynamicProofOracleSummary shape. Everything from `closed` onward (the trust gate,
   // the cert, appendLedgerRecord, the return summary) is language-agnostic and unchanged.
   let oracle: DynamicProofOracleSummary;
+  let proofModuleRoot: string | undefined;
   let testRel: string;
   let replacementMode: string;
   let runner: string;
@@ -1398,7 +1445,11 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     if (!/^\^.+\$$/.test(opts.test_run)) {
       throw new Error("prove --test-run must be a fully-anchored test name, e.g. '^TestName$'.");
     }
-    const goRoot = goModuleRoot(sourceRoot, targetRel);
+    const goRoot = goModuleRoot(sourceRoot, targetRel, root);
+    if (goRoot !== resolve(sourceRoot)) {
+      proofModuleRoot = goRoot;
+      reportProgress(`proof scope: Go module root ${goRoot} (above the analyzed path)`);
+    }
     const args = [
       "--root",
       goRoot,
@@ -1434,7 +1485,11 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     }
     const testClass = opts.test_run.slice(0, hash);
     const testMethod = opts.test_run.slice(hash + 1);
-    const javaRoot = javaModuleRoot(sourceRoot, targetRel);
+    const javaRoot = javaModuleRoot(sourceRoot, targetRel, root);
+    if (javaRoot !== resolve(sourceRoot)) {
+      proofModuleRoot = javaRoot;
+      reportProgress(`proof scope: Java module root ${javaRoot} (above the analyzed path)`);
+    }
     const args = [
       "--root",
       javaRoot,
@@ -1472,13 +1527,20 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     if ((opts.test_env?.length ?? 0) > 0) {
       throw new Error("prove --test-env is not supported for Python targets yet.");
     }
+    // G2: narrow the copied sandbox to the owning Python project when both the
+    // target and the test live inside it (bounded copy — no full-repo OOM).
+    const pyRoot = pythonModuleRoot(sourceRoot, targetRel, testRel);
+    if (pyRoot !== resolve(sourceRoot)) {
+      proofModuleRoot = pyRoot;
+      reportProgress(`proof scope: Python project root ${pyRoot} (narrowed from the analyzed path)`);
+    }
     const args = [
       "--root",
-      sourceRoot,
+      pyRoot,
       "--test",
-      testRel,
+      relative(pyRoot, resolve(sourceRoot, testRel)).split(sep).join("/"),
       "--target",
-      targetRel,
+      relative(pyRoot, resolve(sourceRoot, targetRel)).split(sep).join("/"),
       "--func",
       method,
       "--mode",
@@ -1487,7 +1549,7 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     ];
     if (opts.timeout_ms !== undefined) args.push("--timeout-ms", String(opts.timeout_ms));
     const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, {
-      cwd: sourceRoot,
+      cwd: pyRoot,
       scriptPath: dynamicProofSpikePathFor("python")
     });
     oracle = parseDynamicProofJson(run.stdout, run.stderr);
@@ -1564,6 +1626,7 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
   });
   return {
     ...result,
+    ...(proofModuleRoot ? { module_root: proofModuleRoot } : {}),
     oracle: {
       status: oracle.status,
       proven: oracle.proven,
