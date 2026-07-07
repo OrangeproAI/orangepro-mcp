@@ -35,6 +35,7 @@ import (
 	"go/printer"
 	"go/token"
 	"os"
+	"strings"
 )
 
 // fail prints a stable, machine-readable marker plus a human message and exits
@@ -104,6 +105,15 @@ func main() {
 
 	if *mode == "sentinel" {
 		target.Body = sentinelBody(results)
+		// The sentinel body can orphan imports the original body used (Go
+		// rejects unused imports, so the mutant would fail to BUILD and the
+		// oracle would refuse — an honest but useless verdict for most real
+		// functions). Rewrite now-unused imports to blank imports: package
+		// init side effects are preserved, no behavior is added, and the
+		// repair is fail-safe in both directions — over-blanking a used
+		// import still fails the build (refusal, never proof), and a missed
+		// unused import is exactly today's behavior.
+		blankUnusedImports(astFile)
 	}
 	// equivalent mode: leave target.Body untouched (semantically identical).
 
@@ -114,6 +124,39 @@ func main() {
 	}
 	if err := os.WriteFile(dst, buf.Bytes(), 0o644); err != nil {
 		fail(2, "write error: %v", err)
+	}
+}
+
+// blankUnusedImports renames imports whose package qualifier is no longer
+// referenced anywhere in the file to blank imports (`_ "path"`). Dot imports
+// and existing blank imports are left untouched. Qualifier detection is
+// syntactic (selector bases), which over-approximates "used" — the safe
+// direction: we only ever blank an import nothing references.
+func blankUnusedImports(f *ast.File) {
+	used := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if id, ok := sel.X.(*ast.Ident); ok {
+				used[id.Name] = true
+			}
+		}
+		return true
+	})
+	for _, imp := range f.Imports {
+		if imp.Name != nil {
+			if imp.Name.Name == "_" || imp.Name.Name == "." {
+				continue
+			}
+			if !used[imp.Name.Name] {
+				imp.Name = ast.NewIdent("_")
+			}
+			continue
+		}
+		path := strings.Trim(imp.Path.Value, "\"")
+		base := path[strings.LastIndex(path, "/")+1:]
+		if !used[base] {
+			imp.Name = ast.NewIdent("_")
+		}
 	}
 }
 
