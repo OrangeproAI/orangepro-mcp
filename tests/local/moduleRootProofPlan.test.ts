@@ -104,6 +104,36 @@ describe("G2 — Go module-root walk-up (bounded by the invocation root)", () =>
   });
 });
 
+describe("G2 — Java module-root walk-up (bounded by the invocation root)", () => {
+  it("walks ABOVE the analyzed path to the invocation root's pom.xml", () => {
+    const ws = temp();
+    writeFileSync(
+      join(ws, "pom.xml"),
+      '<project><modelVersion>4.0.0</modelVersion><groupId>x</groupId><artifactId>m</artifactId><version>1</version></project>\n'
+    );
+    const source = join(ws, "svc");
+    mkdirSync(join(source, "src", "main", "java", "com", "example"), { recursive: true });
+    writeFileSync(
+      join(source, "src", "main", "java", "com", "example", "Calc.java"),
+      "package com.example;\n\npublic class Calc {\n  public int add(int a, int b) {\n    return a + b;\n  }\n}\n"
+    );
+    opInit(ws, deps);
+    opAnalyze(ws, { source }, deps);
+
+    const cap = capturing();
+    expect(() =>
+      opDynamicProof(
+        ws,
+        { target_symbol: "sym:src/main/java/com/example/Calc.java#Calc", source, test_run: "CalcTest#addsNumbers" },
+        { ...deps, dynamicProofRunner: cap.runner }
+      )
+    ).toThrow("CAPTURED-ARGS");
+    // The sandbox root is the pom.xml ABOVE the analyzed path — bounded at ws.
+    expect(flag(cap.args(), "--root")).toBe(resolve(ws));
+    expect(flag(cap.args(), "--target")).toBe("svc/src/main/java/com/example/Calc.java");
+  });
+});
+
 describe("G2 — Python sandbox narrowing (nearest project root, fail-safe)", () => {
   function pythonFixture(splitTest: boolean): { ws: string; source: string } {
     const ws = temp();
