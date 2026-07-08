@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 import { autoProve, isEligibleProvableTarget, javaTestForTarget } from "../../src/local/autoProve.js";
 import { opAnalyze, opInit, opProveLoop, opRtm } from "../../src/local/operations.js";
-import { loadGraph, workspacePaths } from "../../src/local/workspace.js";
+import { loadGraph, saveGraph, workspacePaths } from "../../src/local/workspace.js";
 import { preloadTreeSitter } from "../../src/local/analyze/treeSitter/engine.js";
 import { treeSitterLanguages } from "../../src/local/analyze/treeSitter/languages.js";
 import type { GraphNode, LocalGraph } from "../../src/local/graph/ontology.js";
@@ -50,6 +50,24 @@ function analyzedJava(fixture: string): { ws: string; source: string } {
   opInit(ws, deps);
   opAnalyze(ws, { source }, deps);
   return { ws, source };
+}
+
+function keepOnlyCodeTargets(ws: string, targetIds: string[]): void {
+  const keep = new Set(targetIds);
+  const graphPath = workspacePaths(ws).graphPath;
+  const graph = loadGraph(graphPath);
+  graph.nodes = graph.nodes.filter((n) => n.kind !== "CodeSymbol" || keep.has(n.external_id));
+  graph.edges = graph.edges.filter((e) => {
+    const fromCode = e.from_external_id.startsWith("sym:");
+    const toCode = e.to_external_id.startsWith("sym:");
+    return (!fromCode || keep.has(e.from_external_id)) && (!toCode || keep.has(e.to_external_id));
+  });
+  graph.candidate_edges = graph.candidate_edges.filter((e) => {
+    const fromCode = e.from_external_id.startsWith("sym:");
+    const toCode = e.to_external_id.startsWith("sym:");
+    return (!fromCode || keep.has(e.from_external_id)) && (!toCode || keep.has(e.to_external_id));
+  });
+  saveGraph(graphPath, graph);
 }
 
 // ── javaTestForTarget unit tests — no toolchain needed (pure graph resolution). ──
@@ -142,12 +160,13 @@ describe("isEligibleProvableTarget — Java methods only", () => {
 // ── auto-drive integration — needs Java + Maven. ──
 
 describe.skipIf(!MAVEN)("autoProve auto-drives Java to Dynamically Proven", () => {
-  it("mints DP≥1 for a Java single-return method automatically (no key, no explicit test_run) and does NOT prove an equivalent survivor or a refused shape", async () => {
+  it("mints DP≥1 for a Java single-return method automatically (no key, no explicit test_run)", async () => {
     const { ws } = analyzedJava("auto-drive");
+    keepOnlyCodeTargets(ws, [`${TARGET}#createTotal`]);
     expect(opRtm(ws, { format: "json" }).summary.proven).toBe(0);
 
     // NO provider key (env empty) → the existing-tests lane alone drives Java.
-    const res = await autoProve(ws, { autoLimit: 5 }, { ...deps, proveLoop: opProveLoop });
+    const res = await autoProve(ws, { autoLimit: 1 }, { ...deps, proveLoop: opProveLoop });
 
     expect(res.ran).toBe(true);
     expect(res.proven).toBeGreaterThanOrEqual(1);
@@ -159,18 +178,31 @@ describe.skipIf(!MAVEN)("autoProve auto-drives Java to Dynamically Proven", () =
     const createTotal = res.attempts.find((a) => a.target_symbol === `${TARGET}#createTotal`);
     expect(createTotal?.test_path).toBe("CheckoutServiceTest#createsTotal");
 
-    // No false Proven: an equivalent (sentinel-value-survives) method stays unproven.
-    const loadEqual = res.attempts.find((a) => a.target_symbol === `${TARGET}#loadEqual`);
-    expect(loadEqual?.classification).not.toBe("proven");
-    // No false Proven: a refused-shape method (two top-level returns) stays unproven.
-    const createChoice = res.attempts.find((a) => a.target_symbol === `${TARGET}#createChoice`);
-    expect(createChoice?.classification).not.toBe("proven");
-
     // RTM reflects exactly the one Java proof.
     const rtm = opRtm(ws, { format: "json" });
     expect(rtm.summary.proven).toBe(1);
     expect(rtm.rows.find((r) => r.code_symbol === `${TARGET}#createTotal`)?.evidence_tier).toBe("proven");
-    expect(rtm.rows.find((r) => r.code_symbol === `${TARGET}#loadEqual`)?.evidence_tier).not.toBe("proven");
-    expect(rtm.rows.find((r) => r.code_symbol === `${TARGET}#createChoice`)?.evidence_tier).not.toBe("proven");
+  }, 400000);
+
+  it("does not mint Proven for an equivalent survivor", async () => {
+    const { ws } = analyzedJava("auto-drive");
+    keepOnlyCodeTargets(ws, [`${TARGET}#loadEqual`]);
+
+    const res = await autoProve(ws, { autoLimit: 1 }, { ...deps, proveLoop: opProveLoop });
+
+    const loadEqual = res.attempts.find((a) => a.target_symbol === `${TARGET}#loadEqual`);
+    expect(loadEqual?.classification).not.toBe("proven");
+    expect(opRtm(ws, { format: "json" }).summary.proven).toBe(0);
+  }, 400000);
+
+  it("does not mint Proven for a refused-shape method", async () => {
+    const { ws } = analyzedJava("auto-drive");
+    keepOnlyCodeTargets(ws, [`${TARGET}#createChoice`]);
+
+    const res = await autoProve(ws, { autoLimit: 1 }, { ...deps, proveLoop: opProveLoop });
+
+    const createChoice = res.attempts.find((a) => a.target_symbol === `${TARGET}#createChoice`);
+    expect(createChoice?.classification).not.toBe("proven");
+    expect(opRtm(ws, { format: "json" }).summary.proven).toBe(0);
   }, 400000);
 });
