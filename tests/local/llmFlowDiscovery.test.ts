@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -298,7 +298,7 @@ function candidateMeta(): CandidateFlowMeta {
         rationale: `${MARKER} plausible signup path from endpoint metadata`,
         provenance: {
           source_scope_id: "ai:cachekey1",
-          source_ref: ".orangepro/ai/flows.json",
+          source_ref: ".orangepro/flows.json",
           detector: "ai_flows",
           model_provider: "fake",
           model_name: "fake-ai-flows",
@@ -532,9 +532,27 @@ describe("tier firewall — candidate flows are never evidence", () => {
 
     await opStart(root, { source: root }, { ...DEPS, aiProvider: provider });
 
+    expect(existsSync(join(root, ".orangepro", "flows.json"))).toBe(false);
     expect(existsSync(join(root, ".orangepro", "ai", "flows.json"))).toBe(false);
     const graph = loadGraph(workspacePaths(root).graphPath);
     expect(graph.analysis?.candidate_flows).toBeUndefined();
+  });
+
+  it("applies legacy staged AI flows from .orangepro/ai/flows.json", async () => {
+    const root = temp();
+    writeGraph(root, nestGraph(root));
+    await opAiFlows(root, {}, { ...DEPS, aiProvider: new JsonProvider({ flows: [VALID_FLOW] }) });
+
+    const current = join(root, ".orangepro", "flows.json");
+    const legacy = join(root, ".orangepro", "ai", "flows.json");
+    mkdirSync(join(root, ".orangepro", "ai"), { recursive: true });
+    renameSync(current, legacy);
+
+    const res = asApply(await opAiFlows(root, { apply: true }, DEPS));
+
+    expect(res.applied_flows).toBe(1);
+    expect(res.ai_flows_path).toBe(legacy);
+    expect(loadGraph(workspacePaths(root).graphPath).analysis?.candidate_flows?.flows).toHaveLength(1);
   });
 });
 

@@ -152,7 +152,7 @@ Usage:
   opro ai-links [--all] [--apply] [--provider openai|anthropic|ollama] [--model <name>] [--max-behaviors <n>] [--symbols-per-behavior <n>] [--max-prompt-tokens <n>] [--json]
     # opt-in AI lane: stage weak candidate behavior↔code links in .orangepro/ai/links.json; --apply merges them into candidate_edges only
   opro ai-flows [--apply] [--provider openai|anthropic|ollama] [--model <name>] [--json]
-    # opt-in AI lane: stage candidate behavior flows (closed anchor set) in .orangepro/ai/flows.json; --apply stores them under analysis.candidate_flows only — a verify-these worklist, never evidence
+    # opt-in AI lane: stage candidate behavior flows (closed anchor set) in .orangepro/flows.json; --apply stores them under analysis.candidate_flows only — a verify-these worklist, never evidence
   opro generate [--target REQ-001] [--base <ref>] [--pr <n> [--yes]] [--changed] [--framework playwright] [--limit 3] [--prompt-version v2|v5] [--provider openai|anthropic|ollama|deterministic] [--model <name>] [--single [--raw]] [--background] [--json]
     # default: A/B both arms (prompt-only vs Local KG, same model) scored side by side + writes a fresh report; --single generates one arm only
     # --base <ref>: NON-MUTATING default for PR/branch review — generate only for the behaviors the diff vs <ref> touches (e.g. --base main); read-only \`git diff\`, no checkout
