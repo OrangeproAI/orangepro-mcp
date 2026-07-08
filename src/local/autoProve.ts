@@ -147,7 +147,10 @@ function matchesProvableLanguageShape(node: GraphNode): boolean {
   const file = codeSymbolFile(node);
   if (isTsJsFile(file)) return true;
   // Go: free functions only. A method is out of scope for the Go oracle (G-1 refuses it).
-  if (isGoFile(file)) return node.properties.symbol_kind !== "method";
+  // Go: free functions AND receiver methods. A method only ever reaches an attempt
+  // via a hard proof edge, which the analyzer mints solely for the uniqueness-gated
+  // receiver-local shape — so admitting methods here cannot widen the false-Proven surface.
+  if (isGoFile(file)) return node.properties.symbol_kind === "function" || node.properties.symbol_kind === "method";
   // Java: METHODS only (J-1 proves single-top-level-return methods). A non-J-1-shape
   // method classifies `unrunnable` and never mints, so admitting all Java methods is
   // safe (never a false Proven); a non-method Java symbol (a class container) is out

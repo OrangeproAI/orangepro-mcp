@@ -446,6 +446,142 @@ describe("Go hard proof", () => {
     expect(hardCoverEdges(root)).toEqual(["test:svc/calc_test.go -> sym:svc/calc.go#Other"]);
   });
 
+  // ── METHOD targets (first slice): p.M() where p := New(...) is a bare same-package
+  //    constructor and M is the package's UNIQUE method name. Package-name-uniqueness
+  //    makes all receiver risks (interface/embedded/collision) fail closed. ──
+  it("confirms a method call p.Double() bound via p := New() (the phcparser shape)", () => {
+    const root = repo({
+      "svc/parser.go": [
+        "package svc",
+        "type Parser struct{ n int }",
+        "func New(n int) *Parser { return &Parser{n: n} }",
+        "func (p *Parser) Double() int { return p.n * 2 }"
+      ].join("\n"),
+      "svc/parser_test.go": [
+        "package svc",
+        "import (",
+        "  \"testing\"",
+        "  \"github.com/stretchr/testify/require\"",
+        ")",
+        "func TestDouble(t *testing.T) {",
+        "  p := New(3)",
+        "  got := p.Double()",
+        "  require.Equal(t, got, 6)",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Double"]);
+    expect(hardCoverTestNames(root)).toEqual(["TestDouble"]);
+    const dbl = analyzeRepo(root, { readContent: true }).nodes.find((n) => n.external_id === "sym:svc/parser.go#Double");
+    expect(dbl?.properties.symbol_kind).toBe("method");
+  });
+
+  it("confirms a method via the if-guard shape (got := p.M(); if got != want)", () => {
+    const root = repo({
+      "svc/parser.go": [
+        "package svc",
+        "type Parser struct{ n int }",
+        "func New(n int) *Parser { return &Parser{n: n} }",
+        "func (p *Parser) Double() int { return p.n * 2 }"
+      ].join("\n"),
+      "svc/parser_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestDouble(t *testing.T) {",
+        "  p := New(3)",
+        "  if got := p.Double(); got != 6 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Double"]);
+  });
+
+  it("binds a method when the constructor has a NESTED-call argument (the real phcparser New(reader) shape)", () => {
+    const root = repo({
+      "svc/parser.go": [
+        "package svc",
+        "import \"strings\"",
+        "type Parser struct{ r *strings.Reader }",
+        "func New(r *strings.Reader) *Parser { return &Parser{r: r} }",
+        "func (p *Parser) Len() int { return p.r.Len() }"
+      ].join("\n"),
+      "svc/parser_test.go": [
+        "package svc",
+        "import (",
+        "  \"strings\"",
+        "  \"testing\"",
+        ")",
+        "func TestLen(t *testing.T) {",
+        "  p := New(strings.NewReader(\"abc\"))",
+        "  if got := p.Len(); got != 3 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // New(strings.NewReader(...)) — nested call in the arg must NOT block receiver-local detection.
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Len"]);
+  });
+
+  it("refuses two same-named methods on different receivers across files (collision → no edge)", () => {
+    const root = repo({
+      "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() *A { return &A{} }\nfunc (a *A) M() int { return 1 }\n",
+      "svc/b.go": "package svc\ntype B struct{}\nfunc (b *B) M() int { return 2 }\n",
+      "svc/a_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  a := NewA()",
+        "  if got := a.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("refuses a method whose receiver var is NOT from a bare same-package constructor", () => {
+    const root = repo({
+      "svc/svc.go": "package svc\ntype T struct{ n int }\nfunc (t T) M() int { return t.n }\n",
+      "svc/svc_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  v := T{n: 1}",
+        "  if got := v.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // v := T{...} is a composite literal, not a bare New() call → not a receiver-local → no edge.
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("refuses a free-function call whose result feeds a method-less package (import-qualified stays package-resolved)", () => {
+    const root = repo({
+      "svc/svc.go": "package svc\ntype T struct{}\nfunc (t *T) M() int { return 1 }\n",
+      "svc/svc_test.go": [
+        "package svc",
+        "import (",
+        "  \"testing\"",
+        "  \"strings\"",
+        ")",
+        "func TestM(t *testing.T) {",
+        "  got := strings.Repeat(\"x\", 2)",
+        "  if got != \"xx\" {",
+        "    t.Errorf(\"got %s\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // strings.Repeat is an imported package func, not a same-package method → no hard edge.
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
   it("does not confirm unasserted Go calls", () => {
     const root = repo({
       "svc/add.go": "package svc\nfunc Add(a, b int) int { return a + b }\n",
