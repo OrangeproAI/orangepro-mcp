@@ -2,7 +2,7 @@
 
 **Find the behaviors your tests miss. Generate grounded tests that actually run.**
 
-`opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. Runs as a CLI and an MCP server.
+`opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. Runs as a CLI and an MCP server.The architecture follows the same ingest → compile → lint pattern described in Karpathy's LLM Knowledge Bases gist, applied to behavioral verification of code.
 
 ```bash
 npx @orangepro/mcp-server
@@ -18,6 +18,7 @@ That's it. You get:
 ├── rtm.md                   ← requirements traceability matrix
 └── evidence-pack.json       ← machine-readable metadata export
 ```
+<img width="895" height="960" alt="Screenshot 2026-07-08 at 1 18 01 AM" src="https://github.com/user-attachments/assets/73b8a812-2eab-43a1-8aed-4289545e630b" />
 
 ---
 
