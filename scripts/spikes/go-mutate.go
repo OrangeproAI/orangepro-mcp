@@ -2,12 +2,12 @@
 
 // go-mutate.go — AST-based body replacer for the Go dynamic-proof spike (G-1).
 //
-// Locates ONE free function `func Name(params) rets { ... }` by exact name and
-// replaces its BODY with a signature-derived sentinel, then writes the mutated
-// file. It is a spike helper only: it writes no product artifacts and is not
-// wired into prove/RTM/mint. G-1 scope is FREE FUNCTIONS ONLY — methods
-// (`func (r Recv) M()`) are now mutated too, when the name resolves to exactly ONE
-// declaration in the file (free or method); collisions fail(3) as ambiguous.
+// Locates ONE function declaration by exact name — a free function `func Name(...)`
+// or a receiver method `func (r Recv) Name(...)` — and replaces its BODY with a
+// signature-derived sentinel, then writes the mutated file. It is a spike helper
+// only: it writes no product artifacts and is not wired into prove/RTM/mint. The
+// name must resolve to exactly ONE declaration in the file (free or method);
+// collisions fail(3) as ambiguous, and generic receivers are refused (not found).
 //
 // Modes:
 //   sentinel   — replace body with a type-compatible, deliberately-wrong value
@@ -20,9 +20,10 @@
 // Exit codes (distinct, so the Node orchestrator can classify precisely):
 //   0  ok, mutated file written
 //   2  usage / IO / parse error
-//   3  ambiguous: more than one free function with that name
-//   4  not found: no free function with that name
-//   5  out of scope: a METHOD with that name exists (G-2, refused in G-1)
+//   3  ambiguous: more than one declaration (free and/or method) with that name
+//   4  not found: no free function or method with that name
+//   5  RETIRED — was "method out of scope (G-2)" before methods became mutable;
+//      no longer emitted (kept so codes 3/4/6 stay stable for the orchestrator)
 //   6  not mutable: the function has no return values (no signature-derived
 //      sentinel is possible) -> fail closed, never mutated
 package main
@@ -52,7 +53,7 @@ func fail(code int, format string, args ...any) {
 
 func main() {
 	file := flag.String("file", "", "path to the Go source file to mutate")
-	fn := flag.String("func", "", "exact name of the free function to mutate")
+	fn := flag.String("func", "", "exact name of the free function or method to mutate")
 	out := flag.String("out", "", "path to write the mutated file (defaults to --file)")
 	mode := flag.String("mode", "sentinel", "sentinel | equivalent")
 	flag.Parse()

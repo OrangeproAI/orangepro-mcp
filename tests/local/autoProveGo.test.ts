@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
-import { autoProve, goAssertionLineForTarget, goTestRunForTarget, isEligibleProvableTarget } from "../../src/local/autoProve.js";
+import { autoProve, existingAssociatedTests, goAssertionLineForTarget, goTestRunForTarget, isEligibleProvableTarget } from "../../src/local/autoProve.js";
 import { opAnalyze, opInit, opProveLoop, opRtm } from "../../src/local/operations.js";
 import { loadGraph, workspacePaths } from "../../src/local/workspace.js";
 import { preloadTreeSitter } from "../../src/local/analyze/treeSitter/engine.js";
@@ -180,12 +180,55 @@ describe("isEligibleProvableTarget — Go free-functions only", () => {
     expect(isEligibleProvableTarget(fn)).toBe(true);
   });
 
-  it("excludes a Go METHOD target (out of scope for the Go oracle)", () => {
+  it("excludes a Go METHOD target (methods enter only via the hard-edge lane)", () => {
     const { ws } = analyzedGo("auto-drive");
     const g = loadGraph(workspacePaths(ws).graphPath);
     const method = g.nodes.find((n) => n.external_id === "sym:handler.go#ProcessCart");
     expect(method?.properties.symbol_kind).toBe("method");
     expect(isEligibleProvableTarget(method)).toBe(false);
+  });
+});
+
+describe("existingAssociatedTests — a Go METHOD is admitted only via a hard edge", () => {
+  it("admits the method-target fixture's Parser.Double through its analyzer-minted hard TESTED_BY edge", () => {
+    const { ws } = analyzedGo("method-target");
+    const g = loadGraph(workspacePaths(ws).graphPath);
+    const method = g.nodes.find((n) => n.external_id === "sym:parser.go#Double");
+    expect(method?.properties.symbol_kind).toBe("method");
+    // The strict predicate refuses the method — the hard existing-tests lane is its ONLY route in.
+    expect(isEligibleProvableTarget(method)).toBe(false);
+    const nodeById = new Map(g.nodes.map((n) => [n.external_id, n]));
+    const assoc = existingAssociatedTests(g, nodeById);
+    expect(assoc.get("sym:parser.go#Double")).toEqual([{ test: "parser_test.go", hard: true }]);
+  });
+
+  it("refuses a Go METHOD whose only link is a weak MAY_* candidate edge (free-fn control rides through)", () => {
+    const goSym = (id: string, symbolKind: string): GraphNode =>
+      ({
+        external_id: id,
+        kind: "CodeSymbol",
+        denominator_eligible: true,
+        properties: { file: id.slice(4).split("#")[0], behavior_surface: "entrypoint_adjacent", symbol_kind: symbolKind }
+      }) as unknown as GraphNode;
+    const method = goSym("sym:svc.go#Handle", "method");
+    const freeFn = goSym("sym:svc.go#Run", "function");
+    const tc = testNode("test:svc_test.go", ["TestHandle"]);
+    const weak = (symId: string) =>
+      ({
+        from_external_id: symId,
+        to_external_id: tc.external_id,
+        relationship_type: "MAY_BE_TESTED_BY"
+      }) as unknown as NonNullable<LocalGraph["candidate_edges"]>[number];
+    const graph = {
+      nodes: [method, freeFn, tc],
+      edges: [],
+      candidate_edges: [weak(method.external_id), weak(freeFn.external_id)]
+    } as unknown as LocalGraph;
+    const nodeById = new Map(graph.nodes.map((n) => [n.external_id, n]));
+    const assoc = existingAssociatedTests(graph, nodeById);
+    // The eligible free function rides the weak edge; the method must NOT (no hard edge).
+    expect(assoc.get("sym:svc.go#Run")).toEqual([{ test: "svc_test.go", hard: false }]);
+    expect(assoc.has("sym:svc.go#Handle")).toBe(false);
   });
 });
 

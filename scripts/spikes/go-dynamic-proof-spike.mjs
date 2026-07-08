@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // go-dynamic-proof-spike.mjs — Go dynamic-proof MECHANISM (G-1).
 //
-// Proves ONE free function 0->1 on a single Go module by mutation: it byte-copies
+// Proves ONE free function or receiver method 0->1 on a single Go module by
+// mutation: it byte-copies
 // the module into a hermetic sandbox, runs `go test -json` baseline, replaces the
 // target function body with a signature-derived sentinel (via go-mutate.go), reruns
 // the SAME test, and classifies. It emits a JSON verdict mirroring the TS/JS spike's
@@ -21,7 +22,7 @@
 // assertion call (`t.Error`/`t.Errorf`, or testify `assert.`/`require.`), NOT a
 // `t.Fatal`/`t.Fatalf`/`t.FailNow`/`t.SkipNow` hard-stop or a helper call. A build
 // error, a panic, a t.Fatal precondition, a setup/helper failure, an unbindable
-// failure, and an ambiguous/method/no-return name all classify as `unrunnable`,
+// failure, and an ambiguous or no-return name all classify as `unrunnable`,
 // never `proven`. An equivalent-value mutation survives -> `associated_survived`.
 //
 // This is a spike harness only: it writes no graph edges or product artifacts and is
@@ -39,10 +40,10 @@ function usage() {
   return [
     "Usage: node scripts/spikes/go-dynamic-proof-spike.mjs --root <module> --test-run <^TestName$> --target <rel.go> --func <name> [--json]",
     "",
-    "Runs a Go baseline test, mutates the target free function body in an isolated byte-copy, reruns the same test, and classifies the result.",
+    "Runs a Go baseline test, mutates the target free function or method body in an isolated byte-copy, reruns the same test, and classifies the result.",
     "--test-run is passed verbatim to `go test -run` and should anchor a single test, e.g. '^TestCompute$'.",
     "--go-assertion-line <n> (optional): 1-based test-source line of the target's assertion. When set, the mutant's failure must bind to a frame at EXACTLY that line and subtest frames are considered — so a runtime-named subtest can prove while a sibling asserting elsewhere is refused.",
-    "G-1 scope: FREE FUNCTIONS ONLY. Methods are refused (unrunnable). Equivalent-value mutations survive (associated_survived).",
+    "Scope: free functions and receiver methods whose name is unique in the target file (collisions and generic receivers are refused). Equivalent-value mutations survive (associated_survived).",
     "This is a spike harness only; it does not write graph edges or product artifacts and is not wired into prove/RTM/mint."
   ].join("\n");
 }
@@ -481,9 +482,9 @@ function mutateFunc({ targetAbs, func, mode, cacheRoot, timeoutMs }) {
 
 function mutateErrorReason(code) {
   switch (code) {
-    case 3: return "target function name is ambiguous (more than one free function)";
-    case 4: return "target free function was not found";
-    case 5: return "target is a method (out of scope for G-1)";
+    case 3: return "target name is ambiguous (more than one free function or method)";
+    case 4: return "target free function or method was not found";
+    // code 5 (method out of scope) is retired — methods are mutable now, never emitted.
     case 6: return "target function has no return value (not mutable)";
     default: return "mutation could not be applied";
   }
