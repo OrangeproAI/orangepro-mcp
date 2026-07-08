@@ -526,7 +526,7 @@ export function createLocalServer(): McpServer {
     {
       title: "Stage/apply AI candidate flows",
       description:
-        "Opt-in AI lane: propose candidate behavior-flow chains over existing deterministic entry and CodeSymbol ids. Generate writes .orangepro/ai/flows.json only; apply=true stores survivors under analysis.candidate_flows. Candidate flows are a verify-these worklist and never affect Proven, deterministic flow counts, tiers, or coverage.",
+        "Opt-in AI lane: propose candidate behavior-flow chains over existing deterministic entry and CodeSymbol ids. Generate writes .orangepro/flows.json only; apply=true stores survivors under analysis.candidate_flows. Candidate flows are a verify-these worklist and never affect Proven, deterministic flow counts, tiers, or coverage.",
       inputSchema: {
         ...Workspace,
         apply: z.boolean().optional().describe("Apply staged flows into analysis.candidate_flows. Default false stages flows only."),

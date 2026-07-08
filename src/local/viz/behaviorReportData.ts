@@ -521,7 +521,7 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
           applicableCategories: [...new Set(generatedTests.map((t) => t.concern).filter((c): c is string => Boolean(c)))]
         };
       })(),
-      verb: methodMatch?.[1]?.toUpperCase() ?? (risk.entry_point ? "ENTRY" : "CODE"),
+      verb: methodMatch?.[1]?.toUpperCase() ?? "CODE",
       path: methodMatch?.[2] ?? (pathMatch ? `/${pathMatch[1]}` : risk.file),
       desc: risk.reasons.join(" · "),
       tags,

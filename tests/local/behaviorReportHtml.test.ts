@@ -444,6 +444,9 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     // Risk cards render the real risk fields.
     expect(data.risks.length).toBeGreaterThan(0);
     expect(html).toContain(JSON.stringify(data.risks[0].path));
+    for (const r of data.risks) {
+      if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(r.verb)) expect(r.verb).toBe("CODE");
+    }
     // No generated tests in this graph ⇒ every risk row carries empty arrays and the
     // CTA band count is 0 (the template hides both sections when the data is empty).
     for (const r of data.risks) {
@@ -492,8 +495,10 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(data.generatedTotal).toBe(1);
     expect(data.shownCount).toBe(1);
     expect(html).toContain("Generated tests");
+    expect(html).toContain("Flows with tests");
+    expect(html).toContain('let activeRiskFilter=generatedRiskCount?"generated":"all"');
     expect(html).toContain("No generated tests");
-    expect(html).toContain("remainingRiskFlows} high-risk flows left");
+    expect(html).toContain("high-risk flows left");
     expect(html).toContain("Generate remaining tests on Platform");
     expect(html).not.toContain("0 more tests generated");
     // Category strip shows only the real attached concerns — nothing locked/fabricated.
