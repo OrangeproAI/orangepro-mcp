@@ -504,7 +504,6 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
   for (const r of risks) if (!firstRowForFile.has(r.file)) firstRowForFile.set(r.file, r.id);
   return risks.map((risk, idx) => {
     const methodMatch = risk.title.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(.+)$/i);
-    const pathMatch = risk.file.match(/\/api\/(.+)$/);
     const tags: Array<[label: string, kind: "risk" | "info" | "entry"]> = [];
     const bucket = riskBucket(risk.risk_score);
     if (bucket) tags.push([`${bucket} risk`, "risk"]);
@@ -521,8 +520,8 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
           applicableCategories: [...new Set(generatedTests.map((t) => t.concern).filter((c): c is string => Boolean(c)))]
         };
       })(),
-      verb: methodMatch?.[1]?.toUpperCase() ?? "CODE",
-      path: methodMatch?.[2] ?? (pathMatch ? `/${pathMatch[1]}` : risk.file),
+      verb: methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR",
+      path: methodMatch?.[2] ?? risk.title,
       desc: risk.reasons.join(" · "),
       tags,
       todo: "Write an integration or behavior test that calls this behavior and asserts the observable outcome."

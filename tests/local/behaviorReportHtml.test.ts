@@ -445,7 +445,7 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(data.risks.length).toBeGreaterThan(0);
     expect(html).toContain(JSON.stringify(data.risks[0].path));
     for (const r of data.risks) {
-      if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(r.verb)) expect(r.verb).toBe("CODE");
+    if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(r.verb)) expect(r.verb).toBe("BEHAVIOR");
     }
     // No generated tests in this graph ⇒ every risk row carries empty arrays and the
     // CTA band count is 0 (the template hides both sections when the data is empty).
@@ -524,7 +524,7 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
       }
     ];
     const data = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
-    const payRows = data.risks.filter((r) => r.path === "src/pay.ts");
+    const payRows = data.risks.filter((r) => r.path === "PayService.charge" || r.path === "PayService.refund");
     expect(payRows.length).toBeGreaterThanOrEqual(2);
     // The fallback attaches to exactly one row across the whole risk list…
     const withTest = data.risks.filter((r) => r.generatedTests.length > 0);
