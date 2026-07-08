@@ -474,8 +474,9 @@ if(cf&&cf.flows.length){
 }
 
 // risks + generated test samples
-let activeRiskFilter="all";
 const riskList=$("#risk-list"),riskTools=$("#risk-tools");
+const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
+let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){
   const hasGenerated=Boolean(r.generatedTests&&r.generatedTests.length);
   if(activeRiskFilter==="generated")return hasGenerated;
@@ -485,7 +486,7 @@ function riskMatchesFilter(r){
 function renderRiskFilters(){
   const options=[
     ["all","All",D.risks.length],
-    ["generated","Generated tests",D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length],
+    ["generated","Flows with tests",generatedRiskCount],
     ["missing","No generated tests",D.risks.filter(r=>!(r.generatedTests&&r.generatedTests.length)).length]
   ];
   riskTools.innerHTML=options.map(([key,label,count])=>\`<button class="risk-filter" type="button" data-risk-filter="\${key}" aria-pressed="\${key===activeRiskFilter}">\${label} <span class="gc">\${count}</span></button>\`).join("");
@@ -523,16 +524,16 @@ function renderRisks(){
   riskList.innerHTML="";
   D.risks.filter(riskMatchesFilter).forEach(r=>riskList.append(el("div","risk-card",riskCardHtml(r))));
   if(activeRiskFilter==="all"&&D.generatedTotal){
-    const hiddenGenerated=Math.max(0,D.generatedTotal-D.shownCount);
-    const remainingRiskFlows=Math.max(0,D.risks.length-D.generatedTotal);
+    const hiddenGeneratedFlows=Math.max(0,generatedRiskCount-D.risks.filter(riskMatchesFilter).length);
+    const remainingRiskFlows=Math.max(0,D.risks.length-generatedRiskCount);
     riskList.append(el("div","paywall",
-      hiddenGenerated
-        ? \`<div class="paywall-num">\${hiddenGenerated} more tests generated</div>
-           <div class="paywall-txt">OrangePro generated tests for \${D.generatedTotal} behaviors across your highest-risk flows. You're seeing \${D.shownCount}.</div>
+      hiddenGeneratedFlows
+        ? \`<div class="paywall-num">\${hiddenGeneratedFlows} more flows with tests</div>
+           <div class="paywall-txt">OrangePro accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>
            <a class="paywall-btn" href="https://app.orangepro.ai" target="_blank">View all on OrangePro Platform &rarr;</a>\`
         : remainingRiskFlows
           ? \`<div class="paywall-num">\${remainingRiskFlows} high-risk flows left</div>
-             <div class="paywall-txt">The local MCP accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} for this report. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
+             <div class="paywall-txt">The local MCP accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
              <a class="paywall-btn" href="https://app.orangepro.ai" target="_blank">Generate remaining tests on Platform &rarr;</a>\`
           : \`<div class="paywall-num">All generated tests are shown</div>
              <div class="paywall-txt">OrangePro generated tests for every high-risk flow in this report, and every generated test is visible here.</div>\`));

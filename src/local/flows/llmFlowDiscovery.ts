@@ -102,7 +102,20 @@ export interface AiFlowsApplyResult {
 export type AiFlowsResult = AiFlowsGenerateResult | AiFlowsApplyResult;
 
 export function aiFlowsPath(root: string): string {
+  return join(workspacePaths(root).dir, "flows.json");
+}
+
+function legacyAiFlowsPath(root: string): string {
   return join(workspacePaths(root).dir, "ai", "flows.json");
+}
+
+function readAiFlowsArtifact(root: string): ReturnType<typeof readArtifact> & { path: string } {
+  const path = aiFlowsPath(root);
+  const current = readArtifact(path);
+  if (current.artifact || current.invalid) return { ...current, path };
+  const legacy = legacyAiFlowsPath(root);
+  const fallback = readArtifact(legacy);
+  return { ...fallback, path: fallback.artifact || fallback.invalid ? legacy : path };
 }
 
 interface AnchorContext {
@@ -347,12 +360,12 @@ export async function generateAiFlows(
     })
   );
   const path = aiFlowsPath(root);
-  const cached = readArtifact(path);
+  const cached = readAiFlowsArtifact(root);
   if (cached.artifact?.cache_key === cacheKey) {
     const hit = cached.artifact;
     return {
       mode: "generate",
-      ai_flows_path: path,
+      ai_flows_path: cached.path,
       cache_hit: true,
       model_provider: hit.model_provider,
       model_name: hit.model_name,
@@ -449,8 +462,7 @@ export async function generateAiFlows(
  * edges/candidate_edges/nodes/analysis.flows.
  */
 export function applyAiFlows(root: string, graph: LocalGraph): { result: AiFlowsApplyResult; graph: LocalGraph } {
-  const path = aiFlowsPath(root);
-  const { artifact, invalid } = readArtifact(path);
+  const { path, artifact, invalid } = readAiFlowsArtifact(root);
   if (invalid) {
     throw new Error(`AI flows artifact at ${path} is invalid or corrupted; re-run \`opro ai-flows\` to regenerate it.`);
   }
@@ -567,7 +579,7 @@ function toCandidateFlow(
     ...(flow.rationale ? { rationale: flow.rationale } : {}),
     provenance: {
       source_scope_id: `ai:${provenance.cache_key}`,
-      source_ref: ".orangepro/ai/flows.json",
+      source_ref: ".orangepro/flows.json",
       detector: "ai_flows",
       model_provider: provenance.model_provider,
       model_name: provenance.model_name,

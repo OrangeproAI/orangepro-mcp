@@ -41,7 +41,38 @@ cd orangepro-mcp && npm ci && npm run build && npm link
 
 OrangePro runs as an MCP server. Any MCP-compatible agent (Cursor, Claude Code, Codex, Copilot, OpenCode) can drive it.
 
-### Setup
+### Quick agent setup
+
+If you already have `opro` on your PATH, print the exact config for your client:
+
+```bash
+opro agent --client codex
+opro agent --client claude-code
+opro agent --client cursor
+opro agent --client opencode
+opro agent --client generic
+```
+
+No global install is required. These commands use the published package:
+
+```bash
+# Codex
+npx -y @orangepro/mcp-server@latest agent --client codex
+
+# Claude Code
+npx -y @orangepro/mcp-server@latest agent --client claude-code
+
+# Cursor
+npx -y @orangepro/mcp-server@latest agent --client cursor
+
+# OpenCode
+npx -y @orangepro/mcp-server@latest agent --client opencode
+
+# Generic MCP clients, including VS Code/Copilot-style MCP settings
+npx -y @orangepro/mcp-server@latest agent --client generic
+```
+
+### Manual MCP config
 
 Add to your client's MCP config:
 
@@ -57,11 +88,13 @@ Add to your client's MCP config:
 ```
 
 | Client | Config location |
+| --- | --- |
 |--------|----------------|
 | Claude Code | `.mcp.json` or `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` or Settings → MCP |
-| Codex | MCP config printed by `opro agent --client codex`; plugin install after OrangePro is listed in a configured marketplace |
-| VS Code / Copilot | MCP settings |
+| Codex | Config printed by `opro agent --client codex` or `npx -y @orangepro/mcp-server@latest agent --client codex` |
+| VS Code / Copilot | MCP settings; use the `generic` config if your client accepts raw MCP server JSON |
+| OpenCode | Config printed by `opro agent --client opencode` |
 
 ### The workflow
 
