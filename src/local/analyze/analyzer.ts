@@ -1603,6 +1603,28 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const symId = `sym:${targetRel}#${name}`;
       return codeSymbolIds.has(symId) ? symId : null;
     };
+    /**
+     * Resolve a bare method name from a test call `p.M()` to the package's single
+     * receiver-qualified method symbol `Recv.M`. Go method symbols are minted
+     * qualified (engine `goReceiverBaseName`), so a bare callee must map back;
+     * a bare-named hit (underivable receiver) is matched too. EXACTLY one method
+     * across the package's product files, else null — the cross-file/in-file
+     * collision refusal that keeps receiver binding fail-closed. Same-named FREE
+     * functions no longer block method resolution (kind-filtered): the mutator's
+     * receiver-exact `--recv` match means a free fn can never be mutated in a
+     * method attempt.
+     */
+    const uniqueGoPackageMethod = (dir: string, bareName: string): { file: string; qualified: string } | null => {
+      const suffix = `.${bareName}`;
+      const hits: Array<{ file: string; qualified: string }> = [];
+      for (const f of goFilesByDir.get(dir) ?? []) {
+        if (isNonProductFile(f)) continue;
+        for (const n of symbolsByFile.get(f) ?? []) {
+          if ((n === bareName || n.endsWith(suffix)) && symbolKind(f, n) === "method") hits.push({ file: f, qualified: n });
+        }
+      }
+      return hits.length === 1 ? hits[0] : null;
+    };
     const eligiblePythonSymbol = (targetRel: string | null, name: string): string | null => {
       if (!targetRel || !(proofEligibleSymbolsByFile.get(targetRel) ?? []).includes(name)) return null;
       const symId = `sym:${targetRel}#${name}`;
@@ -1629,15 +1651,16 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       // Receiver-local METHOD call `p.M()`: the qualifier `p` is a LOCAL by design
       // (declared `p := New(...)`), so this must be checked BEFORE the qualifier-shadow
       // guard (which exists to reject package-func names shadowed by locals, not receivers).
-      // Resolve to the SAME-package UNIQUE symbol named M iff it is a method:
-      // uniqueGoPackageSymbol refuses cross-file collisions; the file-scoped mutator refuses
-      // in-file collisions; together = package-unique. The frozen oracle only fails closed in
-      // the survive direction, so this receiver pinning-by-refusal is what keeps method
-      // proofs no-false-Proven. The callee (method name) still honors shadowing.
+      // Resolve the bare callee to the SAME-package UNIQUE receiver-qualified method
+      // symbol (`Recv.M`): uniqueGoPackageMethod refuses when the package holds more
+      // than one method named M (any receivers, any files) — receiver pinning-by-refusal
+      // — and the mutator's `--recv` exact match is the in-sandbox backstop. The frozen
+      // oracle only fails closed in the survive direction, so this refusal is what keeps
+      // method proofs no-false-Proven. The callee (method name) still honors shadowing.
       if (receiverLocal && !shadowed.has(callee) && !structure.packageName?.endsWith("_test")) {
-        const targetRel = uniqueGoPackageSymbol(dirOf(testRel), callee);
-        if (!targetRel || symbolKind(targetRel, callee) !== "method") return null;
-        return eligibleGoSymbol(targetRel, callee);
+        const m = uniqueGoPackageMethod(dirOf(testRel), callee);
+        if (!m) return null;
+        return eligibleGoSymbol(m.file, m.qualified);
       }
       if (shadowed.has(rootQualifier)) return null;
       const binding = structure.imports.find((i) => i.local === rootQualifier && i.kind === "module");

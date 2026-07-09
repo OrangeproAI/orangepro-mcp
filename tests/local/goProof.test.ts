@@ -470,10 +470,11 @@ describe("Go hard proof", () => {
         "}"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Double"]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Parser.Double"]);
     expect(hardCoverTestNames(root)).toEqual(["TestDouble"]);
-    const dbl = analyzeRepo(root, { readContent: true }).nodes.find((n) => n.external_id === "sym:svc/parser.go#Double");
+    const dbl = analyzeRepo(root, { readContent: true }).nodes.find((n) => n.external_id === "sym:svc/parser.go#Parser.Double");
     expect(dbl?.properties.symbol_kind).toBe("method");
+    expect(dbl?.properties.member_of).toBe("Parser");
   });
 
   it("confirms a method via the if-guard shape (got := p.M(); if got != want)", () => {
@@ -495,7 +496,7 @@ describe("Go hard proof", () => {
         "}"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Double"]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Parser.Double"]);
   });
 
   it("binds a method when the constructor has a NESTED-call argument (the real phcparser New(reader) shape)", () => {
@@ -522,7 +523,37 @@ describe("Go hard proof", () => {
       ].join("\n")
     });
     // New(strings.NewReader(...)) — nested call in the arg must NOT block receiver-local detection.
-    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Len"]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Parser.Len"]);
+  });
+
+  it("in-file same-named methods mint DISTINCT receiver-qualified nodes, but the edge still refuses (collision)", () => {
+    const root = repo({
+      "svc/pair.go": [
+        "package svc",
+        "type A struct{ n int }",
+        "type B struct{ n int }",
+        "func NewA(n int) *A { return &A{n: n} }",
+        "func (a *A) M() int { return a.n + 1 }",
+        "func (b *B) M() int { return b.n + 2 }"
+      ].join("\n"),
+      "svc/pair_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestAM(t *testing.T) {",
+        "  a := NewA(1)",
+        "  if got := a.M(); got != 2 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // Pre-qualification the two methods collapsed to ONE symbol (wrong denominator);
+    // now both nodes exist — and the proof edge still fails closed on the collision
+    // (uniqueGoPackageMethod: >1 method named M in the package) until ctor pinning.
+    const nodes = analyzeRepo(root, { readContent: true }).nodes;
+    expect(nodes.some((n) => n.external_id === "sym:svc/pair.go#A.M")).toBe(true);
+    expect(nodes.some((n) => n.external_id === "sym:svc/pair.go#B.M")).toBe(true);
+    expect(hardCoverEdges(root)).toEqual([]);
   });
 
   it("refuses two same-named methods on different receivers across files (collision → no edge)", () => {

@@ -323,9 +323,13 @@ export function extractTreeSitterSymbols(content: string, language: string): Sym
     if (kind && shouldEmitSymbol(node, language)) {
       const name = symbolName(node, cfg);
       if (name && !RESERVED_SYMBOL_NAMES.has(name)) {
+        // Go methods mint receiver-qualified names (`Recv.M`, mirroring TS/JS
+        // `Class.method` + member_of) so same-named methods on different receivers
+        // stay distinct symbols; an underivable receiver falls back to the bare name.
+        const recv = kind === "method" && language === "go" ? goReceiverBaseName(node) : undefined;
         add(
           kind === "method"
-            ? { name, symbol_kind: kind, trivial_accessor: isTrivialAccessorBody(node, language), ...nodeLines(node) }
+            ? { name: recv ? `${recv}.${name}` : name, ...(recv ? { member_of: recv } : {}), symbol_kind: kind, trivial_accessor: isTrivialAccessorBody(node, language), ...nodeLines(node) }
             : { name, symbol_kind: kind, ...nodeLines(node) }
         );
       }
@@ -424,6 +428,20 @@ function functionName(node: Node, language: string): string | undefined {
   if (!name) return undefined;
   if (language === "go" && node.type === "method_declaration") return name;
   return name;
+}
+
+/**
+ * Base receiver type name for a Go method declaration — `(p *Parser)` → "Parser",
+ * `(g Generic[T])` → "Generic". Undefined when the receiver shape is underivable,
+ * in which case callers fall back to the bare method name (the pre-qualified
+ * behavior). NOT used for test-name extraction — suite test names must stay bare
+ * (`^Test` gate at extractGoProofCalls).
+ */
+function goReceiverBaseName(node: Node): string | undefined {
+  const param = node.childForFieldName("receiver")?.namedChild(0);
+  let t = param?.childForFieldName("type") ?? undefined;
+  if (t && (t.type === "pointer_type" || t.type === "generic_type")) t = t.namedChild(0) ?? undefined;
+  return t?.type === "type_identifier" ? t.text : undefined;
 }
 
 function javaPackage(root: Node): string | undefined {
@@ -1453,7 +1471,13 @@ export function extractTreeSitterStructure(content: string, language: string): T
         nextShadowed = new Set();
         nextInsideFunction = true;
       } else {
-        const name = functionName(node, language);
+        let name = functionName(node, language);
+        // Go method symbols are receiver-qualified — attribute calls to the
+        // qualified caller so Layer-1 edges keep matching the emitted symbol.
+        if (name && language === "go" && node.type === "method_declaration") {
+          const recv = goReceiverBaseName(node);
+          if (recv) name = `${recv}.${name}`;
+        }
         if (name) {
           nextCaller = name;
           nextShadowed = localBindings(node, language);
