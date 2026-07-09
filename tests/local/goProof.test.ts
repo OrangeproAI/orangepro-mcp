@@ -548,15 +548,15 @@ describe("Go hard proof", () => {
       ].join("\n")
     });
     // Pre-qualification the two methods collapsed to ONE symbol (wrong denominator);
-    // now both nodes exist — and the proof edge still fails closed on the collision
-    // (uniqueGoPackageMethod: >1 method named M in the package) until ctor pinning.
+    // now both nodes exist — and the ctor pin (NewA's declared *A result) selects
+    // A.M out of the in-file collision instead of refusing.
     const nodes = analyzeRepo(root, { readContent: true }).nodes;
     expect(nodes.some((n) => n.external_id === "sym:svc/pair.go#A.M")).toBe(true);
     expect(nodes.some((n) => n.external_id === "sym:svc/pair.go#B.M")).toBe(true);
-    expect(hardCoverEdges(root)).toEqual([]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/pair_test.go -> sym:svc/pair.go#A.M"]);
   });
 
-  it("refuses two same-named methods on different receivers across files (collision → no edge)", () => {
+  it("pins the receiver across files via the ctor's declared result (A.M chosen over B.M)", () => {
     const root = repo({
       "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() *A { return &A{} }\nfunc (a *A) M() int { return 1 }\n",
       "svc/b.go": "package svc\ntype B struct{}\nfunc (b *B) M() int { return 2 }\n",
@@ -571,6 +571,78 @@ describe("Go hard proof", () => {
         "}"
       ].join("\n")
     });
+    // Pre-pinning this collision refused. NewA's declared `*A` result pins the
+    // receiver, so the edge binds to A.M — and never to B.M.
+    expect(hardCoverEdges(root)).toEqual(["test:svc/a_test.go -> sym:svc/a.go#A.M"]);
+  });
+
+  it("refuses a collision when the ctor result is not structurally capturable (named return)", () => {
+    const root = repo({
+      "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() (out *A) { out = &A{}; return }\nfunc (a *A) M() int { return 1 }\n",
+      "svc/b.go": "package svc\ntype B struct{}\nfunc (b *B) M() int { return 2 }\n",
+      "svc/a_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  a := NewA()",
+        "  if got := a.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // `(out *A)` renders as a parameter_list result — goCtorResults omits it, the
+    // pin is unavailable, and the collision fails closed exactly as before pinning.
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("refuses an interface-returning ctor over a collision (cannot know which impl — the dangerous shape)", () => {
+    const root = repo({
+      "svc/svc.go": [
+        "package svc",
+        "type Chooser interface{ M() int }",
+        "type A struct{}",
+        "type B struct{}",
+        "func (a *A) M() int { return 1 }",
+        "func (b *B) M() int { return 2 }",
+        "func Pick() Chooser { return &A{} }"
+      ].join("\n"),
+      "svc/svc_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  c := Pick()",
+        "  if got := c.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // Pick's declared result is the INTERFACE — the pin names "Chooser", no method
+    // symbol `Chooser.M` exists, and the A.M/B.M collision refuses. Static analysis
+    // must never guess which implementation an interface hides.
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("refuses a SHADOWED ctor over a collision (local New → pin dropped, fail closed)", () => {
+    const root = repo({
+      "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() *A { return &A{} }\nfunc (a *A) M() int { return 1 }\n",
+      "svc/b.go": "package svc\ntype B struct{}\nfunc NewB() *B { return &B{} }\nfunc (b *B) M() int { return 2 }\n",
+      "svc/a_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  NewA := NewB",
+        "  a := NewA()",
+        "  if got := a.M(); got != 2 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // The local `NewA := NewB` shadows the package ctor — pinning through the NAME
+    // NewA would bind the WRONG receiver (the value is B's). The shadow check drops
+    // the pin and the collision fails closed.
     expect(hardCoverEdges(root)).toEqual([]);
   });
 
