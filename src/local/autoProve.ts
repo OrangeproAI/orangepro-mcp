@@ -126,15 +126,18 @@ function pytestNodeidsForTarget(sourceRoot: string, testRel: string, testName?: 
  * `behavior_surface === "entrypoint_adjacent"`, and carrying NO `denominator_reason_code`
  * (infra_behavior_surface / not_entry_point_adjacent).
  *
- * Language: TS/JS (unchanged), Go (G-INT-2), OR Java (J-INT-2). Go dynamic proof
- * (G-1) proves FREE FUNCTIONS ONLY — a Go method classifies `unrunnable` and never
- * mints, so admitting one is safe (never a false Proven) but wastes an attempt; when
- * the clean `symbol_kind === "method"` signal is present we exclude it up front. Java
- * dynamic proof (J-1) is the INVERSE — it proves single-top-level-return METHODS, so
- * we admit Java methods; a non-J-1-shape method (void/constructor/nested/generic) just
- * classifies `unrunnable` and never mints, safe by construction. Everything downstream
- * of `closed`/the cert is language-agnostic and mints Go/Java only through the
- * unchanged G-INT-1/J-INT-1 gates.
+ * Language: TS/JS (unchanged), Go (G-INT-2), OR Java (J-INT-2). This STRICT predicate
+ * keeps Go to FREE FUNCTIONS ONLY. The Go oracle can also prove receiver METHODS, but
+ * a method's no-false-Proven story rests entirely on the analyzer-minted hard
+ * receiver-local TESTED_BY/COVERS edge (package-unique method-name gating) — so Go
+ * methods are admitted solely by `isEligibleHardExistingTarget` on the hard-edge lane,
+ * never here: this predicate also feeds PR/changed-scope selection, weak MAY_*
+ * expansion, and generation candidate filtering, where no hard edge backs the pick.
+ * Java dynamic proof (J-1) is the INVERSE — it proves single-top-level-return METHODS,
+ * so we admit Java methods; a non-J-1-shape method (void/constructor/nested/generic)
+ * just classifies `unrunnable` and never mints, safe by construction. Everything
+ * downstream of `closed`/the cert is language-agnostic and mints Go/Java only through
+ * the unchanged G-INT-1/J-INT-1 gates.
  */
 export function isEligibleProvableTarget(node: GraphNode | undefined): boolean {
   if (!node || node.kind !== "CodeSymbol") return false;
@@ -148,15 +151,24 @@ export function isEligibleProvableTarget(node: GraphNode | undefined): boolean {
  * The LANGUAGE + oracle-SHAPE half of eligibility, factored out so both the strict
  * `isEligibleProvableTarget` (which layers the entry-point-adjacent SCOPE guards on top)
  * and the relaxed hard-edge existing-tests path share ONE definition of "a shape the
- * oracle can prove". CodeSymbol + a TS/JS file, a Go free function, a Java method, or a
- * Python function/method.
+ * oracle can prove". CodeSymbol + a TS/JS file, a Go free function (a receiver method
+ * only when the caller opts in via `allowGoMethod`), a Java method, or a Python
+ * function/method.
  */
-function matchesProvableLanguageShape(node: GraphNode): boolean {
+function matchesProvableLanguageShape(node: GraphNode, opts?: { allowGoMethod?: boolean }): boolean {
   if (node.kind !== "CodeSymbol") return false;
   const file = codeSymbolFile(node);
   if (isTsJsFile(file)) return true;
-  // Go: free functions only. A method is out of scope for the Go oracle (G-1 refuses it).
-  if (isGoFile(file)) return node.properties.symbol_kind !== "method";
+  // Go: free functions only, unless the caller opts into methods (`allowGoMethod`).
+  // Only the hard-edge lane opts in: a method's no-false-Proven story rests on the
+  // analyzer's uniqueness-gated receiver-local TESTED_BY/COVERS edge, which the strict
+  // callers (changed-scope selection, weak MAY_* expansion, generation candidates)
+  // do not have — admitting methods there would break the invariant that a Go method
+  // only ever becomes a proof attempt via a hard receiver-local edge.
+  if (isGoFile(file)) {
+    if (node.properties.symbol_kind === "function") return true;
+    return opts?.allowGoMethod === true && node.properties.symbol_kind === "method";
+  }
   // Java: METHODS only (J-1 proves single-top-level-return methods). A non-J-1-shape
   // method classifies `unrunnable` and never mints, so admitting all Java methods is
   // safe (never a false Proven); a non-method Java symbol (a class container) is out
@@ -183,13 +195,17 @@ function matchesProvableLanguageShape(node: GraphNode): boolean {
  * by the frozen oracle, never false-Proven. Guards deliberately KEPT:
  *   - `infra_behavior_surface` still excludes plumbing (getters/registry accessors) — a
  *     hard edge does not buy an infra symbol an attempt (waste, and preserves the #4 bar);
- *   - the language + oracle-shape filter (never hand a class container / Go method down).
+ *   - the language + oracle-shape filter (never hand a class container down).
+ * This is also the ONLY caller that admits Go receiver METHODS (`allowGoMethod`): it is
+ * reached solely behind a hard TESTED_BY/COVERS edge, and the analyzer mints a method
+ * edge only for the uniqueness-gated receiver-local shape — the strict predicate keeps
+ * Go methods out of every other selection path.
  * Used solely on the hard lane; weak MAY_* fan-out stays strict.
  */
 function isEligibleHardExistingTarget(node: GraphNode | undefined): boolean {
   if (!node) return false;
   if (node.properties.denominator_reason_code === "infra_behavior_surface") return false;
-  return matchesProvableLanguageShape(node);
+  return matchesProvableLanguageShape(node, { allowGoMethod: true });
 }
 
 /** Go `_test.go` top-level test-name regex (matches `extractTestNames`'s Go pattern). */
@@ -217,9 +233,10 @@ function anchorGoTestRun(name: string): string {
  * its target test BY NAME (`go test -run ^TestX$`), so auto-drive must derive that
  * name — G-INT-1 took it as an explicit input.
  *
- * The link is the analyzer's HARD `TESTED_BY`/`COVERS` proof edge (Go free-fn sym ↔
- * `test:<file>_test.go`), emitted only for an eligible Go symbol whose test genuinely
- * asserts on it. PRIMARY: the edge carries `properties.test_name` — the EXACT enclosing
+ * The link is the analyzer's HARD `TESTED_BY`/`COVERS` proof edge (Go sym — free fn,
+ * or receiver-local method — ↔ `test:<file>_test.go`), emitted only for an eligible Go
+ * symbol whose test genuinely asserts on it. PRIMARY: the edge carries
+ * `properties.test_name` — the EXACT enclosing
  * `func TestXxx` where the assertion witnessed THIS target (structural metadata, never
  * proof) — which disambiguates even a `_test.go` file with many tests. FALLBACK (old
  * graphs / no edge metadata): the linked TestCase node's file-level `test_names[]`,
@@ -618,7 +635,8 @@ export function existingAssociatedTests(graph: LocalGraph, nodeById: Map<string,
   };
   // `hard` = TESTED_BY/COVERS (the confirmer's structural links); weak = MAY_* candidate
   // edges. Hard is recorded before weak (graph.edges scanned first), so a test already
-  // linked hard is never downgraded; a later weak dup only upgrades an existing weak to hard.
+  // linked hard is never downgraded, and a later weak dup of the same pair is a no-op —
+  // the hard flag can only ever originate from a genuine TESTED_BY/COVERS edge.
   const add = (symId: string, testRel: string, hard: boolean, testName?: string): void => {
     // A HARD TESTED_BY/COVERS edge is a real derivable test; admit it even when the symbol
     // is not_entry_point_adjacent (relaxed shape-only guard). Weak MAY_* fan-out stays strict.

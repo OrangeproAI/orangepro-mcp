@@ -42,6 +42,13 @@ export interface TreeSitterGoProofCall extends TreeSitterRawCall {
   testName: string;
   assertion: "testing_fail" | "assert_helper";
   /**
+   * True when this is a receiver-local METHOD call `p.M()` whose receiver var `p`
+   * was declared by a bare same-package constructor `p := New(...)` in the test.
+   * Routes the analyzer to same-package method resolution (not import resolution).
+   * The oracle still re-verifies; package-name-uniqueness makes it fail-closed.
+   */
+  receiverLocal?: boolean;
+  /**
    * 1-based source line of the assertion CALL in the test file where this target was
    * witnessed (the line Go prints in the failing frame). Slice 2 uses it to bind a
    * runtime-named subtest's mutant failure to THIS exact assertion — a sibling subtest
@@ -862,6 +869,10 @@ function goShortVarCalls(stmt: Node): { names: Set<string>; calls: Array<{ calle
 function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): TreeSitterGoProofCall[] {
   const out: TreeSitterGoProofCall[] = [];
   const seen = new Set<string>();
+  // Names declared in the CURRENT test func by a bare same-package `x := New(...)`
+  // (single unqualified call). Reset per top-level test func; used to mark a
+  // qualified proof-call `p.M()` as a receiver-local method call.
+  let receiverLocals = new Set<string>();
   const assertLocals = goAssertLocals(imports);
   const dotAssertMethods = goDotAssertMethods(root);
   const suiteTypes = goCanonicalSuiteTypes(root, goSuiteLocals(imports));
@@ -876,7 +887,8 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
       const key = `${testName}|${c.qualifier ?? ""}|${c.callee}|${assertion}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ caller: testName, testName, ...c, shadowed: [...shadowed], assertion, ...(assertionLine ? { assertionLine } : {}) });
+      const receiverLocal = c.via === "qualified" && !!c.qualifier && !c.qualifier.includes(".") && receiverLocals.has(c.qualifier);
+      out.push({ caller: testName, testName, ...c, shadowed: [...shadowed], assertion, ...(assertionLine ? { assertionLine } : {}), ...(receiverLocal ? { receiverLocal: true } : {}) });
     }
   };
   const processBlock = (block: Node, testName: string, testingParams: Set<string>, shadowed: Set<string>): void => {
@@ -941,7 +953,27 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
       const sv = stmt.type === "short_var_declaration" ? goShortVarCalls(stmt) : null;
       if (sv) {
         for (const name of sv.names) pending.set(name, sv.calls);
+      }
+      if (stmt.type === "short_var_declaration") {
+        // A lone `x := New(...)` makes x a receiver-local: its type comes from a
+        // same-package constructor, so `x.M()` targets a same-package method. This
+        // check inspects the TOP-LEVEL RHS call directly (not goShortVarCalls, whose
+        // single-product-call rule drops `New(strings.NewReader(...))` for its nested
+        // arg — the real phcparser shape). Refuses composite literals, qualified/
+        // imported calls, and multi-assign — none are receiver-locals.
+        const rhsNames = new Set<string>();
+        collectNames(stmt.childForFieldName("left") ?? stmt.namedChild(0), rhsNames);
+        const rhs = stmt.childForFieldName("right");
+        const rhsCalls = rhs ? namedChildren(rhs).filter((n) => n.type === "call_expression") : [];
+        if (rhsNames.size === 1 && rhsCalls.length === 1) {
+          const cp = callParts(rhsCalls[0], "go");
+          if (cp && cp.via === "free") receiverLocals.add([...rhsNames][0]);
+        }
       } else if (stmt.type === "assignment_statement") {
+        // Reassigning a receiver-local invalidates it too.
+        const reassignedRl = new Set<string>();
+        collectNames(stmt.childForFieldName("left") ?? stmt.namedChild(0), reassignedRl);
+        for (const name of reassignedRl) receiverLocals.delete(name);
         // Plain reassignment kills the binding — the checked value is no longer F's.
         const reassigned = new Set<string>();
         collectNames(stmt.childForFieldName("left") ?? stmt.namedChild(0), reassigned);
@@ -979,6 +1011,7 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
     const testingParams = goTestingParamNames(child);
     const body = child.childForFieldName("body");
     if (!testingParams.size || !body) continue;
+    receiverLocals = new Set<string>();
     processBlock(body, name, testingParams, localBindings(child, "go"));
   }
   return out;

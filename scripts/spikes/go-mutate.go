@@ -2,11 +2,12 @@
 
 // go-mutate.go — AST-based body replacer for the Go dynamic-proof spike (G-1).
 //
-// Locates ONE free function `func Name(params) rets { ... }` by exact name and
-// replaces its BODY with a signature-derived sentinel, then writes the mutated
-// file. It is a spike helper only: it writes no product artifacts and is not
-// wired into prove/RTM/mint. G-1 scope is FREE FUNCTIONS ONLY — methods
-// (`func (r Recv) M()`) are recognized and refused as out-of-scope (G-2).
+// Locates ONE function declaration by exact name — a free function `func Name(...)`
+// or a receiver method `func (r Recv) Name(...)` — and replaces its BODY with a
+// signature-derived sentinel, then writes the mutated file. It is a spike helper
+// only: it writes no product artifacts and is not wired into prove/RTM/mint. The
+// name must resolve to exactly ONE declaration in the file (free or method);
+// collisions fail(3) as ambiguous, and generic receivers are refused (not found).
 //
 // Modes:
 //   sentinel   — replace body with a type-compatible, deliberately-wrong value
@@ -19,9 +20,10 @@
 // Exit codes (distinct, so the Node orchestrator can classify precisely):
 //   0  ok, mutated file written
 //   2  usage / IO / parse error
-//   3  ambiguous: more than one free function with that name
-//   4  not found: no free function with that name
-//   5  out of scope: a METHOD with that name exists (G-2, refused in G-1)
+//   3  ambiguous: more than one declaration (free and/or method) with that name
+//   4  not found: no free function or method with that name
+//   5  RETIRED — was "method out of scope (G-2)" before methods became mutable;
+//      no longer emitted (kept so codes 3/4/6 stay stable for the orchestrator)
 //   6  not mutable: the function has no return values (no signature-derived
 //      sentinel is possible) -> fail closed, never mutated
 package main
@@ -51,7 +53,7 @@ func fail(code int, format string, args ...any) {
 
 func main() {
 	file := flag.String("file", "", "path to the Go source file to mutate")
-	fn := flag.String("func", "", "exact name of the free function to mutate")
+	fn := flag.String("func", "", "exact name of the free function or method to mutate")
 	out := flag.String("out", "", "path to write the mutated file (defaults to --file)")
 	mode := flag.String("mode", "sentinel", "sentinel | equivalent")
 	flag.Parse()
@@ -73,31 +75,33 @@ func main() {
 		fail(2, "parse error: %v", err)
 	}
 
-	var freeMatches []*ast.FuncDecl
-	methodMatch := false
+	// Collect BOTH free functions and methods named *fn. The proof lane only ever
+	// targets a method whose name is UNIQUE in its package (the analyzer's
+	// uniqueGoPackageSymbol refuses cross-file collisions before an edge is minted);
+	// this file-scoped count is the in-file backstop, so free+method or two-method
+	// collisions fail(3) as ambiguous — never a mislabeled mutation. A lone decl
+	// (free OR method) is mutated identically via the receiver-agnostic sentinel.
+	var matches []*ast.FuncDecl
 	for _, decl := range astFile.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok || fd.Name == nil || fd.Name.Name != *fn {
 			continue
 		}
-		if fd.Recv != nil { // method -> out of scope for G-1
-			methodMatch = true
+		// Refuse generic receivers (r T[U]) — receiver base type is not a bare Ident.
+		if fd.Recv != nil && recvBaseIdent(fd) == nil {
 			continue
 		}
-		freeMatches = append(freeMatches, fd)
+		matches = append(matches, fd)
 	}
 
-	if len(freeMatches) > 1 {
-		fail(3, "ambiguous: %d free functions named %q", len(freeMatches), *fn)
+	if len(matches) > 1 {
+		fail(3, "ambiguous: %d declarations named %q (free and/or methods)", len(matches), *fn)
 	}
-	if len(freeMatches) == 0 {
-		if methodMatch {
-			fail(5, "out of scope: %q is a method (G-2); G-1 handles free functions only", *fn)
-		}
-		fail(4, "not found: no free function named %q", *fn)
+	if len(matches) == 0 {
+		fail(4, "not found: no free function or method named %q", *fn)
 	}
 
-	target := freeMatches[0]
+	target := matches[0]
 	results := target.Type.Results
 	if results == nil || len(results.List) == 0 {
 		fail(6, "not mutable: %q has no return values; no signature-derived sentinel is possible", *fn)
@@ -158,6 +162,22 @@ func blankUnusedImports(f *ast.File) {
 			imp.Name = ast.NewIdent("_")
 		}
 	}
+}
+
+// recvBaseIdent returns the receiver type's base identifier for a method decl
+// (unwrapping a pointer receiver `*T` to `T`), or nil for a generic/unsupported
+// receiver. Used only to refuse generic receivers; value-vs-pointer is irrelevant
+// to body mutation (Go auto-(de)refs at the call site).
+func recvBaseIdent(fd *ast.FuncDecl) *ast.Ident {
+	if fd.Recv == nil || len(fd.Recv.List) != 1 {
+		return nil
+	}
+	t := fd.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	id, _ := t.(*ast.Ident)
+	return id
 }
 
 // sentinelBody builds `{ return <zero>, <zero>, ... }` matching the function's
