@@ -641,17 +641,20 @@ function dynamicProofSucceeded(oracle: DynamicProofOracleSummary): boolean {
   );
 }
 
-function symbolTargetParts(symExtId: string): { file: string; method: string } {
+function symbolTargetParts(symExtId: string): { file: string; method: string; memberQualifier?: string } {
   const match = /^sym:(.+)#([^#]+)$/.exec(symExtId);
   if (!match) {
     throw new Error(`Cannot derive dynamic proof target from symbol id: ${symExtId}`);
   }
   const [, file, symbolName] = match;
-  const method = symbolName.split(".").filter(Boolean).pop();
+  const segments = symbolName.split(".").filter(Boolean);
+  const method = segments.pop();
   if (!file || !method) {
     throw new Error(`Cannot derive dynamic proof target from symbol id: ${symExtId}`);
   }
-  return { file, method };
+  // The owner qualifier of a member id (TS `Class.method`, Go `Recv.M`). The Go
+  // lane passes it as --recv so the mutator matches the exact receiver.
+  return { file, method, ...(segments.length ? { memberQualifier: segments.join(".") } : {}) };
 }
 
 function assertProofTargetMatchesSymbol(opts: DynamicProofOptions, symbolTarget: { file: string; method: string }): void {
@@ -1465,6 +1468,9 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     if (opts.timeout_ms !== undefined) args.push("--timeout-ms", String(opts.timeout_ms));
     // Slice 2: bind a runtime-named subtest's mutant failure to the exact assertion line.
     if (opts.go_assertion_line !== undefined) args.push("--go-assertion-line", String(opts.go_assertion_line));
+    // Receiver-qualified method target (`sym:file.go#Recv.M`) → the mutator must
+    // match the exact receiver, never a same-named decl on another type.
+    if (symbolTarget.memberQualifier) args.push("--recv", symbolTarget.memberQualifier);
     const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, {
       cwd: goRoot,
       scriptPath: dynamicProofSpikePathFor("go")

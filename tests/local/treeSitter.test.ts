@@ -55,8 +55,27 @@ describe("tree-sitter extraction (PR-1, language-agnostic)", () => {
     const go = ["package x", "func Top() {}", "func (r *Repo) Save() error { return nil }", "type Repo struct {}"].join("\n");
     const got = names(go, "go");
     expect(got).toContain("Top/function");
-    expect(got).toContain("Save/method"); // receiver method — the missed surface
+    expect(got).toContain("Repo.Save/method"); // receiver-qualified (pointer receiver unwrapped)
     expect(got).toContain("Repo/class");
+  });
+
+  it("Go: same-named methods on different receivers stay DISTINCT (receiver-qualified)", () => {
+    const go = [
+      "package x",
+      "type A struct{}",
+      "type B struct{}",
+      "type G[T any] struct{}",
+      "func (a *A) M() int { return 1 }",
+      "func (b B) M() int { return 2 }",
+      "func (g G[T]) M() int { return 3 }"
+    ].join("\n");
+    const got = names(go, "go");
+    // Pre-qualification these collapsed to ONE `M` symbol (first decl wins) — a wrong
+    // denominator. Each receiver now mints its own method symbol.
+    expect(got).toContain("A.M/method");
+    expect(got).toContain("B.M/method");
+    expect(got).toContain("G.M/method"); // generic receiver → base ident
+    expect(got).not.toContain("M/method");
   });
 
   it("does NOT extract symbols from comments or strings", () => {

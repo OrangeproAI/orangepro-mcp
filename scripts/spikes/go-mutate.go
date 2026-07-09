@@ -8,6 +8,8 @@
 // only: it writes no product artifacts and is not wired into prove/RTM/mint. The
 // name must resolve to exactly ONE declaration in the file (free or method);
 // collisions fail(3) as ambiguous, and generic receivers are refused (not found).
+// With --recv <T>, only a method on base receiver T matches (receiver-exact
+// selection for receiver-qualified `Recv.M` targets — never the wrong decl).
 //
 // Modes:
 //   sentinel   — replace body with a type-compatible, deliberately-wrong value
@@ -54,6 +56,7 @@ func fail(code int, format string, args ...any) {
 func main() {
 	file := flag.String("file", "", "path to the Go source file to mutate")
 	fn := flag.String("func", "", "exact name of the free function or method to mutate")
+	recv := flag.String("recv", "", "receiver base type name; when set, match only methods on this receiver")
 	out := flag.String("out", "", "path to write the mutated file (defaults to --file)")
 	mode := flag.String("mode", "sentinel", "sentinel | equivalent")
 	flag.Parse()
@@ -91,6 +94,17 @@ func main() {
 		if fd.Recv != nil && recvBaseIdent(fd) == nil {
 			continue
 		}
+		// Receiver-exact selection: when --recv is set, only a method on that base
+		// receiver type matches — a free function or another receiver never can, so
+		// a receiver-qualified target can never mutate the wrong declaration.
+		if *recv != "" {
+			if fd.Recv == nil {
+				continue
+			}
+			if id := recvBaseIdent(fd); id == nil || id.Name != *recv {
+				continue
+			}
+		}
 		matches = append(matches, fd)
 	}
 
@@ -98,6 +112,9 @@ func main() {
 		fail(3, "ambiguous: %d declarations named %q (free and/or methods)", len(matches), *fn)
 	}
 	if len(matches) == 0 {
+		if *recv != "" {
+			fail(4, "not found: no method named %q on receiver %q", *fn, *recv)
+		}
 		fail(4, "not found: no free function or method named %q", *fn)
 	}
 

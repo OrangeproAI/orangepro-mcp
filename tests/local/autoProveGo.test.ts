@@ -183,7 +183,7 @@ describe("isEligibleProvableTarget — Go free-functions only", () => {
   it("excludes a Go METHOD target (methods enter only via the hard-edge lane)", () => {
     const { ws } = analyzedGo("auto-drive");
     const g = loadGraph(workspacePaths(ws).graphPath);
-    const method = g.nodes.find((n) => n.external_id === "sym:handler.go#ProcessCart");
+    const method = g.nodes.find((n) => n.external_id === "sym:handler.go#Cart.ProcessCart");
     expect(method?.properties.symbol_kind).toBe("method");
     expect(isEligibleProvableTarget(method)).toBe(false);
   });
@@ -193,13 +193,13 @@ describe("existingAssociatedTests — a Go METHOD is admitted only via a hard ed
   it("admits the method-target fixture's Parser.Double through its analyzer-minted hard TESTED_BY edge", () => {
     const { ws } = analyzedGo("method-target");
     const g = loadGraph(workspacePaths(ws).graphPath);
-    const method = g.nodes.find((n) => n.external_id === "sym:parser.go#Double");
+    const method = g.nodes.find((n) => n.external_id === "sym:parser.go#Parser.Double");
     expect(method?.properties.symbol_kind).toBe("method");
     // The strict predicate refuses the method — the hard existing-tests lane is its ONLY route in.
     expect(isEligibleProvableTarget(method)).toBe(false);
     const nodeById = new Map(g.nodes.map((n) => [n.external_id, n]));
     const assoc = existingAssociatedTests(g, nodeById);
-    expect(assoc.get("sym:parser.go#Double")).toEqual([
+    expect(assoc.get("sym:parser.go#Parser.Double")).toEqual([
       { test: "parser_test.go", hard: true, testName: "TestDouble" },
     ]);
   });
@@ -260,13 +260,13 @@ describe.skipIf(!GO || !SLOW_GO_AUTO)("autoProve auto-drives Go to Dynamically P
     const loadZero = res.attempts.find((a) => a.target_symbol === "sym:handler.go#LoadZero");
     expect(loadZero?.classification).not.toBe("proven");
     // A Go METHOD target is never even attempted (excluded at selection).
-    expect(res.attempts.some((a) => a.target_symbol === "sym:handler.go#ProcessCart")).toBe(false);
+    expect(res.attempts.some((a) => a.target_symbol === "sym:handler.go#Cart.ProcessCart")).toBe(false);
 
     // RTM reflects exactly the one Go proof.
     const rtm = opRtm(ws, { format: "json" });
     expect(rtm.summary.proven).toBe(1);
     expect(rtm.rows.find((r) => r.code_symbol === "sym:handler.go#CreateTotal")?.evidence_tier).toBe("proven");
     expect(rtm.rows.find((r) => r.code_symbol === "sym:handler.go#LoadZero")?.evidence_tier).not.toBe("proven");
-    expect(rtm.rows.find((r) => r.code_symbol === "sym:handler.go#ProcessCart")?.evidence_tier).not.toBe("proven");
+    expect(rtm.rows.find((r) => r.code_symbol === "sym:handler.go#Cart.ProcessCart")?.evidence_tier).not.toBe("proven");
   }, 90000);
 });
