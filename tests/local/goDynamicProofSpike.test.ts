@@ -133,6 +133,23 @@ describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
     expect(status).toBe(0);
   }, TEST_TIMEOUT);
 
+  it("proves a receiver METHOD end-to-end (p := New(); p.Double() value assertion)", async () => {
+    const { verdict, status } = await runSpike(path.join(fixtures, "method-target"), {
+      testRun: "^TestDouble$",
+      target: "parser.go",
+      func: "Double"
+    });
+
+    // The mutator now mutates the lone method Double (receiver-agnostic sentinel);
+    // the value assertion kills it → a genuine trusted-assertion method proof.
+    expect(verdict.status).toBe("proven");
+    expect(verdict.proven).toBe(true);
+    expect(verdict.baseline.targetTestPassed).toBe(true);
+    expect("targetTestFailed" in verdict.mutant && verdict.mutant.targetTestFailed).toBe(true);
+    expect("trustedAssertion" in verdict.mutant && verdict.mutant.trustedAssertion).toBe(true);
+    expect(status).toBe(0);
+  }, TEST_TIMEOUT);
+
   it("keeps an equivalent-value mutation associated_survived (no false Proven)", async () => {
     const { verdict } = await runSpike(path.join(fixtures, "proven"), { mode: "equivalent" });
 

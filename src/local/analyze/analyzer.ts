@@ -1620,12 +1620,25 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const symId = `sym:${targetRel}#${name}`;
       return codeSymbolIds.has(symId) ? symId : null;
     };
-    const resolveGoProofTarget = (testRel: string, structure: TreeSitterStructure, qualifier: string | undefined, callee: string, shadowed: Set<string>): string | null => {
+    const resolveGoProofTarget = (testRel: string, structure: TreeSitterStructure, qualifier: string | undefined, callee: string, shadowed: Set<string>, receiverLocal?: boolean): string | null => {
       if (!qualifier) {
         if (shadowed.has(callee) || structure.packageName?.endsWith("_test")) return null;
         return eligibleGoSymbol(uniqueGoPackageSymbol(dirOf(testRel), callee), callee);
       }
       const rootQualifier = qualifier.split(".")[0];
+      // Receiver-local METHOD call `p.M()`: the qualifier `p` is a LOCAL by design
+      // (declared `p := New(...)`), so this must be checked BEFORE the qualifier-shadow
+      // guard (which exists to reject package-func names shadowed by locals, not receivers).
+      // Resolve to the SAME-package UNIQUE symbol named M iff it is a method:
+      // uniqueGoPackageSymbol refuses cross-file collisions; the file-scoped mutator refuses
+      // in-file collisions; together = package-unique. The frozen oracle only fails closed in
+      // the survive direction, so this receiver pinning-by-refusal is what keeps method
+      // proofs no-false-Proven. The callee (method name) still honors shadowing.
+      if (receiverLocal && !shadowed.has(callee) && !structure.packageName?.endsWith("_test")) {
+        const targetRel = uniqueGoPackageSymbol(dirOf(testRel), callee);
+        if (!targetRel || symbolKind(targetRel, callee) !== "method") return null;
+        return eligibleGoSymbol(targetRel, callee);
+      }
       if (shadowed.has(rootQualifier)) return null;
       const binding = structure.imports.find((i) => i.local === rootQualifier && i.kind === "module");
       const targetDir = binding ? resolveGoImportDir(testRel, binding.module) : null;
@@ -1763,7 +1776,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const testExternalId = `test:${testRel}`;
       for (const proof of structure.goProofCalls ?? []) {
         goProofAttempted++;
-        const symId = resolveGoProofTarget(testRel, structure, proof.qualifier, proof.callee, new Set(proof.shadowed));
+        const symId = resolveGoProofTarget(testRel, structure, proof.qualifier, proof.callee, new Set(proof.shadowed), proof.receiverLocal);
         if (!symId) continue;
         const edgeKey = `${testExternalId}|${symId}`;
         if (seenGoProof.has(edgeKey)) continue;

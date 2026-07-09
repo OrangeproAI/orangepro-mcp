@@ -13,8 +13,10 @@ func LoadZero() int {
 	return 0
 }
 
-// Cart is a receiver type so ProcessCart is a METHOD, not a free function. The Go
-// oracle (G-1) refuses methods; auto-drive excludes it at selection.
+// Cart is a receiver type so ProcessCart is a METHOD, not a free function. Methods
+// enter auto-drive only via a hard receiver-local TESTED_BY edge; TestProcessCart
+// builds its receiver from a composite literal (no bare constructor), so no such
+// edge is minted and auto-drive excludes ProcessCart at selection.
 type Cart struct{ items int }
 
 // ProcessCart has a behavior-surface-like name but is a method -> excluded.
