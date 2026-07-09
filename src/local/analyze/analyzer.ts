@@ -1604,17 +1604,14 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       return codeSymbolIds.has(symId) ? symId : null;
     };
     /**
-     * Resolve a bare method name from a test call `p.M()` to the package's single
-     * receiver-qualified method symbol `Recv.M`. Go method symbols are minted
-     * qualified (engine `goReceiverBaseName`), so a bare callee must map back;
-     * a bare-named hit (underivable receiver) is matched too. EXACTLY one method
-     * across the package's product files, else null — the cross-file/in-file
-     * collision refusal that keeps receiver binding fail-closed. Same-named FREE
-     * functions no longer block method resolution (kind-filtered): the mutator's
-     * receiver-exact `--recv` match means a free fn can never be mutated in a
-     * method attempt.
+     * ALL package method symbols whose bare name is `bareName` — receiver-qualified
+     * `Recv.M` hits plus bare-named ones (underivable receiver). Go method symbols
+     * are minted qualified (engine `goReceiverBaseName`), so a bare test callee maps
+     * back through this. Same-named FREE functions never appear (kind-filtered):
+     * the mutator's receiver-exact `--recv` match means a free fn can never be
+     * mutated in a method attempt.
      */
-    const uniqueGoPackageMethod = (dir: string, bareName: string): { file: string; qualified: string } | null => {
+    const goPackageMethodHits = (dir: string, bareName: string): Array<{ file: string; qualified: string }> => {
       const suffix = `.${bareName}`;
       const hits: Array<{ file: string; qualified: string }> = [];
       for (const f of goFilesByDir.get(dir) ?? []) {
@@ -1623,7 +1620,19 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           if ((n === bareName || n.endsWith(suffix)) && symbolKind(f, n) === "method") hits.push({ file: f, qualified: n });
         }
       }
-      return hits.length === 1 ? hits[0] : null;
+      return hits;
+    };
+    /**
+     * Receiver type pinned from a constructor's DECLARED result: `p := New(...)` →
+     * New's single `T`/`*T` result base name (engine `goCtorResults`, structurally
+     * capturable results only). Undefined — never a guess — when the ctor is not
+     * package-unique or its result was not capturable (multi-return, interface,
+     * qualified, generic): receiver pinning must fail closed.
+     */
+    const goCtorResultType = (dir: string, ctorName: string): string | undefined => {
+      const ctorFile = uniqueGoPackageSymbol(dir, ctorName);
+      if (!ctorFile) return undefined;
+      return nonTsStructureByFile.get(ctorFile)?.structure.goCtorResults?.[ctorName];
     };
     const eligiblePythonSymbol = (targetRel: string | null, name: string): string | null => {
       if (!targetRel || !(proofEligibleSymbolsByFile.get(targetRel) ?? []).includes(name)) return null;
@@ -1642,7 +1651,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const symId = `sym:${targetRel}#${name}`;
       return codeSymbolIds.has(symId) ? symId : null;
     };
-    const resolveGoProofTarget = (testRel: string, structure: TreeSitterStructure, qualifier: string | undefined, callee: string, shadowed: Set<string>, receiverLocal?: boolean): string | null => {
+    const resolveGoProofTarget = (testRel: string, structure: TreeSitterStructure, qualifier: string | undefined, callee: string, shadowed: Set<string>, receiverLocal?: boolean, receiverCtor?: string): string | null => {
       if (!qualifier) {
         if (shadowed.has(callee) || structure.packageName?.endsWith("_test")) return null;
         return eligibleGoSymbol(uniqueGoPackageSymbol(dirOf(testRel), callee), callee);
@@ -1651,16 +1660,25 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       // Receiver-local METHOD call `p.M()`: the qualifier `p` is a LOCAL by design
       // (declared `p := New(...)`), so this must be checked BEFORE the qualifier-shadow
       // guard (which exists to reject package-func names shadowed by locals, not receivers).
-      // Resolve the bare callee to the SAME-package UNIQUE receiver-qualified method
-      // symbol (`Recv.M`): uniqueGoPackageMethod refuses when the package holds more
-      // than one method named M (any receivers, any files) — receiver pinning-by-refusal
-      // — and the mutator's `--recv` exact match is the in-sandbox backstop. The frozen
-      // oracle only fails closed in the survive direction, so this refusal is what keeps
-      // method proofs no-false-Proven. The callee (method name) still honors shadowing.
+      // Resolve the bare callee among the package's receiver-qualified method symbols
+      // (`Recv.M`):
+      //   - ONE method named M package-wide → take it (the #212 unique-name behavior;
+      //     the mutator's `--recv` exact match keeps the mutation on that receiver).
+      //   - MULTIPLE methods named M → pin the receiver TYPE from the constructor's
+      //     DECLARED result (`p := New(...)` → goCtorResultType, structurally provable
+      //     results only) and require exactly one `pin.M` hit; no provable pin → refuse
+      //     (the pre-pinning fail-closed behavior).
+      // The pin SELECTS only — it never rejects the unique candidate (an interface- or
+      // alias-returning ctor would name an abstraction, not a receiver, and a wrong
+      // selection is fail-safe anyway: the frozen oracle only fails closed in the
+      // survive direction). Callee and ctor both honor shadowing.
       if (receiverLocal && !shadowed.has(callee) && !structure.packageName?.endsWith("_test")) {
-        const m = uniqueGoPackageMethod(dirOf(testRel), callee);
-        if (!m) return null;
-        return eligibleGoSymbol(m.file, m.qualified);
+        const hits = goPackageMethodHits(dirOf(testRel), callee);
+        if (hits.length === 1) return eligibleGoSymbol(hits[0].file, hits[0].qualified);
+        const pinned = receiverCtor && !shadowed.has(receiverCtor) ? goCtorResultType(dirOf(testRel), receiverCtor) : undefined;
+        if (!pinned) return null;
+        const match = hits.filter((h) => h.qualified === `${pinned}.${callee}`);
+        return match.length === 1 ? eligibleGoSymbol(match[0].file, match[0].qualified) : null;
       }
       if (shadowed.has(rootQualifier)) return null;
       const binding = structure.imports.find((i) => i.local === rootQualifier && i.kind === "module");
@@ -1799,7 +1817,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const testExternalId = `test:${testRel}`;
       for (const proof of structure.goProofCalls ?? []) {
         goProofAttempted++;
-        const symId = resolveGoProofTarget(testRel, structure, proof.qualifier, proof.callee, new Set(proof.shadowed), proof.receiverLocal);
+        const symId = resolveGoProofTarget(testRel, structure, proof.qualifier, proof.callee, new Set(proof.shadowed), proof.receiverLocal, proof.receiverCtor);
         if (!symId) continue;
         const edgeKey = `${testExternalId}|${symId}`;
         if (seenGoProof.has(edgeKey)) continue;

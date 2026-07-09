@@ -49,6 +49,13 @@ export interface TreeSitterGoProofCall extends TreeSitterRawCall {
    */
   receiverLocal?: boolean;
   /**
+   * The CONSTRUCTOR name that declared the receiver var (`p := New(...)` → "New").
+   * Set only alongside receiverLocal. The analyzer resolves the ctor's declared
+   * result type (goCtorResults) to PIN the receiver type, so same-named methods on
+   * different receivers (A.M / B.M) can be disambiguated instead of refused.
+   */
+  receiverCtor?: string;
+  /**
    * 1-based source line of the assertion CALL in the test file where this target was
    * witnessed (the line Go prints in the failing frame). Slice 2 uses it to bind a
    * runtime-named subtest's mutant failure to THIS exact assertion — a sibling subtest
@@ -87,6 +94,14 @@ export interface TreeSitterStructure {
   javaProofCalls?: TreeSitterJavaProofCall[];
   goProofCalls?: TreeSitterGoProofCall[];
   pythonProofCalls?: TreeSitterPythonProofCall[];
+  /**
+   * Go only: top-level function name → base name of its SINGLE declared result
+   * type (`func New(...) *Parser` → "Parser"). Captured ONLY when the result is a
+   * bare or pointer type_identifier — multi-return, interface, qualified, and
+   * generic results are OMITTED so constructor-based receiver pinning fails
+   * closed on anything it cannot prove structurally.
+   */
+  goCtorResults?: Record<string, string>;
 }
 
 /** Resolve a grammar wasm shipped by the tree-sitter-wasms dependency. */
@@ -452,6 +467,26 @@ function javaPackage(root: Node): string | undefined {
 function goPackage(root: Node): string | undefined {
   const pkg = namedChildren(root).find((n) => n.type === "package_clause");
   return pkg ? namedChildren(pkg).find((n) => n.type === "package_identifier")?.text : undefined;
+}
+
+/**
+ * Top-level Go function name → base name of its single declared result type
+ * (`func New(n int) *Parser` → "Parser"). ONLY a bare `type_identifier` (optionally
+ * behind one `*`) is captured; multi-return (`parameter_list`), interface, qualified
+ * (`pkg.T`), and generic results are omitted — constructor-based receiver pinning
+ * must fail closed on any result it cannot prove structurally.
+ */
+function extractGoCtorResults(root: Node): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const child of namedChildren(root)) {
+    if (child.type !== "function_declaration") continue;
+    const name = child.childForFieldName("name")?.text;
+    if (!name) continue;
+    let r = child.childForFieldName("result") ?? undefined;
+    if (r?.type === "pointer_type") r = r.namedChild(0) ?? undefined;
+    if (r?.type === "type_identifier") out[name] = r.text;
+  }
+  return out;
 }
 
 function kotlinPackage(root: Node): string | undefined {
@@ -887,10 +922,11 @@ function goShortVarCalls(stmt: Node): { names: Set<string>; calls: Array<{ calle
 function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): TreeSitterGoProofCall[] {
   const out: TreeSitterGoProofCall[] = [];
   const seen = new Set<string>();
-  // Names declared in the CURRENT test func by a bare same-package `x := New(...)`
-  // (single unqualified call). Reset per top-level test func; used to mark a
-  // qualified proof-call `p.M()` as a receiver-local method call.
-  let receiverLocals = new Set<string>();
+  // Var name → constructor name for locals declared in the CURRENT test func by a
+  // bare same-package `x := New(...)` (single unqualified call). Reset per top-level
+  // test func; marks a qualified proof-call `p.M()` as receiver-local AND carries
+  // the ctor name so the analyzer can pin p's receiver type from New's result.
+  let receiverLocals = new Map<string, string>();
   const assertLocals = goAssertLocals(imports);
   const dotAssertMethods = goDotAssertMethods(root);
   const suiteTypes = goCanonicalSuiteTypes(root, goSuiteLocals(imports));
@@ -905,8 +941,8 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
       const key = `${testName}|${c.qualifier ?? ""}|${c.callee}|${assertion}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const receiverLocal = c.via === "qualified" && !!c.qualifier && !c.qualifier.includes(".") && receiverLocals.has(c.qualifier);
-      out.push({ caller: testName, testName, ...c, shadowed: [...shadowed], assertion, ...(assertionLine ? { assertionLine } : {}), ...(receiverLocal ? { receiverLocal: true } : {}) });
+      const receiverCtor = c.via === "qualified" && !!c.qualifier && !c.qualifier.includes(".") ? receiverLocals.get(c.qualifier) : undefined;
+      out.push({ caller: testName, testName, ...c, shadowed: [...shadowed], assertion, ...(assertionLine ? { assertionLine } : {}), ...(receiverCtor ? { receiverLocal: true, receiverCtor } : {}) });
     }
   };
   const processBlock = (block: Node, testName: string, testingParams: Set<string>, shadowed: Set<string>): void => {
@@ -985,7 +1021,7 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
         const rhsCalls = rhs ? namedChildren(rhs).filter((n) => n.type === "call_expression") : [];
         if (rhsNames.size === 1 && rhsCalls.length === 1) {
           const cp = callParts(rhsCalls[0], "go");
-          if (cp && cp.via === "free") receiverLocals.add([...rhsNames][0]);
+          if (cp && cp.via === "free") receiverLocals.set([...rhsNames][0], cp.callee);
         }
       } else if (stmt.type === "assignment_statement") {
         // Reassigning a receiver-local invalidates it too.
@@ -1029,7 +1065,7 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
     const testingParams = goTestingParamNames(child);
     const body = child.childForFieldName("body");
     if (!testingParams.size || !body) continue;
-    receiverLocals = new Set<string>();
+    receiverLocals = new Map<string, string>();
     processBlock(body, name, testingParams, localBindings(child, "go"));
   }
   return out;
@@ -1495,7 +1531,7 @@ export function extractTreeSitterStructure(content: string, language: string): T
   const imports = extractImports(root, language);
   const result = {
     ...(language === "java" ? { packageName: javaPackage(root), javaClasses: javaClassInfos(root), javaProofCalls: extractJavaProofCalls(root, imports) } : {}),
-    ...(language === "go" ? { packageName: goPackage(root) } : {}),
+    ...(language === "go" ? { packageName: goPackage(root), goCtorResults: extractGoCtorResults(root) } : {}),
     ...(language === "kotlin" ? { packageName: kotlinPackage(root), topLevelSymbols: kotlinTopLevelSymbols(root) } : {}),
     ...(language === "php" ? { moduleName: phpNamespace(root) } : {}),
     ...(language === "csharp" ? { moduleName: csharpNamespace(root) } : {}),
