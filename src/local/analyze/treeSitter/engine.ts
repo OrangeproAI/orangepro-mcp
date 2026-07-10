@@ -49,6 +49,13 @@ export interface TreeSitterGoProofCall extends TreeSitterRawCall {
    */
   receiverLocal?: boolean;
   /**
+   * The CONSTRUCTOR name that declared the receiver var (`p := New(...)` → "New").
+   * Set only alongside receiverLocal. The analyzer resolves the ctor's declared
+   * result type (goCtorResults) to PIN the receiver type, so same-named methods on
+   * different receivers (A.M / B.M) can be disambiguated instead of refused.
+   */
+  receiverCtor?: string;
+  /**
    * 1-based source line of the assertion CALL in the test file where this target was
    * witnessed (the line Go prints in the failing frame). Slice 2 uses it to bind a
    * runtime-named subtest's mutant failure to THIS exact assertion — a sibling subtest
@@ -87,6 +94,14 @@ export interface TreeSitterStructure {
   javaProofCalls?: TreeSitterJavaProofCall[];
   goProofCalls?: TreeSitterGoProofCall[];
   pythonProofCalls?: TreeSitterPythonProofCall[];
+  /**
+   * Go only: top-level function name → base name of its SINGLE declared result
+   * type (`func New(...) *Parser` → "Parser"). Captured ONLY when the result is a
+   * bare or pointer type_identifier — multi-return, interface, qualified, and
+   * generic results are OMITTED so constructor-based receiver pinning fails
+   * closed on anything it cannot prove structurally.
+   */
+  goCtorResults?: Record<string, string>;
 }
 
 /** Resolve a grammar wasm shipped by the tree-sitter-wasms dependency. */
@@ -323,9 +338,13 @@ export function extractTreeSitterSymbols(content: string, language: string): Sym
     if (kind && shouldEmitSymbol(node, language)) {
       const name = symbolName(node, cfg);
       if (name && !RESERVED_SYMBOL_NAMES.has(name)) {
+        // Go methods mint receiver-qualified names (`Recv.M`, mirroring TS/JS
+        // `Class.method` + member_of) so same-named methods on different receivers
+        // stay distinct symbols; an underivable receiver falls back to the bare name.
+        const recv = kind === "method" && language === "go" ? goReceiverBaseName(node) : undefined;
         add(
           kind === "method"
-            ? { name, symbol_kind: kind, trivial_accessor: isTrivialAccessorBody(node, language), ...nodeLines(node) }
+            ? { name: recv ? `${recv}.${name}` : name, ...(recv ? { member_of: recv } : {}), symbol_kind: kind, trivial_accessor: isTrivialAccessorBody(node, language), ...nodeLines(node) }
             : { name, symbol_kind: kind, ...nodeLines(node) }
         );
       }
@@ -426,6 +445,20 @@ function functionName(node: Node, language: string): string | undefined {
   return name;
 }
 
+/**
+ * Base receiver type name for a Go method declaration — `(p *Parser)` → "Parser",
+ * `(g Generic[T])` → "Generic". Undefined when the receiver shape is underivable,
+ * in which case callers fall back to the bare method name (the pre-qualified
+ * behavior). NOT used for test-name extraction — suite test names must stay bare
+ * (`^Test` gate at extractGoProofCalls).
+ */
+function goReceiverBaseName(node: Node): string | undefined {
+  const param = node.childForFieldName("receiver")?.namedChild(0);
+  let t = param?.childForFieldName("type") ?? undefined;
+  if (t && (t.type === "pointer_type" || t.type === "generic_type")) t = t.namedChild(0) ?? undefined;
+  return t?.type === "type_identifier" ? t.text : undefined;
+}
+
 function javaPackage(root: Node): string | undefined {
   const pkg = namedChildren(root).find((n) => n.type === "package_declaration");
   return pkg ? namedChildren(pkg).find((n) => n.type.endsWith("identifier"))?.text : undefined;
@@ -434,6 +467,26 @@ function javaPackage(root: Node): string | undefined {
 function goPackage(root: Node): string | undefined {
   const pkg = namedChildren(root).find((n) => n.type === "package_clause");
   return pkg ? namedChildren(pkg).find((n) => n.type === "package_identifier")?.text : undefined;
+}
+
+/**
+ * Top-level Go function name → base name of its single declared result type
+ * (`func New(n int) *Parser` → "Parser"). ONLY a bare `type_identifier` (optionally
+ * behind one `*`) is captured; multi-return (`parameter_list`), interface, qualified
+ * (`pkg.T`), and generic results are omitted — constructor-based receiver pinning
+ * must fail closed on any result it cannot prove structurally.
+ */
+function extractGoCtorResults(root: Node): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const child of namedChildren(root)) {
+    if (child.type !== "function_declaration") continue;
+    const name = child.childForFieldName("name")?.text;
+    if (!name) continue;
+    let r = child.childForFieldName("result") ?? undefined;
+    if (r?.type === "pointer_type") r = r.namedChild(0) ?? undefined;
+    if (r?.type === "type_identifier") out[name] = r.text;
+  }
+  return out;
 }
 
 function kotlinPackage(root: Node): string | undefined {
@@ -869,10 +922,11 @@ function goShortVarCalls(stmt: Node): { names: Set<string>; calls: Array<{ calle
 function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): TreeSitterGoProofCall[] {
   const out: TreeSitterGoProofCall[] = [];
   const seen = new Set<string>();
-  // Names declared in the CURRENT test func by a bare same-package `x := New(...)`
-  // (single unqualified call). Reset per top-level test func; used to mark a
-  // qualified proof-call `p.M()` as a receiver-local method call.
-  let receiverLocals = new Set<string>();
+  // Var name → constructor name for locals declared in the CURRENT test func by a
+  // bare same-package `x := New(...)` (single unqualified call). Reset per top-level
+  // test func; marks a qualified proof-call `p.M()` as receiver-local AND carries
+  // the ctor name so the analyzer can pin p's receiver type from New's result.
+  let receiverLocals = new Map<string, string>();
   const assertLocals = goAssertLocals(imports);
   const dotAssertMethods = goDotAssertMethods(root);
   const suiteTypes = goCanonicalSuiteTypes(root, goSuiteLocals(imports));
@@ -887,8 +941,8 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
       const key = `${testName}|${c.qualifier ?? ""}|${c.callee}|${assertion}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const receiverLocal = c.via === "qualified" && !!c.qualifier && !c.qualifier.includes(".") && receiverLocals.has(c.qualifier);
-      out.push({ caller: testName, testName, ...c, shadowed: [...shadowed], assertion, ...(assertionLine ? { assertionLine } : {}), ...(receiverLocal ? { receiverLocal: true } : {}) });
+      const receiverCtor = c.via === "qualified" && !!c.qualifier && !c.qualifier.includes(".") ? receiverLocals.get(c.qualifier) : undefined;
+      out.push({ caller: testName, testName, ...c, shadowed: [...shadowed], assertion, ...(assertionLine ? { assertionLine } : {}), ...(receiverCtor ? { receiverLocal: true, receiverCtor } : {}) });
     }
   };
   const processBlock = (block: Node, testName: string, testingParams: Set<string>, shadowed: Set<string>): void => {
@@ -967,7 +1021,7 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
         const rhsCalls = rhs ? namedChildren(rhs).filter((n) => n.type === "call_expression") : [];
         if (rhsNames.size === 1 && rhsCalls.length === 1) {
           const cp = callParts(rhsCalls[0], "go");
-          if (cp && cp.via === "free") receiverLocals.add([...rhsNames][0]);
+          if (cp && cp.via === "free") receiverLocals.set([...rhsNames][0], cp.callee);
         }
       } else if (stmt.type === "assignment_statement") {
         // Reassigning a receiver-local invalidates it too.
@@ -1011,7 +1065,7 @@ function extractGoProofCalls(root: Node, imports: TreeSitterImportBinding[]): Tr
     const testingParams = goTestingParamNames(child);
     const body = child.childForFieldName("body");
     if (!testingParams.size || !body) continue;
-    receiverLocals = new Set<string>();
+    receiverLocals = new Map<string, string>();
     processBlock(body, name, testingParams, localBindings(child, "go"));
   }
   return out;
@@ -1453,7 +1507,13 @@ export function extractTreeSitterStructure(content: string, language: string): T
         nextShadowed = new Set();
         nextInsideFunction = true;
       } else {
-        const name = functionName(node, language);
+        let name = functionName(node, language);
+        // Go method symbols are receiver-qualified — attribute calls to the
+        // qualified caller so Layer-1 edges keep matching the emitted symbol.
+        if (name && language === "go" && node.type === "method_declaration") {
+          const recv = goReceiverBaseName(node);
+          if (recv) name = `${recv}.${name}`;
+        }
         if (name) {
           nextCaller = name;
           nextShadowed = localBindings(node, language);
@@ -1471,7 +1531,7 @@ export function extractTreeSitterStructure(content: string, language: string): T
   const imports = extractImports(root, language);
   const result = {
     ...(language === "java" ? { packageName: javaPackage(root), javaClasses: javaClassInfos(root), javaProofCalls: extractJavaProofCalls(root, imports) } : {}),
-    ...(language === "go" ? { packageName: goPackage(root) } : {}),
+    ...(language === "go" ? { packageName: goPackage(root), goCtorResults: extractGoCtorResults(root) } : {}),
     ...(language === "kotlin" ? { packageName: kotlinPackage(root), topLevelSymbols: kotlinTopLevelSymbols(root) } : {}),
     ...(language === "php" ? { moduleName: phpNamespace(root) } : {}),
     ...(language === "csharp" ? { moduleName: csharpNamespace(root) } : {}),

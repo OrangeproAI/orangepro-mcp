@@ -10,7 +10,9 @@
  * third-party graph product or format.
  */
 
-export const LOCAL_GRAPH_SCHEMA_VERSION = "orangepro.local_graph.v1" as const;
+// v2: Go method symbol ids are receiver-qualified (`sym:file.go#Recv.M`) — old
+// graphs hold bare-name method ids and must force-rebuild (loadGraph hard-fails).
+export const LOCAL_GRAPH_SCHEMA_VERSION = "orangepro.local_graph.v2" as const;
 
 /**
  * Where a behavior node came from — drives denominator eligibility (Gate 3).
