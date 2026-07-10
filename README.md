@@ -106,7 +106,6 @@ Add to your client's MCP config:
 
 | Client | Config location |
 | --- | --- |
-|--------|----------------|
 | Claude Code | `.mcp.json` or `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` or Settings → MCP |
 | Codex | Config printed by `opro agent --client codex` or `npx -y @orangepro/mcp-server@latest agent --client codex` |
@@ -211,6 +210,8 @@ Every behavior gets exactly one tier. Nothing is labeled "tested" on faith.
 | **No Signal** | Nothing tests this behavior yet | — |
 
 > **"Dynamically Proven 0" is normal on first run.** Static analysis always runs. Dynamic proof requires running tests against targeted mutations. That's the trust model — nothing is Dynamically Proven until a real test kills a real mutant.
+
+When runtime coverage is available, `opro start` also compares Runtime-covered and Dynamically Proven behaviors over the same deterministic denominator. It never compares source-line coverage with behavior proof or folds off-denominator proofs into that percentage.
 
 ---
 
