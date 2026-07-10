@@ -624,6 +624,34 @@ describe("Go hard proof", () => {
     expect(hardCoverEdges(root)).toEqual([]);
   });
 
+  it("unique method candidate is taken even when the ctor pin names an abstraction (pin selects, never rejects)", () => {
+    const root = repo({
+      "svc/svc.go": [
+        "package svc",
+        "type Chooser interface{ M() int }",
+        "type A struct{}",
+        "func (a *A) M() int { return 1 }",
+        "func Pick() Chooser { return &A{} }"
+      ].join("\n"),
+      "svc/svc_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  c := Pick()",
+        "  if got := c.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // ONE method named M exists (A.M). Pick's declared result is the interface — a
+    // pin that would CONTRADICT the lone candidate — but the pin only ever SELECTS
+    // among collisions: the unique candidate keeps the #212 unique-name behavior and
+    // binds (wrong selection is fail-safe; --recv is the in-sandbox backstop). This
+    // test goes RED if contradiction-refusal is ever reinstated on the unique path.
+    expect(hardCoverEdges(root)).toEqual(["test:svc/svc_test.go -> sym:svc/svc.go#A.M"]);
+  });
+
   it("refuses a SHADOWED ctor over a collision (local New → pin dropped, fail closed)", () => {
     const root = repo({
       "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() *A { return &A{} }\nfunc (a *A) M() int { return 1 }\n",
