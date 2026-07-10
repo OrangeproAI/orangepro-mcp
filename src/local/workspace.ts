@@ -33,7 +33,7 @@ export function graphExists(root: string): boolean {
   return existsSync(workspacePaths(root).graphPath);
 }
 
-const ORANGEPROIGNORE_TEMPLATE = `# .orangeproignore — paths the OrangePro local proof kit should never read.
+const ORANGEPROIGNORE_PREAMBLE = `# .orangeproignore — paths the OrangePro local proof kit should never read.
 # Same spirit as .gitignore. Secrets and large assets are excluded by default.
 *.env
 *.pem
@@ -44,7 +44,9 @@ secrets/
 
 # Product-denominator defaults: example/demo apps are useful references, but
 # they usually should not count as product behavior coverage.
-examples/
+`;
+
+export const LEGACY_ORANGEPROIGNORE_TEMPLATE = `${ORANGEPROIGNORE_PREAMBLE}examples/
 example/
 demos/
 demo/
@@ -53,6 +55,17 @@ sample/
 docs/examples/
 docs/demo/
 docs/demos/
+`;
+
+export const ORANGEPROIGNORE_TEMPLATE = `${ORANGEPROIGNORE_PREAMBLE}/examples/
+/example/
+/demos/
+/demo/
+/samples/
+/sample/
+/docs/examples/
+/docs/demo/
+/docs/demos/
 `;
 
 export function initWorkspace(root: string, now: string): { paths: WorkspacePaths; config: LocalProofConfig } {
@@ -73,6 +86,16 @@ export function initWorkspace(root: string, now: string): { paths: WorkspacePath
   const ignorePath = join(paths.root, ".orangeproignore");
   if (!existsSync(ignorePath)) {
     writeFileSync(ignorePath, ORANGEPROIGNORE_TEMPLATE, "utf8");
+  } else {
+    // Upgrade only the untouched generated template. A user-edited ignore file
+    // is configuration and must never be rewritten implicitly.
+    try {
+      if (readFileSync(ignorePath, "utf8") === LEGACY_ORANGEPROIGNORE_TEMPLATE) {
+        writeFileSync(ignorePath, ORANGEPROIGNORE_TEMPLATE, "utf8");
+      }
+    } catch {
+      // A read-only or transiently unavailable ignore file must not fail init.
+    }
   }
 
   return { paths, config: loadConfig(paths) };
