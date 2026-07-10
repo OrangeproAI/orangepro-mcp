@@ -1,70 +1,73 @@
 # OrangePro — Quickstart
 
-Map behavior coverage and generate grounded tests for your repo — locally, with your own
-model key when generation is needed. No account, no sign-up, nothing leaves your machine.
+Map behavior coverage, dynamically prove existing tests, and generate grounded tests for
+your repo. No OrangePro account or sign-up is required. Deterministic analysis stays local;
+when AI lanes are enabled, grounded context is sent directly to your configured BYOK model.
 
 ---
 
-## 1. Install the `opro` command (one time)
-
-```bash
-npm install -g @orangepro/orangepro-mcp
-opro help
-```
-
-> Developing from source instead?
-> ```bash
-> git clone https://github.com/OrangeproAI/orangepro-mcp.git
-> cd orangepro-mcp && npm ci && npm run build && npm link
-> ```
-
-## 2. Point it at your repo
+## 1. Install the repository dependencies
 
 ```bash
 cd /path/to/your/repo
-opro
+npm install # or pnpm install / bun install / the repository's package manager
 ```
 
-`opro` builds the deterministic graph, writes `.orangepro/behavior-coverage.html`,
-writes `.orangepro/rtm.md`, checks the current branch diff when possible, and prints next
-actions for your coding agent. If it finds no behavior anchors, add a requirements
-file or run on a repo path with tests/code that OrangePro can parse.
+Dynamic proof runs the repository's real tests, so their dependencies must be available.
 
-## 3. Optional: add your model key
+## 2. Optional: add one model provider
 
 ```bash
-export OPENAI_API_KEY=<your local key>        # or ANTHROPIC_API_KEY, or run a local Ollama
+export OPENAI_API_KEY="..." # or ANTHROPIC_API_KEY / OLLAMA_BASE_URL
 ```
 
-Or just run `opro setup` once to pick a provider + model interactively. Your key stays
-in your environment — it's never saved. No key is required to prove existing tests.
-A key is required to generate new tests or AI candidate flows. Dynamically Proven
-coverage still comes only from deterministic proof.
+No key is required for static mapping or proving existing tests. A key enables AI candidate
+links, candidate flows, and grounded test generation. AI output is never proof.
 
-## 4. Generate tests
+## 3. Run one command
 
 ```bash
-opro                            # refresh graph + RTM + weak AI grounding when configured
-opro generate                  # for the most test-worthy behavior in the repo
-opro generate --base main      # only for what your branch/PR changed (vs main)
+npx -y @orangepro/mcp-server@latest start . --prompt-version v5
 ```
 
-`--base <ref>` is the useful one on a real branch — it generates tests for the code
-**you actually changed**, not the whole repo.
+This runs deterministic analysis, existing-tests-first dynamic proof, optional AI candidate
+flows and top-risk test generation, then writes the final report and RTM. Generated tests are
+contained under `orangepro_generated/`; existing source and tests are not edited.
 
-## 5. See the results
+For a global installation instead:
+
+```bash
+npm install -g @orangepro/orangepro-mcp
+opro start . --prompt-version v5
+```
+
+## 4. See the results
 
 ```bash
 open .orangepro/behavior-coverage.html
 open .orangepro/rtm.md           # traceability matrix
 ```
 
-The generated test cases include run hints. With an AI coding agent (Cursor, Claude
-Code, Codex, OpenCode) the agent can write each runnable test, run the command, and
-call `orangepro_prove` with the returned `prove_run` args so OrangePro dynamically
-checks whether the gap became Dynamically Proven.
+If proof could not run, inspect the exact blocker:
+
+```bash
+npx -y @orangepro/mcp-server@latest doctor --proof
+```
+
+## 5. Connect a coding agent
+
+```bash
+npx -y @orangepro/mcp-server@latest agent --client codex
+npx -y @orangepro/mcp-server@latest agent --client claude-code
+npx -y @orangepro/mcp-server@latest agent --client cursor
+npx -y @orangepro/mcp-server@latest agent --client generic
+```
+
+Use the printed MCP configuration. The agent can write and run generated tests, then call
+`orangepro_prove` so only a real mutation kill becomes Dynamically Proven.
 
 ---
 
-That's the whole loop: **install → `opro` → agent writes/runs tests → `orangepro_prove`.** Full reference
-in [README.md](README.md).
+That's the loop: **install repository dependencies → one OrangePro command → inspect the
+report → optionally let an agent close the remaining proof gaps.** Full reference in
+[README.md](README.md).

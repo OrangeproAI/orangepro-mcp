@@ -90,12 +90,13 @@ export function loadIgnore(root: string): IgnoreRules {
     for (const raw of lines) {
       const line = raw.trim();
       if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+      const rootAnchored = line.startsWith("/");
       const cleaned = line.replace(/^\/+/, "").replace(/\/+$/, "");
       if (!cleaned) continue;
-      if (!cleaned.includes("/") && !cleaned.includes("*")) {
+      if (!rootAnchored && !cleaned.includes("/") && !cleaned.includes("*")) {
         names.add(cleaned);
       } else {
-        matchers.push(globToRegExp(cleaned));
+        matchers.push(globToRegExp(cleaned, rootAnchored));
       }
     }
   }
@@ -103,7 +104,7 @@ export function loadIgnore(root: string): IgnoreRules {
   return { names, matchers };
 }
 
-function globToRegExp(glob: string): RegExp {
+function globToRegExp(glob: string, rootAnchored = false): RegExp {
   // Use a plain-ASCII sentinel for `**` so the file stays text (no NUL bytes)
   // and `*` substitution does not re-match the globstar.
   const GLOBSTAR = "__ORANGEPRO_GLOBSTAR__";
@@ -114,7 +115,7 @@ function globToRegExp(glob: string): RegExp {
     .split(GLOBSTAR)
     .join(".*")
     .replace(/\?/g, "[^/]");
-  return new RegExp(`(^|/)${escaped}(/|$)`);
+  return new RegExp(`${rootAnchored ? "^" : "(^|/)"}${escaped}(/|$)`);
 }
 
 function isIgnored(relPath: string, baseName: string, rules: IgnoreRules): boolean {
