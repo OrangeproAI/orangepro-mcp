@@ -25,6 +25,7 @@ import { runHintsFor } from "../../src/local/generate/runHints.js";
 import type { GeneratedTest } from "../../src/local/graph/ontology.js";
 import type { ModelCompletionRequest, ModelProvider } from "../../src/local/types.js";
 import { loadGraph, workspacePaths } from "../../src/local/workspace.js";
+import { setProgressReporter } from "../../src/local/util/progress.js";
 
 // Deterministic + offline: fixed clock and an EMPTY env so no provider keys
 // exist (forces the offline DeterministicProvider; no network/LLM calls).
@@ -122,6 +123,7 @@ class HybridAiProvider implements ModelProvider {
 }
 
 afterEach(() => {
+  setProgressReporter(null);
   while (tempDirs.length) {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -173,6 +175,28 @@ describe("start orchestration", () => {
     expect(res.next_actions.join("\n")).toContain("orangepro_generate_tests");
     expect(res.next_actions.join("\n")).toContain("prove_run");
     expect(res.rtm.summary.total).toBeGreaterThan(0);
+  });
+
+  it("writes a static behavior report and RTM immediately after deterministic analysis", async () => {
+    const W = makeTempDir();
+    writeStartFixture(W);
+    const messages: string[] = [];
+    setProgressReporter((msg) => messages.push(msg));
+
+    const res = await opStart(W, { source: W }, deps);
+
+    const graphReady = messages.indexOf("start: deterministic graph is ready");
+    const staticHtml = messages.indexOf("artifacts: writing static behavior view (proof still running)");
+    const staticRtm = messages.indexOf("artifacts: writing static RTM (proof still running)");
+    const autoProve = messages.indexOf("auto-prove: driving generate → prove on the top provable targets");
+    const finalHtml = messages.indexOf("artifacts: writing behavior coverage view");
+    expect(graphReady).toBeGreaterThanOrEqual(0);
+    expect(staticHtml).toBeGreaterThan(graphReady);
+    expect(staticRtm).toBeGreaterThan(staticHtml);
+    expect(autoProve).toBeGreaterThan(staticRtm);
+    expect(finalHtml).toBeGreaterThan(autoProve);
+    expect(existsSync(res.behavior_coverage_path ?? "")).toBe(true);
+    expect(existsSync(res.rtm.rtm_path)).toBe(true);
   });
 
   it("auto-applies AI candidate links when a provider is configured without changing deterministic RTM status", async () => {
