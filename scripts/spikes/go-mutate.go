@@ -7,10 +7,11 @@
 // signature-derived sentinel, then writes the mutated file. Invoked by
 // go-dynamic-proof-spike.mjs (the product Go proof path); it writes ONLY the
 // mutated file inside the sandbox copy — no graph or product artifacts. The
-// name must resolve to exactly ONE declaration in the file (free or method);
-// collisions fail(3) as ambiguous, and generic receivers are refused (not found).
-// With --recv <T>, only a method on base receiver T matches (receiver-exact
-// selection for receiver-qualified `Recv.M` targets — never the wrong decl).
+// name must resolve to exactly ONE declaration — in the whole file without
+// --recv, or on the selected base receiver with --recv <T> (receiver-exact
+// selection for receiver-qualified `Recv.M` targets — never the wrong decl,
+// so A.M and B.M can coexist and still be individually mutable). Ambiguity
+// within that filter fails(3); generic receivers are refused (not found).
 //
 // Modes:
 //   sentinel   — replace body with a type-compatible, deliberately-wrong value
