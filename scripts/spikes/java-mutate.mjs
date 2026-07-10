@@ -5,8 +5,9 @@
 // by exact name via tree-sitter Java (the SAME grammar the static layer already
 // uses — tree-sitter-wasms + web-tree-sitter, no new dependency) and replaces its
 // BODY with a signature-derived, type-compatible sentinel by splicing the body
-// block's byte range. It is a spike helper only: it writes no product artifacts and
-// is not wired into prove / RTM / mint.
+// block's byte range. Invoked by java-dynamic-proof-spike.mjs (the product Java
+// proof path); it writes ONLY the mutated file inside the sandbox copy — no graph
+// or product artifacts.
 //
 // J-1 scope is the SIMPLEST SHAPE ONLY: a concrete non-void, non-type-variable
 // return type, EXACTLY one top-level `return <expr>;` (no nested return in an

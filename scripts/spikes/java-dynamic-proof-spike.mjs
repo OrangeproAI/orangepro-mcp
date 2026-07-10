@@ -21,9 +21,11 @@
 // classify as `unrunnable`, never `proven`. An equivalent-value mutation survives ->
 // `associated_survived`. An ambiguous method name is refused -> `unrunnable`.
 //
-// This is a spike harness only: it writes no graph edges or product artifacts and
-// is NOT wired into autoProve / cert / RTM / the mint path. Pin: Maven + Surefire +
-// JUnit 5 (the Spring Boot default). Gradle / JUnit4 are later parsers.
+// PRODUCT-WIRED: `opro` routes Java dynamic proof through this script (operations.ts
+// dynamicProofSpikePathFor("java")). The script itself writes no graph edges or
+// product artifacts — it emits a JSON verdict; the orchestrator is the sole
+// interpreter and the only place proof is minted. Pin: Maven + Surefire + JUnit 5
+// (the Spring Boot default). Gradle / JUnit4 are later parsers.
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,7 +42,7 @@ function usage() {
     "",
     "Runs ONE Surefire target test on a byte-copy of a single-module Maven + JUnit 5 project, mutates the target method body via a signature-derived sentinel, reruns the SAME test, and classifies from the structured surefire report.",
     "J-1 scope: SIMPLEST SHAPE ONLY — a concrete non-void return, a single top-level return, no generics, no overloads. Equivalent-value mutations survive (associated_survived). Ambiguous names are refused (unrunnable).",
-    "This is a spike harness only; it does not write graph edges or product artifacts and is not wired into prove/RTM/mint."
+    "Product wiring: opro prove/auto-prove invokes this script for Java targets; it writes no graph edges or product artifacts itself — the caller interprets the JSON verdict."
   ].join("\n");
 }
 

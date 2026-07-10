@@ -992,7 +992,9 @@ export function opAnalyze(root: string, opts: AnalyzeOptions = {}, deps: Operati
       prepareRuntimeCoverage(scanRoot, { generate: true, timeoutMs: opts.coverageTimeoutMs, runner: deps.coverageRunner }))
     : undefined;
 
-  if (!workspaceInitialized(root)) initWorkspace(root, now);
+  // Idempotent for existing workspaces and also applies conservative migrations
+  // to untouched generated workspace files (for example .orangeproignore).
+  initWorkspace(root, now);
 
   if (!opts.suppressProgress) {
     reportProgress("analyze: parsing source and building deterministic graph", {

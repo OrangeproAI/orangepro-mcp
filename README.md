@@ -2,22 +2,37 @@
 
 **Find the behaviors your tests miss. Generate grounded tests that actually run.**
 
-`opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. Runs as a CLI and an MCP server.The architecture follows the same ingest → compile → lint pattern described in Karpathy's LLM Knowledge Bases gist, applied to behavioral verification of code.
+`opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. It runs as a CLI and a local stdio MCP server.
+
+Install the target repository's dependencies first, then run OrangePro from that repository:
 
 ```bash
-npx @orangepro/mcp-server
 cd /path/to/your/repo
-opro
+npm install # or pnpm install / bun install / the repository's package manager
+
+# Optional: enables AI candidate links, candidate flows, and test generation.
+export ANTHROPIC_API_KEY="..." # or OPENAI_API_KEY / OLLAMA_BASE_URL
+
+npx -y @orangepro/mcp-server@latest start . --prompt-version v5
+open .orangepro/behavior-coverage.html
 ```
 
-That's it. You get:
+With no model key, the same command still performs deterministic analysis, renders the report, and dynamically proves eligible behaviors using existing tests. With a key, it also discovers AI candidate flows and drafts grounded tests for the highest-risk gaps. AI output never changes evidence tiers; only the mutation-kill oracle can mint **Dynamically Proven**.
+
+The command writes:
 
 ```
 .orangepro/
 ├── behavior-coverage.html   ← open this: interactive gap report
+├── graph.json               ← deterministic evidence graph
+├── COVERAGE_REPORT.md       ← coverage and gap summary
 ├── rtm.md                   ← requirements traceability matrix
-└── evidence-pack.json       ← machine-readable metadata export
+└── ai/                      ← candidate AI links/flows when a provider is configured
+
+orangepro_generated/         ← contained generated tests; existing source files are untouched
 ```
+
+Run `opro export` when you want a machine-readable evidence pack.
 <img width="895" height="960" alt="Screenshot 2026-07-08 at 1 18 01 AM" src="https://github.com/user-attachments/assets/73b8a812-2eab-43a1-8aed-4289545e630b" />
 
 ---
@@ -25,11 +40,12 @@ That's it. You get:
 ## Install
 
 ```bash
-# No install needed (npx)
-npx @orangepro/mcp-server
+# No install needed: run the full local workflow in the current repository
+npx -y @orangepro/mcp-server@latest start . --prompt-version v5
 
 # Or global install
 npm install -g @orangepro/orangepro-mcp
+opro start . --prompt-version v5
 
 # Or from source
 git clone https://github.com/OrangeproAI/orangepro-mcp.git
@@ -90,7 +106,6 @@ Add to your client's MCP config:
 
 | Client | Config location |
 | --- | --- |
-|--------|----------------|
 | Claude Code | `.mcp.json` or `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` or Settings → MCP |
 | Codex | Config printed by `opro agent --client codex` or `npx -y @orangepro/mcp-server@latest agent --client codex` |
@@ -145,6 +160,7 @@ opro rtm                      # traceability matrix
 opro export                   # metadata-only evidence pack
 opro mcp                      # run as MCP server (stdio)
 opro doctor                   # what evidence to add next
+opro doctor --proof           # explain why dynamic proof could not close
 opro coverage                 # ingest runtime coverage
 ```
 
@@ -194,6 +210,8 @@ Every behavior gets exactly one tier. Nothing is labeled "tested" on faith.
 | **No Signal** | Nothing tests this behavior yet | — |
 
 > **"Dynamically Proven 0" is normal on first run.** Static analysis always runs. Dynamic proof requires running tests against targeted mutations. That's the trust model — nothing is Dynamically Proven until a real test kills a real mutant.
+
+When runtime coverage is available, `opro start` also compares Runtime-covered and Dynamically Proven behaviors over the same deterministic denominator. It never compares source-line coverage with behavior proof or folds off-denominator proofs into that percentage.
 
 ---
 
@@ -271,9 +289,10 @@ OrangePro separates **analysis** (what your code does) from **proof** (whether t
 ## Privacy
 
 - **No stored source.** Reads code in-process. Never uploads to an OrangePro server.
-- **No source mutation.** Never edits your existing files. Writes metadata to `.orangepro/`.
+- **No existing-source mutation.** Never edits existing source or test files. Writes metadata to `.orangepro/`; keyed auto-drive may write new, reviewable tests under `orangepro_generated/`.
 - **Metadata-only exports.** File paths, names, hashes, scores — not raw source.
 - **Your keys stay yours.** Read from env at call time, never persisted.
+- **BYOK is direct.** When AI lanes are enabled, grounded code context is sent directly to the model provider you configure; OrangePro's hosted service is not in that path.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@orangepro/mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "private": false,
   "description": "Compatibility launcher for OrangePro (`opro`) CLI and MCP server.",
   "license": "MIT",
@@ -30,7 +30,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@orangepro/orangepro-mcp": "^0.2.0"
+    "@orangepro/orangepro-mcp": "^0.2.4"
   },
   "engines": {
     "node": ">=20"

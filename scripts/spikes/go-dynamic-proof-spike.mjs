@@ -25,9 +25,10 @@
 // failure, and an ambiguous or no-return name all classify as `unrunnable`,
 // never `proven`. An equivalent-value mutation survives -> `associated_survived`.
 //
-// This is a spike harness only: it writes no graph edges or product artifacts and is
-// NOT wired into autoProve / cert / RTM / the mint path. Use only on trusted checkouts
-// for local measurement.
+// PRODUCT-WIRED: `opro` routes Go dynamic proof through this script (operations.ts
+// dynamicProofSpikePathFor("go")). The script itself writes no graph edges or product
+// artifacts — it emits a JSON verdict; the orchestrator is the sole interpreter and
+// the only place proof is minted.
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,8 +45,8 @@ function usage() {
     "--test-run is passed verbatim to `go test -run` and should anchor a single test, e.g. '^TestCompute$'.",
     "--recv <T> (optional): receiver base type — mutate only `func (x T) <name>` / `func (x *T) <name>`, so a same-named method on another receiver (or a free function) can never be the mutation target.",
     "--go-assertion-line <n> (optional): 1-based test-source line of the target's assertion. When set, the mutant's failure must bind to a frame at EXACTLY that line and subtest frames are considered — so a runtime-named subtest can prove while a sibling asserting elsewhere is refused.",
-    "Scope: free functions and receiver methods whose name is unique in the target file (collisions and generic receivers are refused). Equivalent-value mutations survive (associated_survived).",
-    "This is a spike harness only; it does not write graph edges or product artifacts and is not wired into prove/RTM/mint."
+    "Scope: free functions and receiver methods. Without --recv the name must resolve to exactly ONE declaration in the target file; with --recv exactly one declaration on the selected base receiver must match. Ambiguity within the filtered receiver and generic receivers still fail closed. Equivalent-value mutations survive (associated_survived).",
+    "Product wiring: opro prove/auto-prove invokes this script for Go targets; it writes no graph edges or product artifacts itself — the caller interprets the JSON verdict."
   ].join("\n");
 }
 
