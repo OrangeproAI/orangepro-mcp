@@ -45,7 +45,7 @@ function usage() {
     "--test-run is passed verbatim to `go test -run` and should anchor a single test, e.g. '^TestCompute$'.",
     "--recv <T> (optional): receiver base type — mutate only `func (x T) <name>` / `func (x *T) <name>`, so a same-named method on another receiver (or a free function) can never be the mutation target.",
     "--go-assertion-line <n> (optional): 1-based test-source line of the target's assertion. When set, the mutant's failure must bind to a frame at EXACTLY that line and subtest frames are considered — so a runtime-named subtest can prove while a sibling asserting elsewhere is refused.",
-    "Scope: free functions and receiver methods whose name is unique in the target file (collisions and generic receivers are refused). Equivalent-value mutations survive (associated_survived).",
+    "Scope: free functions and receiver methods. Without --recv the name must resolve to exactly ONE declaration in the target file; with --recv exactly one declaration on the selected base receiver must match. Ambiguity within the filtered receiver and generic receivers still fail closed. Equivalent-value mutations survive (associated_survived).",
     "Product wiring: opro prove/auto-prove invokes this script for Go targets; it writes no graph edges or product artifacts itself — the caller interprets the JSON verdict."
   ].join("\n");
 }
