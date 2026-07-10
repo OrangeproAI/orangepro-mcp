@@ -33,6 +33,7 @@ import {
 } from "./operations.js";
 import type { GenerateComparison } from "./operations.js";
 import { dominantBlockReason } from "./viz/behaviorReportData.js";
+import { coverageRevealLine } from "./viz/coverageReveal.js";
 import { autoProve, isRoastSurvivor } from "./autoProve.js";
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
@@ -280,6 +281,10 @@ async function main(): Promise<number> {
           for (const skip of ap.skipped) out(`    skipped:             ${skip.target_symbol ?? skip.title} — ${skip.reason}`);
         }
         out(`  Runtime-covered:       ${res.rtm.summary.runtime_covered}`);
+        // G6: same-denominator coverage-vs-proof reveal — renders only when runtime
+        // coverage was ingested; percentages share summary.total (never mixed scopes).
+        const reveal = coverageRevealLine(res.rtm.summary);
+        if (reveal) out(`  ${reveal}`);
         out(`  Statically Linked:     ${res.rtm.summary.associated} (static test link, not dynamic proof)`);
         out(`  No integration signal: ${res.rtm.summary.no_link}`);
         out(`  AI-linked:      ${res.ai_linked.behaviors} behavior(s), ${res.ai_linked.symbols} symbol(s), ${res.ai_linked.links} weak link(s) — not coverage`);
