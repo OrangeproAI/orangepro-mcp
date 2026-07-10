@@ -1943,6 +1943,27 @@ export function autoProveChangedScope(
   return hasEligibleTarget ? meaningful : undefined; // no eligible provable target in scope → global top-5
 }
 
+function writeStartStaticSnapshot(root: string, baseRef: string | undefined, warnings: string[]): { behaviorCoveragePath?: string } {
+  let behaviorCoveragePath: string | undefined;
+  try {
+    reportProgress("artifacts: writing static behavior view (proof still running)", { current: 4, total: 8 });
+    behaviorCoveragePath = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, {
+      attempted: 0,
+      proven: 0,
+      needsSetup: []
+    }).behavior_coverage_path;
+  } catch (error) {
+    warnings.push(`static behavior view not written: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    reportProgress("artifacts: writing static RTM (proof still running)", { current: 4, total: 8 });
+    opRtm(root, { format: "md", baseRef, limit: START_RTM_LIMIT });
+  } catch (error) {
+    warnings.push(`static RTM not written: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return behaviorCoveragePath ? { behaviorCoveragePath } : {};
+}
+
 export async function opStart(
   root: string,
   opts: StartOptions = {},
@@ -1968,6 +1989,7 @@ export async function opStart(
   );
   const warnings = [...analyze.warnings];
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
+  const staticSnapshot = writeStartStaticSnapshot(root, opts.baseRef, warnings);
 
   const providerConfigured = deps.aiProvider !== undefined || resolveProviderConfig(providerEnv, providerOpts) !== null;
   let aiLinks: StartAiResult = { status: "skipped", reason: "AI candidate links disabled for this run." };
@@ -2115,7 +2137,7 @@ export async function opStart(
     warnings.push(`coverage report not written: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  let coverageHtml: string | undefined;
+  let coverageHtml: string | undefined = staticSnapshot.behaviorCoveragePath;
   try {
     reportProgress("artifacts: writing behavior coverage view", { current: 7, total: 8 });
     // Forward THIS-RUN dynamic-proof outcome so the report can name the dominant setup/runnability
