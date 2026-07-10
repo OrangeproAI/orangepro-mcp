@@ -470,10 +470,11 @@ describe("Go hard proof", () => {
         "}"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Double"]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Parser.Double"]);
     expect(hardCoverTestNames(root)).toEqual(["TestDouble"]);
-    const dbl = analyzeRepo(root, { readContent: true }).nodes.find((n) => n.external_id === "sym:svc/parser.go#Double");
+    const dbl = analyzeRepo(root, { readContent: true }).nodes.find((n) => n.external_id === "sym:svc/parser.go#Parser.Double");
     expect(dbl?.properties.symbol_kind).toBe("method");
+    expect(dbl?.properties.member_of).toBe("Parser");
   });
 
   it("confirms a method via the if-guard shape (got := p.M(); if got != want)", () => {
@@ -495,7 +496,7 @@ describe("Go hard proof", () => {
         "}"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Double"]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Parser.Double"]);
   });
 
   it("binds a method when the constructor has a NESTED-call argument (the real phcparser New(reader) shape)", () => {
@@ -522,10 +523,40 @@ describe("Go hard proof", () => {
       ].join("\n")
     });
     // New(strings.NewReader(...)) — nested call in the arg must NOT block receiver-local detection.
-    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Len"]);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/parser_test.go -> sym:svc/parser.go#Parser.Len"]);
   });
 
-  it("refuses two same-named methods on different receivers across files (collision → no edge)", () => {
+  it("in-file same-named methods mint DISTINCT receiver-qualified nodes, but the edge still refuses (collision)", () => {
+    const root = repo({
+      "svc/pair.go": [
+        "package svc",
+        "type A struct{ n int }",
+        "type B struct{ n int }",
+        "func NewA(n int) *A { return &A{n: n} }",
+        "func (a *A) M() int { return a.n + 1 }",
+        "func (b *B) M() int { return b.n + 2 }"
+      ].join("\n"),
+      "svc/pair_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestAM(t *testing.T) {",
+        "  a := NewA(1)",
+        "  if got := a.M(); got != 2 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // Pre-qualification the two methods collapsed to ONE symbol (wrong denominator);
+    // now both nodes exist — and the ctor pin (NewA's declared *A result) selects
+    // A.M out of the in-file collision instead of refusing.
+    const nodes = analyzeRepo(root, { readContent: true }).nodes;
+    expect(nodes.some((n) => n.external_id === "sym:svc/pair.go#A.M")).toBe(true);
+    expect(nodes.some((n) => n.external_id === "sym:svc/pair.go#B.M")).toBe(true);
+    expect(hardCoverEdges(root)).toEqual(["test:svc/pair_test.go -> sym:svc/pair.go#A.M"]);
+  });
+
+  it("pins the receiver across files via the ctor's declared result (A.M chosen over B.M)", () => {
     const root = repo({
       "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() *A { return &A{} }\nfunc (a *A) M() int { return 1 }\n",
       "svc/b.go": "package svc\ntype B struct{}\nfunc (b *B) M() int { return 2 }\n",
@@ -540,6 +571,106 @@ describe("Go hard proof", () => {
         "}"
       ].join("\n")
     });
+    // Pre-pinning this collision refused. NewA's declared `*A` result pins the
+    // receiver, so the edge binds to A.M — and never to B.M.
+    expect(hardCoverEdges(root)).toEqual(["test:svc/a_test.go -> sym:svc/a.go#A.M"]);
+  });
+
+  it("refuses a collision when the ctor result is not structurally capturable (named return)", () => {
+    const root = repo({
+      "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() (out *A) { out = &A{}; return }\nfunc (a *A) M() int { return 1 }\n",
+      "svc/b.go": "package svc\ntype B struct{}\nfunc (b *B) M() int { return 2 }\n",
+      "svc/a_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  a := NewA()",
+        "  if got := a.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // `(out *A)` renders as a parameter_list result — goCtorResults omits it, the
+    // pin is unavailable, and the collision fails closed exactly as before pinning.
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("refuses an interface-returning ctor over a collision (cannot know which impl — the dangerous shape)", () => {
+    const root = repo({
+      "svc/svc.go": [
+        "package svc",
+        "type Chooser interface{ M() int }",
+        "type A struct{}",
+        "type B struct{}",
+        "func (a *A) M() int { return 1 }",
+        "func (b *B) M() int { return 2 }",
+        "func Pick() Chooser { return &A{} }"
+      ].join("\n"),
+      "svc/svc_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  c := Pick()",
+        "  if got := c.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // Pick's declared result is the INTERFACE — the pin names "Chooser", no method
+    // symbol `Chooser.M` exists, and the A.M/B.M collision refuses. Static analysis
+    // must never guess which implementation an interface hides.
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("unique method candidate is taken even when the ctor pin names an abstraction (pin selects, never rejects)", () => {
+    const root = repo({
+      "svc/svc.go": [
+        "package svc",
+        "type Chooser interface{ M() int }",
+        "type A struct{}",
+        "func (a *A) M() int { return 1 }",
+        "func Pick() Chooser { return &A{} }"
+      ].join("\n"),
+      "svc/svc_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  c := Pick()",
+        "  if got := c.M(); got != 1 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // ONE method named M exists (A.M). Pick's declared result is the interface — a
+    // pin that would CONTRADICT the lone candidate — but the pin only ever SELECTS
+    // among collisions: the unique candidate keeps the #212 unique-name behavior and
+    // binds (wrong selection is fail-safe; --recv is the in-sandbox backstop). This
+    // test goes RED if contradiction-refusal is ever reinstated on the unique path.
+    expect(hardCoverEdges(root)).toEqual(["test:svc/svc_test.go -> sym:svc/svc.go#A.M"]);
+  });
+
+  it("refuses a SHADOWED ctor over a collision (local New → pin dropped, fail closed)", () => {
+    const root = repo({
+      "svc/a.go": "package svc\ntype A struct{}\nfunc NewA() *A { return &A{} }\nfunc (a *A) M() int { return 1 }\n",
+      "svc/b.go": "package svc\ntype B struct{}\nfunc NewB() *B { return &B{} }\nfunc (b *B) M() int { return 2 }\n",
+      "svc/a_test.go": [
+        "package svc",
+        "import \"testing\"",
+        "func TestM(t *testing.T) {",
+        "  NewA := NewB",
+        "  a := NewA()",
+        "  if got := a.M(); got != 2 {",
+        "    t.Errorf(\"got %d\", got)",
+        "  }",
+        "}"
+      ].join("\n")
+    });
+    // The local `NewA := NewB` shadows the package ctor — pinning through the NAME
+    // NewA would bind the WRONG receiver (the value is B's). The shadow check drops
+    // the pin and the collision fails closed.
     expect(hardCoverEdges(root)).toEqual([]);
   });
 

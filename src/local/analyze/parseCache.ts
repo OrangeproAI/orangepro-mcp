@@ -57,7 +57,7 @@ import { SymbolExtraction } from "./symbols.js";
 // Swift protocol methods, and Rust trait signatures while dropping Rust aliases.
 // v16: symbol extraction now carries source line spans for runtime coverage
 // report ingestion; warm v15 entries lack the ranges and cannot be mapped.
-export const PARSER_VERSION = 16;
+export const PARSER_VERSION = 17; // 17: Go method symbols receiver-qualified (Recv.M + member_of)
 
 const SYMBOL_KINDS = new Set(["function", "class", "const", "method"]);
 

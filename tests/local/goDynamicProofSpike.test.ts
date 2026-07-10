@@ -74,8 +74,9 @@ async function runSpike(
     testRun,
     target,
     func,
+    recv,
     goAssertionLine
-  }: { mode?: "sentinel" | "equivalent"; testRun?: string; target?: string; func?: string; goAssertionLine?: number } = {}
+  }: { mode?: "sentinel" | "equivalent"; testRun?: string; target?: string; func?: string; recv?: string; goAssertionLine?: number } = {}
 ): Promise<{ verdict: Verdict; status: number; stdout: string; stderr: string }> {
   const args = [
     spike,
@@ -92,6 +93,9 @@ async function runSpike(
   if (mode) {
     args.push("--mode", mode);
   }
+  if (recv) {
+    args.push("--recv", recv);
+  }
   if (goAssertionLine !== undefined) {
     args.push("--go-assertion-line", String(goAssertionLine));
   }
@@ -103,6 +107,36 @@ async function runSpike(
     stderr: result.stderr ?? ""
   };
 }
+
+describe.skipIf(!HAS_GO)("go method collision — receiver-exact --recv selection", () => {
+  const dir = () => path.join(fixtures, "method-collision");
+
+  it("proves the RIGHT receiver's method: --recv A kills TestAM", async () => {
+    const { verdict, status } = await runSpike(dir(), { testRun: "^TestAM$", target: "pair.go", func: "M", recv: "A" });
+    expect(verdict.status).toBe("proven");
+    expect(verdict.proven).toBe(true);
+    expect("trustedAssertion" in verdict.mutant && verdict.mutant.trustedAssertion).toBe(true);
+    expect(status).toBe(0);
+  }, TEST_TIMEOUT);
+
+  it("never credits the WRONG receiver: --recv B mutates B.M and TestAM survives (no false Proven)", async () => {
+    const { verdict } = await runSpike(dir(), { testRun: "^TestAM$", target: "pair.go", func: "M", recv: "B" });
+    expect(verdict.status).toBe("associated_survived");
+    expect(verdict.proven).toBe(false);
+  }, TEST_TIMEOUT);
+
+  it("refuses without --recv: the in-file collision stays ambiguous (unrunnable)", async () => {
+    const { verdict } = await runSpike(dir(), { testRun: "^TestAM$", target: "pair.go", func: "M" });
+    expect(verdict.status).toBe("unrunnable");
+    expect(verdict.proven).toBe(false);
+  }, TEST_TIMEOUT);
+
+  it("refuses a --recv with no such method (not found → unrunnable)", async () => {
+    const { verdict } = await runSpike(dir(), { testRun: "^TestAM$", target: "pair.go", func: "M", recv: "C" });
+    expect(verdict.status).toBe("unrunnable");
+    expect(verdict.proven).toBe(false);
+  }, TEST_TIMEOUT);
+});
 
 describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
   it("proves a free function 0->1 when the sentinel kills a value assertion", async () => {

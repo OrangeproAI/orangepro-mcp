@@ -42,6 +42,7 @@ function usage() {
     "",
     "Runs a Go baseline test, mutates the target free function or method body in an isolated byte-copy, reruns the same test, and classifies the result.",
     "--test-run is passed verbatim to `go test -run` and should anchor a single test, e.g. '^TestCompute$'.",
+    "--recv <T> (optional): receiver base type — mutate only `func (x T) <name>` / `func (x *T) <name>`, so a same-named method on another receiver (or a free function) can never be the mutation target.",
     "--go-assertion-line <n> (optional): 1-based test-source line of the target's assertion. When set, the mutant's failure must bind to a frame at EXACTLY that line and subtest frames are considered — so a runtime-named subtest can prove while a sibling asserting elsewhere is refused.",
     "Scope: free functions and receiver methods whose name is unique in the target file (collisions and generic receivers are refused). Equivalent-value mutations survive (associated_survived).",
     "This is a spike harness only; it does not write graph edges or product artifacts and is not wired into prove/RTM/mint."
@@ -461,9 +462,9 @@ function redactSecrets(text) {
 // Run the AST mutator (go run go-mutate.go). Because `go run` collapses any
 // non-zero child status to 1, we classify on the MUTATE_ERROR:<code> marker the
 // helper prints to stderr, not the exit code.
-function mutateFunc({ targetAbs, func, mode, cacheRoot, timeoutMs }) {
+function mutateFunc({ targetAbs, func, recv, mode, cacheRoot, timeoutMs }) {
   const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "go-mutate.go");
-  const result = spawnSync(goBin(), ["run", helper, "--file", targetAbs, "--func", func, "--mode", mode], {
+  const result = spawnSync(goBin(), ["run", helper, "--file", targetAbs, "--func", func, ...(recv ? ["--recv", recv] : []), "--mode", mode], {
     encoding: "utf8",
     timeout: timeoutMs,
     env: hermeticEnv(cacheRoot),
@@ -566,6 +567,7 @@ function main() {
     const mutation = mutateFunc({
       targetAbs: path.join(mutantCopy.repoRoot, targetRel),
       func: args.func,
+      recv: args.recv,
       mode: args.mode,
       cacheRoot: mutantCopy.tmpRoot,
       timeoutMs
