@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.orangeproai/orangepro",
+  "description": "Find behavioral test gaps and untested code paths. Builds a local evidence graph from your checkout, maps behavior coverage, ranks risks by blast radius, generates grounded integration tests that actually compile and run, and dynamically proves them via mutation kill. 100% local-first, BYOK (OpenAI/Anthropic/Ollama) — code never leaves your machine.",
+  "repository": {
+    "url": "https://github.com/OrangeproAI/orangepro-mcp",
+    "source": "github"
+  },
+  "version": "0.2.5",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@orangepro/mcp-server",
+      "version": "0.2.5",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Run in MCP server mode (stdio transport)"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "OPENAI_API_KEY",
+          "description": "Optional BYOK LLM key for AI candidate links and test generation. Also supports ANTHROPIC_API_KEY or OLLAMA_BASE_URL. Deterministic analysis, gap detection, and dynamic proof work without any key.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
