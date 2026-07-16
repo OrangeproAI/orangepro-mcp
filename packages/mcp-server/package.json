@@ -1,8 +1,9 @@
 {
   "name": "@orangepro/mcp-server",
-  "version": "0.2.4",
+  "version": "0.2.5",
+  "mcpName": "io.github.orangeproai/orangepro",
   "private": false,
-  "description": "Compatibility launcher for OrangePro (`opro`) CLI and MCP server.",
+  "description": "OrangePro — find behavioral test gaps, generate grounded integration tests, and dynamically prove them via mutation kill. Local-first, BYOK. Code never leaves your machine.",
   "license": "MIT",
   "author": "OrangePro",
   "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
@@ -19,7 +20,14 @@
     "model-context-protocol",
     "orangepro",
     "opro",
-    "test-generation"
+    "test-generation",
+    "test-gaps",
+    "behavior-coverage",
+    "integration-tests",
+    "dynamic-proof",
+    "code-analysis",
+    "byok",
+    "ai-testing"
   ],
   "type": "module",
   "bin": {
@@ -30,7 +38,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@orangepro/orangepro-mcp": "^0.2.4"
+    "@orangepro/orangepro-mcp": "^0.2.5"
   },
   "engines": {
     "node": ">=20"
