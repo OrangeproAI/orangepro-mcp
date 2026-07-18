@@ -597,25 +597,75 @@ export function buildSystemMapModel(data: {
   risks: BehaviorReportData["risks"];
   behaviors: BehaviorReportData["behaviors"];
 }, maxServices = 12): SystemMapModel {
+  // Pass 1: how many trigger flows does each owner appear in? Shared
+  // infrastructure (config drivers, exception handlers, caches) appears in
+  // nearly all of them — the LAST-step heuristic crowned exactly that plumbing
+  // on a full-scale repo. A flow's representative service is its most
+  // DISTINCTIVE owner: lowest global frequency, deepest step on ties, with
+  // near-ubiquitous owners eligible only when a flow touches nothing else.
+  const triggerFlows = data.flows.filter((f) => f.trigger && LANE_OF[(f.trigger.verb || "").toUpperCase()]);
+  const ownerFreq = new Map<string, number>();
+  for (const f of triggerFlows) {
+    const seen = new Set<string>();
+    for (const st of f.steps ?? []) {
+      const o = ownerOfSig(st.sig);
+      if (o && !seen.has(o)) {
+        seen.add(o);
+        ownerFreq.set(o, (ownerFreq.get(o) ?? 0) + 1);
+      }
+    }
+  }
+  const infraCutoff = Math.max(3, Math.floor(triggerFlows.length * 0.4));
+  const isSharedInfra = (o: string) => (ownerFreq.get(o) ?? 0) >= infraCutoff;
+
   const laneFlows = new Map<string, number>();
   const svcFlows = new Map<string, number>();
   const edgeFlows = new Map<string, number>();
-  for (const f of data.flows) {
-    if (!f.trigger) continue;
-    const lane = LANE_OF[(f.trigger.verb || "").toUpperCase()];
-    if (!lane) continue;
+  const svcLaneFlows = new Map<string, Map<string, number>>();
+  for (const f of triggerFlows) {
+    const lane = LANE_OF[(f.trigger!.verb || "").toUpperCase()];
     const steps = f.steps ?? [];
-    const last = steps.length ? steps[steps.length - 1] : undefined;
-    const svc = last ? ownerOfSig(last.sig) : "";
+    let svc = "";
+    let bestFreq = Infinity;
+    let bestDepth = -1;
+    for (let i = 0; i < steps.length; i++) {
+      const o = ownerOfSig(steps[i].sig);
+      if (!o || isSharedInfra(o)) continue;
+      const freq = ownerFreq.get(o) ?? 0;
+      if (freq < bestFreq || (freq === bestFreq && i > bestDepth)) {
+        svc = o;
+        bestFreq = freq;
+        bestDepth = i;
+      }
+    }
+    if (!svc) {
+      // Flow touches only shared infra — fall back to its deepest step.
+      const last = steps.length ? steps[steps.length - 1] : undefined;
+      svc = last ? ownerOfSig(last.sig) : "";
+    }
     if (!svc) continue;
     laneFlows.set(lane.id, (laneFlows.get(lane.id) ?? 0) + 1);
     svcFlows.set(svc, (svcFlows.get(svc) ?? 0) + 1);
     const key = lane.id + "\u0000" + svc;
     edgeFlows.set(key, (edgeFlows.get(key) ?? 0) + 1);
+    const perLane = svcLaneFlows.get(svc) ?? new Map<string, number>();
+    perLane.set(lane.id, (perLane.get(lane.id) ?? 0) + 1);
+    svcLaneFlows.set(svc, perLane);
   }
+  const laneRank = (svc: string): number => {
+    const perLane = svcLaneFlows.get(svc);
+    if (!perLane) return 99;
+    let best = "";
+    let bestN = -1;
+    for (const [l, n] of perLane) if (n > bestN) { best = l; bestN = n; }
+    return ["graphql", "http", "job"].indexOf(best);
+  };
   const top = [...svcFlows.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, maxServices);
+    .slice(0, maxServices)
+    // Group vertically under each service's dominant lane so edges flow in
+    // bands instead of crossing the whole canvas.
+    .sort((a, b) => laneRank(a[0]) - laneRank(b[0]) || b[1] - a[1] || a[0].localeCompare(b[0]));
   const topSet = new Set(top.map(([k]) => k));
 
   const tiersBySvc = new Map<string, { proven: number; assoc: number; candidate: number; none: number }>();

@@ -255,6 +255,16 @@ describe("buildSystemMapModel", () => {
   ];
   const risks = [{ rank: 1, verb: "BEHAVIOR", path: "AuthService.signIn", context: "", desc: "", tags: [["critical risk", "risk"] as [string, "risk"]], todo: "", applicableCategories: [], generatedTests: [] }];
 
+  it("picks the most DISTINCTIVE owner per flow — shared infra never crowns the map", () => {
+    // Append a ubiquitous infra step to every flow: it must NOT become a node
+    // while a rarer, more specific service exists in the same flow.
+    const infraStep = { sig: "ExceptionHandlerService.handle", tier: "hard" as const, edge: "hard" as const, desc: "" };
+    const withInfra = flows.map((f) => ({ ...f, steps: [...f.steps, infraStep] }));
+    const m2 = buildSystemMapModel({ flows: withInfra, risks, behaviors } as never);
+    expect(m2.services.some((sv) => sv.label === "ExceptionHandlerService")).toBe(false);
+    expect(m2.services[0].label).toBe("AuthService");
+  });
+
   it("groups trigger flows into lanes and deepest-service nodes; orphans excluded", () => {
     const m = buildSystemMapModel({ flows, risks, behaviors } as never);
     expect(m.lanes.map((l) => [l.id, l.flows])).toEqual([["graphql", 2], ["http", 1]]);
