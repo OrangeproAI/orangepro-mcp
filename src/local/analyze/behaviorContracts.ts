@@ -1,6 +1,6 @@
 import { slugify } from "../util/ids.js";
 
-export type BehaviorContractKind = "http_endpoint";
+export type BehaviorContractKind = "http_endpoint" | "graphql_operation" | "queue_processor";
 export type BehaviorContractFramework = "nestjs" | "express" | "fastify" | "file_route";
 
 export interface BehaviorContract {
@@ -23,8 +23,15 @@ const HTTP_METHODS = new Set(["get", "post", "put", "delete", "patch", "options"
 // - computed router methods/paths are ignored.
 // That is intentional while Endpoint nodes are informational only and excluded
 // from the coverage denominator.
-const NEST_METHOD_DECORATOR = /@(Get|Post|Put|Delete|Patch|Options|Head|All)\s*\(\s*(?:(["'`])([^"'`]*)\2)?\s*\)(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
-const NEST_CONTROLLER_DECORATOR = /@Controller\s*\(\s*(?:(["'`])([^"'`]*)\1)?\s*\)\s*(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+// Tolerates intermediate decorators (@UseGuards, @UseFilters, @HttpCode, …)
+// between the route decorator and the method name — decorator-stacked NestJS
+// controllers (Twenty: every route) previously produced ZERO endpoint contracts.
+const NEST_METHOD_DECORATOR = /@(Get|Post|Put|Delete|Patch|Options|Head|All)\s*\(\s*(?:(["'`])([^"'`]*)\2|\[\s*(["'`])([^"'`]*)\4\s*\])?\s*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+const CLASS_DECLARATION = /(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+const NEST_GQL_METHOD_DECORATOR = /@(Query|Mutation|Subscription|ResolveField)\s*\((?:[^()]|\([^()]*\))*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+const NEST_PROCESSOR_DECORATOR = /@Processor\s*\(\s*(?:(["'`])([^"'`]*)\1|[A-Za-z_$][A-Za-z0-9_$.]*)?\s*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+const NEST_PROCESS_METHOD_DECORATOR = /@Process\s*\((?:[^()]|\([^()]*\))*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+const NEST_CONTROLLER_DECORATOR = /@Controller\s*\(\s*(?:(["'`])([^"'`]*)\1)?\s*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
 const EXPRESS_ROUTER_CALL = /\b(?:router|app)\s*\.\s*(get|post|put|delete|patch|options|head|all)\s*\(\s*(["'`])([^"'`]*)\2\s*,\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?|\([^)]*\)\s*=>|async\s+\([^)]*\)\s*=>|function\s+[A-Za-z_$][A-Za-z0-9_$]*)/gi;
 const EXPRESS_ROUTE_CHAIN = /\b(?:router|app)\s*\.\s*route\s*\(\s*(["'`])([^"'`]*)\1\s*\)((?:\s*\.\s*(?:get|post|put|delete|patch|options|head|all)\s*\([^)]*\))+)/gi;
 const CHAINED_METHOD_CALL = /\.\s*(get|post|put|delete|patch|options|head|all)\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?|\([^)]*\)\s*=>|async\s+\([^)]*\)\s*=>|function\s+[A-Za-z_$][A-Za-z0-9_$]*)/gi;
@@ -35,6 +42,8 @@ export function extractBehaviorContracts(content: string, file: string): Behavio
   return dedupeContracts([
     ...extractFileRouteContracts(content, file),
     ...extractNestContracts(content, file),
+    ...extractNestGraphqlContracts(content, file),
+    ...extractNestProcessorContracts(content, file),
     ...extractRouterContracts(content, file, EXPRESS_ROUTER_CALL, "express"),
     ...extractExpressRouteChains(content, file),
     ...extractRouterContracts(content, file, FASTIFY_CALL, "fastify")
@@ -70,8 +79,8 @@ function extractNestContracts(content: string, file: string): BehaviorContract[]
     const index = match.index ?? 0;
     const controller = nearestController(controllers, index);
     const method = httpMethod(match[1]);
-    const routePath = joinRoutePaths(controller?.path ?? "", match[3] ?? "");
-    const handler = match[4];
+    const routePath = joinRoutePaths(controller?.path ?? "", match[3] ?? match[5] ?? "");
+    const handler = match[6];
     contracts.push(makeContract({
       file,
       framework: "nestjs",
@@ -79,6 +88,66 @@ function extractNestContracts(content: string, file: string): BehaviorContract[]
       path: routePath,
       handler,
       controller: controller?.name
+    }));
+  }
+  return contracts;
+}
+
+function extractNestGraphqlContracts(content: string, file: string): BehaviorContract[] {
+  // GraphQL resolvers are first-class user-triggerable entry points. In
+  // NestJS-heavy monorepos (Twenty: 415 @Query/@Mutation methods vs 139 HTTP
+  // routes) skipping them left almost every user behavior without an Endpoint
+  // anchor, so static flows rooted at internal orphan methods instead.
+  if (!/@(Query|Mutation|Subscription)\s*\(/.test(content)) return [];
+  const resolvers = [...content.matchAll(CLASS_DECLARATION)].map((match) => ({
+    index: match.index ?? 0,
+    path: "",
+    name: match[1]
+  }));
+  if (resolvers.length === 0) return [];
+  const contracts: BehaviorContract[] = [];
+  for (const match of content.matchAll(NEST_GQL_METHOD_DECORATOR)) {
+    const resolver = nearestController(resolvers, match.index ?? 0);
+    if (!resolver) continue;
+    const opKind = match[1].toUpperCase();
+    if (opKind === "RESOLVEFIELD") continue; // field resolvers are not user-triggerable operations
+    const handler = match[2];
+    contracts.push(makeContract({
+      file,
+      framework: "nestjs",
+      kind: "graphql_operation",
+      method: opKind,
+      path: `graphql:${handler}`,
+      handler,
+      controller: resolver.name
+    }));
+  }
+  return contracts;
+}
+
+function extractNestProcessorContracts(content: string, file: string): BehaviorContract[] {
+  // Background jobs and crons are behaviors (June 27 definition: user- or
+  // system-triggerable, cross-layer, observable outcome). Anchoring them lets
+  // the flow walker show queue-driven chains instead of orphan roots.
+  const processors = [...content.matchAll(NEST_PROCESSOR_DECORATOR)].map((match) => ({
+    index: match.index ?? 0,
+    path: normalizeRoutePath(match[2] ?? ""),
+    name: match[3]
+  }));
+  if (processors.length === 0) return [];
+  const contracts: BehaviorContract[] = [];
+  for (const match of content.matchAll(NEST_PROCESS_METHOD_DECORATOR)) {
+    const processor = nearestController(processors, match.index ?? 0);
+    if (!processor) continue;
+    const handler = match[1];
+    contracts.push(makeContract({
+      file,
+      framework: "nestjs",
+      kind: "queue_processor",
+      method: "JOB",
+      path: `queue:${processor.path || processor.name}`,
+      handler,
+      controller: processor.name
     }));
   }
   return contracts;
@@ -134,6 +203,7 @@ function extractExpressRouteChains(content: string, file: string): BehaviorContr
 function makeContract(input: {
   file: string;
   framework: BehaviorContractFramework;
+  kind?: BehaviorContractKind;
   method: string;
   path: string;
   handler?: string;
@@ -143,7 +213,7 @@ function makeContract(input: {
   return {
     id: `endpoint:${slugify(`${input.method}-${input.path}-${input.file}-${input.handler ?? ""}`)}`,
     title,
-    kind: "http_endpoint",
+    kind: input.kind ?? "http_endpoint",
     framework: input.framework,
     method: input.method,
     path: input.path,

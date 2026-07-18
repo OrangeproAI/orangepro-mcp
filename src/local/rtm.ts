@@ -4,8 +4,8 @@ import { languageOf } from "./analyze/classify.js";
 import { targetFingerprint, type Ledger } from "./ledger.js";
 
 export type RtmFormat = "md" | "csv" | "json";
-export type RtmStatus = "Proven" | "Runtime-covered" | "Associated signal" | "No integration signal" | "Reproven (this run)" | "Generated-unverifiable";
-export type RtmEvidenceTier = "proven" | "runtime" | "associated" | "none";
+export type RtmStatus = "Proven" | "Runtime-covered" | "Associated signal" | "Candidate signal (unconfirmed)" | "No integration signal" | "Reproven (this run)" | "Generated-unverifiable";
+export type RtmEvidenceTier = "proven" | "runtime" | "associated" | "candidate" | "none";
 
 export interface RtmRow {
   behavior: string;
@@ -35,6 +35,7 @@ export interface RtmSummary {
   proven: number;
   runtime_covered: number;
   associated: number;
+  candidate: number;
   no_link: number;
   reproven_this_run: number;
   generated_unverifiable: number;
@@ -61,17 +62,18 @@ export interface RtmResult {
 
 interface RtmIndexes {
   staticSignalsById: Map<string, string[]>;
-  associatedSignalsById: Map<string, string[]>;
-  associatedSignalsByFile: Map<string, string[]>;
+  candidateSignalsById: Map<string, string[]>;
+  candidateSignalsByFile: Map<string, string[]>;
 }
 
 const STATUS_ORDER: Record<RtmStatus, number> = {
   "No integration signal": 0,
-  "Associated signal": 1,
-  "Generated-unverifiable": 2,
-  "Runtime-covered": 3,
-  "Proven": 4,
-  "Reproven (this run)": 5
+  "Candidate signal (unconfirmed)": 1,
+  "Associated signal": 2,
+  "Generated-unverifiable": 3,
+  "Runtime-covered": 4,
+  "Proven": 5,
+  "Reproven (this run)": 6
 };
 
 const GENERIC_TEST_CATEGORIES = [
@@ -142,6 +144,7 @@ export function renderRtmMarkdown(result: RtmResult): string {
     `| Dynamically Proven | ${provenValue} |`,
     `| Runtime-covered | ${s.runtime_covered} |`,
     `| Associated signal | ${s.associated} |`,
+    `| Candidate signal (unconfirmed) | ${s.candidate} |`,
     `| No integration signal | ${s.no_link} |`,
     `| Reproven this run | ${s.reproven_this_run} |`,
     `| Generated unverifiable | ${s.generated_unverifiable} |`,
@@ -246,7 +249,11 @@ function toRtmRow(indexes: RtmIndexes, node: GraphNode, selected: SelectedLedger
 function evidenceTierFor(indexes: RtmIndexes, node: GraphNode, file: string, dynamicProof: boolean): RtmEvidenceTier {
   if (dynamicProof) return "proven";
   if (node.kind === "CodeSymbol" && node.properties.runtime_covered === true) return "runtime";
-  if (hasAssociatedSignal(indexes, node.external_id, file)) return "associated";
+  // Epistemic tiers (mirrors the platform's Proof/Candidate/Weak model):
+  // associated = a hard static test link (COVERS/TESTED_BY via real import) exists;
+  // candidate  = only a lexical/Jaccard candidate edge exists — a lead, not evidence.
+  if (indexes.staticSignalsById.has(node.external_id)) return "associated";
+  if (indexes.candidateSignalsById.has(node.external_id) || (file !== "" && indexes.candidateSignalsByFile.has(file))) return "candidate";
   return "none";
 }
 
@@ -255,6 +262,7 @@ function statusFor(evidence: RtmEvidenceTier, ledgerRecord: Ledger["records"][nu
   if (evidence === "runtime") return "Runtime-covered";
   if (ledgerRecord?.status === "generated_unverifiable") return "Generated-unverifiable";
   if (evidence === "associated") return "Associated signal";
+  if (evidence === "candidate") return "Candidate signal (unconfirmed)";
   return "No integration signal";
 }
 
@@ -275,6 +283,7 @@ function summarizeRows(rows: RtmRow[], unionRows: RtmRow[] = []): RtmSummary {
     proven,
     runtime_covered: rows.filter((row) => row.evidence_tier === "runtime").length,
     associated: rows.filter((row) => row.evidence_tier === "associated").length,
+    candidate: rows.filter((row) => row.evidence_tier === "candidate").length,
     no_link: rows.filter((row) => row.evidence_tier === "none").length,
     reproven_this_run: reproven,
     generated_unverifiable: rows.filter((row) => row.status === "Generated-unverifiable").length,
@@ -342,27 +351,24 @@ function compareLedgerRecords(a: Ledger["records"][number], aIndex: number, b: L
 function buildRtmIndexes(graph: LocalGraph): RtmIndexes {
   const nodeById = new Map(graph.nodes.map((n) => [n.external_id, n]));
   const staticSignalsById = new Map<string, Set<string>>();
-  const associatedSignalsById = new Map<string, Set<string>>();
-  const associatedSignalsByFile = new Map<string, Set<string>>();
+  const candidateSignalsById = new Map<string, Set<string>>();
+  const candidateSignalsByFile = new Map<string, Set<string>>();
 
   const add = (map: Map<string, Set<string>>, key: string, value: string): void => {
     const set = map.get(key);
     if (set) set.add(value);
     else map.set(key, new Set([value]));
   };
-  const importTargetsByFile = new Map<string, string[]>();
+  // Candidate (lexical/Jaccard) signals attach ONLY to the matched file itself.
+  // They must never propagate through imports: one lexical match on a barrel file
+  // previously marked its whole import subtree as "associated" — that inflated
+  // 93% of Twenty behaviors into the test-signal tier with zero real evidence.
   const addFileAssociation = (file: string, value: string): void => {
-    add(associatedSignalsByFile, file, value);
-    const imports = importTargetsByFile.get(file) ?? [];
-    if (imports.length > ASSOCIATED_IMPORT_PROPAGATION_LIMIT) return;
-    for (const importedFile of imports) add(associatedSignalsByFile, importedFile, value);
+    add(candidateSignalsByFile, file, value);
   };
 
   for (const e of graph.edges) {
     if (e.evidence_strength !== "hard") continue;
-    if (e.relationship_type === "IMPORTS" && isFileSignalKey(e.from_external_id) && isFileSignalKey(e.to_external_id)) {
-      importTargetsByFile.set(e.from_external_id, [...(importTargetsByFile.get(e.from_external_id) ?? []), e.to_external_id]);
-    }
     if (e.relationship_type !== "COVERS" && e.relationship_type !== "TESTED_BY") continue;
     const from = nodeById.get(e.from_external_id);
     const to = nodeById.get(e.to_external_id);
@@ -373,8 +379,8 @@ function buildRtmIndexes(graph: LocalGraph): RtmIndexes {
   for (const e of graph.candidate_edges) {
     if (e.review_status === "ai_suggested") continue;
     if (e.relationship_type !== "MAY_RELATE_TO" && e.relationship_type !== "MAY_BE_TESTED_BY" && e.relationship_type !== "MAY_COVER") continue;
-    add(associatedSignalsById, e.from_external_id, e.to_external_id);
-    add(associatedSignalsById, e.to_external_id, e.from_external_id);
+    add(candidateSignalsById, e.from_external_id, e.to_external_id);
+    add(candidateSignalsById, e.to_external_id, e.from_external_id);
     for (const [key, value] of [[e.from_external_id, e.to_external_id], [e.to_external_id, e.from_external_id]] as const) {
       if (isFileSignalKey(key)) addFileAssociation(key, value);
     }
@@ -383,8 +389,8 @@ function buildRtmIndexes(graph: LocalGraph): RtmIndexes {
   const freeze = (map: Map<string, Set<string>>): Map<string, string[]> => new Map([...map.entries()].map(([key, values]) => [key, [...values].sort()]));
   return {
     staticSignalsById: freeze(staticSignalsById),
-    associatedSignalsById: freeze(associatedSignalsById),
-    associatedSignalsByFile: freeze(associatedSignalsByFile)
+    candidateSignalsById: freeze(candidateSignalsById),
+    candidateSignalsByFile: freeze(candidateSignalsByFile)
   };
 }
 
@@ -392,15 +398,11 @@ function isFileSignalKey(id: string): boolean {
   return !id.startsWith("sym:") && !id.startsWith("test:") && !id.startsWith("flow:");
 }
 
-function hasAssociatedSignal(indexes: RtmIndexes, externalId: string, file: string): boolean {
-  return indexes.staticSignalsById.has(externalId) || indexes.associatedSignalsById.has(externalId) || (file !== "" && indexes.associatedSignalsByFile.has(file));
-}
-
 function testSignalFor(indexes: RtmIndexes, externalId: string, file: string): string {
   const staticSignals = indexes.staticSignalsById.get(externalId) ?? [];
   if (staticSignals.length > 0) return `static candidate: ${staticSignals.slice(0, 3).join("; ")}`;
 
-  const associated = [...(indexes.associatedSignalsById.get(externalId) ?? []), ...(file ? indexes.associatedSignalsByFile.get(file) ?? [] : [])]
+  const associated = [...(indexes.candidateSignalsById.get(externalId) ?? []), ...(file ? indexes.candidateSignalsByFile.get(file) ?? [] : [])]
     .filter((id) => id !== externalId && id !== file)
     .sort();
   if (associated.length > 0) return associated.slice(0, 3).join("; ");
@@ -450,6 +452,7 @@ function normalizeStatusFilter(statuses: string[] | undefined): Set<RtmStatus> |
     if (s === "proven") out.add("Proven");
     else if (s === "runtime" || s === "runtime-covered" || s === "runtimecovered") out.add("Runtime-covered");
     else if (s === "associated") out.add("Associated signal");
+    else if (s === "candidate" || s === "candidate-signal") out.add("Candidate signal (unconfirmed)");
     else if (s === "no-link" || s === "nolink" || s === "none") out.add("No integration signal");
     else if (s === "reproven" || s === "reproven-this-run") out.add("Reproven (this run)");
     else if (s === "generated-unverifiable" || s === "unverifiable") out.add("Generated-unverifiable");

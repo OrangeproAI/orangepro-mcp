@@ -189,7 +189,7 @@ describe("renderBehaviorReport", () => {
       expect(html).toContain(`lbl:"${label}"`);
     }
     expect(html).toContain("test breaks if you change it"); // Proven = dynamic-only definition
-    expect(html).toContain("test touches it, no proof"); // static signal can never read as proof
+    expect(html).toContain("hard static test link, no proof"); // static signal can never read as proof
     expect(html).toContain("called but untested");
     // The tier-badge vocabulary is wired for the behavior grid (distinct class per tier).
     for (const cls of ["b-proven", "b-signal", "b-reach", "b-nosig"]) {
@@ -332,7 +332,7 @@ describe("renderBehaviorReport", () => {
     for (const sub of [
       "public, with observable outcome",
       "test breaks if you change it",
-      "test touches it, no proof",
+      "hard static test link, no proof",
       "called but untested",
       "nothing touches it"
     ]) {

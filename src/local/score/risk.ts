@@ -21,11 +21,13 @@ export interface RiskGap {
   flow_position?: number;
   complexity_proxy?: number;
   is_new_code?: boolean;
-  integration_signal?: "associated" | "none";
+  integration_signal?: "associated" | "candidate" | "none";
 }
 
 export interface RiskGapOptions {
   limit?: number;
+  /** Max gaps surfaced per file in the ranked list (portfolio diversity). Default 3. */
+  maxPerFile?: number;
   repoRoot?: string;
   churnWindow?: string;
   /** Use the legacy linear formula (incoming_refs × 0.4 + git_churn × 0.4 + entry-point bonus).
@@ -248,6 +250,8 @@ function normalizeScores(values: number[]): number[] {
 const DETECTION_MAP: Record<string, number> = {
   proven: 1,
   associated: 5,
+  // A lexical/Jaccard candidate is a lead, not evidence — detection stays hard.
+  candidate: 8,
   none: 10
 };
 
@@ -266,7 +270,7 @@ function computeRawORS(
   incomingRefs: number,
   gitChurn: number,
   fanOut: number,
-  detectionTier: "associated" | "none",
+  detectionTier: "associated" | "candidate" | "none",
   firstCommitTs: number,
   nowSec: number
 ): RawScores {
@@ -284,7 +288,19 @@ function computeRawORS(
   return { p: rawP, i: rawI, d };
 }
 
-function associatedBehaviorIds(graph: LocalGraph, candidateIds: Set<string>): Set<string> {
+function staticTestLinkedIds(graph: LocalGraph, candidateIds: Set<string>): Set<string> {
+  const ids = new Set<string>();
+  const kinds = new Map(graph.nodes.map((n) => [n.external_id, n.kind]));
+  for (const e of graph.edges) {
+    if (e.evidence_strength !== "hard") continue;
+    if (e.relationship_type !== "TESTED_BY" && e.relationship_type !== "COVERS") continue;
+    if (kinds.get(e.from_external_id) === "TestCase" && candidateIds.has(e.to_external_id)) ids.add(e.to_external_id);
+    if (kinds.get(e.to_external_id) === "TestCase" && candidateIds.has(e.from_external_id)) ids.add(e.from_external_id);
+  }
+  return ids;
+}
+
+function candidateSignalIds(graph: LocalGraph, candidateIds: Set<string>): Set<string> {
   const ids = new Set<string>();
   for (const e of graph.candidate_edges ?? []) {
     if (e.relationship_type !== "MAY_BE_TESTED_BY" && e.relationship_type !== "MAY_COVER" && e.relationship_type !== "MAY_RELATE_TO") {
@@ -316,18 +332,46 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const firstCommitTs = gitFirstCommitBatch(opts.repoRoot ?? graph.workspace.root, files);
   const nowSec = Math.floor(Date.now() / 1000);
 
+  // Method-level attribution. CALLS edges are already symbol-granular and count
+  // at full weight. IMPORTS edges are file-granular: previously every symbol in
+  // an imported file inherited the file's full import count, which made all 17
+  // methods of a hot service tie at the same "incoming refs" and saturated the
+  // ranking. Split the file's import count across its eligible symbols instead.
   const incoming = new Map<string, number>();
+  const fileImports = new Map<string, number>();
   for (const e of graph.edges) {
     if (e.relationship_type === "CALLS" && symbolIds.has(e.to_external_id)) {
       incoming.set(e.to_external_id, (incoming.get(e.to_external_id) ?? 0) + 1);
-    } else if (e.relationship_type === "IMPORTS") {
-      for (const s of symbolsByFile.get(e.to_external_id) ?? []) incoming.set(s.external_id, (incoming.get(s.external_id) ?? 0) + 1);
+    } else if (e.relationship_type === "IMPORTS" && symbolsByFile.has(e.to_external_id)) {
+      fileImports.set(e.to_external_id, (fileImports.get(e.to_external_id) ?? 0) + 1);
     }
   }
+  for (const [file, count] of fileImports) {
+    const syms = symbolsByFile.get(file) ?? [];
+    if (syms.length === 0) continue;
+    const share = count / syms.length;
+    for (const s of syms) incoming.set(s.external_id, (incoming.get(s.external_id) ?? 0) + share);
+  }
+  // Per-symbol churn share: file churn weighted by the symbol's line span so one
+  // hot file no longer awards its full churn to every method it contains.
+  const fileComplexityTotals = new Map<string, number>();
+  for (const [file, syms] of symbolsByFile) {
+    fileComplexityTotals.set(file, syms.reduce((acc, s) => acc + Math.max(complexityProxy(s), 1), 0));
+  }
+  const symbolChurn = (s: GraphNode): number => {
+    const file = symbolFile(s);
+    const fileChurn = churn.get(file) ?? 0;
+    if (fileChurn === 0) return 0;
+    const total = fileComplexityTotals.get(file) ?? 1;
+    return fileChurn * (Math.max(complexityProxy(s), 1) / Math.max(total, 1));
+  };
 
   const entryPoint = new Map(symbols.map((s) => [s.external_id, isEntryPoint(s)]));
   const fanOut = new Map(symbols.map((s) => [s.external_id, countOutgoingCalls(s.external_id, graph)]));
-  const associated = associatedBehaviorIds(graph, symbolIds);
+  const staticLinked = staticTestLinkedIds(graph, symbolIds);
+  const candidateLinked = candidateSignalIds(graph, symbolIds);
+  const detectionFor = (id: string): "associated" | "candidate" | "none" =>
+    staticLinked.has(id) ? "associated" : candidateLinked.has(id) ? "candidate" : "none";
 
   if (opts.legacy) {
     return symbols
@@ -352,21 +396,20 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const rawScores = symbols.map((s) => {
     const file = symbolFile(s);
     const incoming_refs = incoming.get(s.external_id) ?? 0;
-    const git_churn = churn.get(file) ?? 0;
+    const git_churn = symbolChurn(s);
     const fan_out = fanOut.get(s.external_id) ?? 0;
     const ts = firstCommitTs.get(file) ?? 0;
-    const detectionTier: "associated" | "none" = associated.has(s.external_id) ? "associated" : "none";
-    return computeRawORS(s, graph, incoming_refs, git_churn, fan_out, detectionTier, ts, nowSec);
+    return computeRawORS(s, graph, incoming_refs, git_churn, fan_out, detectionFor(s.external_id), ts, nowSec);
   });
 
   const pScores = normalizeScores(rawScores.map((r) => r.p));
   const iScores = normalizeScores(rawScores.map((r) => r.i));
 
-  return symbols
+  const ranked = symbols
     .map((s, idx) => {
       const file = symbolFile(s);
-      const incoming_refs = incoming.get(s.external_id) ?? 0;
-      const git_churn = churn.get(file) ?? 0;
+      const incoming_refs = Math.round((incoming.get(s.external_id) ?? 0) * 10) / 10;
+      const git_churn = Math.round(symbolChurn(s));
       const fan_out = fanOut.get(s.external_id) ?? 0;
       const isEntry = entryPoint.get(s.external_id) ?? false;
       const route_weight = deriveRouteWeight(s);
@@ -375,19 +418,26 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const complexity_proxy = complexityProxy(s);
       const firstTs = firstCommitTs.get(file) ?? 0;
       const is_new_code = firstTs > 0 && nowSec - firstTs < NEW_CODE_SECONDS;
-      const p = Math.round(pScores[idx]);
-      const i = Math.round(iScores[idx]);
+      // Score on the CONTINUOUS normalized values; rounding P and I to integers
+      // before multiplying previously collapsed whole hot files into identical
+      // P×I×D ties (seventeen ORS-100 rows from one service). Integers remain
+      // display-only in the decomposition string.
+      const pExact = pScores[idx];
+      const iExact = iScores[idx];
+      const p = Math.round(pExact);
+      const i = Math.round(iExact);
       const d = rawScores[idx].d;
-      const detectionTier: "associated" | "none" = associated.has(s.external_id) ? "associated" : "none";
-      const score = p * i * d;
+      const detectionTier = detectionFor(s.external_id);
+      const score = Math.round(pExact * iExact * d * 10) / 10;
       const reasons = [
-        `ORS ${score} = P${p} × I${i} × D${d}`,
-        `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"}`,
-        `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in 180 days`,
+        `ORS ${score} ≈ P${p} × I${i} × D${d}`,
+        `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"} (method-attributed)`,
+        `${git_churn} git churn line${git_churn === 1 ? "" : "s"} attributed to this symbol in 180 days`,
         `route weight ${route_weight}, data sensitivity ${data_sensitivity}, fan-out ${fan_out}`
       ];
       if (isEntry) reasons.push("near an API/route/handler entry point");
       if (is_new_code) reasons.push("new code (< 30 days)");
+      if (detectionTier === "candidate") reasons.push("lexical candidate test match only — unconfirmed");
       return {
         id: s.external_id,
         title: s.title || s.external_id,
@@ -409,6 +459,29 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
         integration_signal: detectionTier
       };
     })
+    .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id));
+
+  // Portfolio diversity: cap how many gaps a single file contributes to the
+  // surfaced list, then backfill with the remaining highest scores if short.
+  const maxPerFile = Math.max(1, opts.maxPerFile ?? 3);
+  const perFile = new Map<string, number>();
+  const surfaced: RiskGap[] = [];
+  const overflow: RiskGap[] = [];
+  for (const gap of ranked) {
+    const used = perFile.get(gap.file) ?? 0;
+    if (used < maxPerFile) {
+      perFile.set(gap.file, used + 1);
+      surfaced.push(gap);
+    } else {
+      overflow.push(gap);
+    }
+    if (surfaced.length >= limit) break;
+  }
+  if (surfaced.length < limit) surfaced.push(...overflow.slice(0, limit - surfaced.length));
+  // Guarantee: the surfaced list is ALWAYS highest-risk-first, even when the
+  // per-file diversity backfill re-admits overflow items (which otherwise land
+  // appended after lower-scored rows).
+  return surfaced
     .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
     .slice(0, limit);
 }
