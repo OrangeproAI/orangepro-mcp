@@ -66,6 +66,10 @@ export interface PlannedScenario {
   technique: TestDesignTechnique;
   rationale: string;
   assertion_targets: string[];
+  /** Optional Given/When/Then steps for the human-readable manual test. */
+  steps?: string[];
+  /** Optional synthetic example inputs demonstrating the edge case. */
+  test_data?: string;
   complexity: "basic" | "intermediate" | "advanced";
   risk_rank: number;
 }
@@ -158,7 +162,7 @@ export function buildPlanningSystemPromptV5(): string {
     "- Return a raw JSON array only. No prose, no markdown fences, no heading, no explanation.",
     "- If no missing scenario is justified, return [] exactly.",
     "- The first character of your response must be [ and the last character must be ].",
-    '[{"id":1,"title":"...","concern":"...","technique":"...","rationale":"...","assertion_targets":["..."],"complexity":"basic|intermediate|advanced","risk_rank":1}]'
+    '[{"id":1,"title":"...","concern":"...","technique":"...","rationale":"...","assertion_targets":["..."],"steps":["Given ...","When ...","Then ..."],"test_data":"concrete example input values (synthetic, showing the edge case)","complexity":"basic|intermediate|advanced","risk_rank":1}]'
   ].join("\n");
 }
 
@@ -370,6 +374,16 @@ function validatePlannedScenario(
   }
   const riskRank = toFinite(v.risk_rank);
   if (riskRank === null) return { ok: false, reason: "non-finite risk_rank" };
+  // Optional human-readable fields (tolerant: absent/malformed → omitted, never a rejection).
+  const steps = Array.isArray(v.steps)
+    ? v.steps.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, 6).map((x) => x.slice(0, 240))
+    : undefined;
+  const test_data =
+    typeof v.test_data === "string" && v.test_data.trim()
+      ? v.test_data.slice(0, 400)
+      : v.test_data && typeof v.test_data === "object"
+        ? JSON.stringify(v.test_data).slice(0, 400)
+        : undefined;
   return {
     ok: true,
     value: {
@@ -379,6 +393,8 @@ function validatePlannedScenario(
       technique: technique as TestDesignTechnique,
       rationale: typeof v.rationale === "string" ? v.rationale : "",
       assertion_targets: targets,
+      ...(steps && steps.length ? { steps } : {}),
+      ...(test_data ? { test_data } : {}),
       complexity,
       risk_rank: riskRank
     }
