@@ -28,7 +28,7 @@ interface InternalFlow extends BehaviorFlow {
 }
 
 const DEFAULT_MAX_DEPTH = 8;
-const DEFAULT_MAX_FLOWS_PER_ENTRY = 20;
+const DEFAULT_MAX_FLOWS_PER_ENTRY = 5;
 const DEFAULT_GLOBAL_CAP = 500;
 const HIGH_ROUTE_RE = /payment|refund|checkout|cart|order|auth|login|token|customer|user|tax|fulfillment|ship/i;
 const MUTATION_METHOD_RE = /^(POST|PUT|PATCH|DELETE)\b/i;
@@ -136,11 +136,17 @@ export function rankEntries(graph: FlowGraphInput, entries: FlowEntry[], adjacen
       gap.risk_score
     ])
   );
-  return [...entries].sort((a, b) => {
-    const aScore = Math.max(riskScores.get(a.start) ?? 0, fallbackScore(a, adjacency));
-    const bScore = Math.max(riskScores.get(b.start) ?? 0, fallbackScore(b, adjacency));
-    return bScore - aScore || a.kind.localeCompare(b.kind) || a.external_id.localeCompare(b.external_id) || a.start.localeCompare(b.start);
-  });
+  // Endpoint-anchored flows first. An Endpoint entry IS the definition of a
+  // user-triggerable behavior (June 27 agreement); orphan call-graph roots are
+  // useful but must never crowd endpoints out of the global cap — on Twenty,
+  // saturated risk ties let ~25 internal orphan methods consume all 500 flow
+  // slots while every HTTP/GraphQL entry point went unrendered.
+  const score = (e: FlowEntry): number => Math.max(riskScores.get(e.start) ?? 0, fallbackScore(e, adjacency));
+  const byScore = (a: FlowEntry, b: FlowEntry): number =>
+    score(b) - score(a) || a.external_id.localeCompare(b.external_id) || a.start.localeCompare(b.start);
+  const endpoints = entries.filter((e) => e.kind === "Endpoint").sort(byScore);
+  const behaviors = entries.filter((e) => e.kind !== "Endpoint").sort(byScore);
+  return [...endpoints, ...behaviors];
 }
 
 function prunePrefixSubsumed(flows: InternalFlow[]): InternalFlow[] {

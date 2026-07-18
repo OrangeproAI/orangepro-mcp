@@ -185,14 +185,15 @@ describe("RTM builder", () => {
     expect(rtm.summary).toMatchObject({
       total: 4,
       proven: 0,
-      associated: 3,
+      associated: 2,
+      candidate: 1,
       no_link: 1
     });
     expect(rtm.rows.map((r) => [r.behavior_id, r.status])).toEqual([
       ["sym:svc/math.go#Sub", "No integration signal"],
+      ["sym:svc/math.go#Validate", "Candidate signal (unconfirmed)"],
       ["REQ-1", "Associated signal"],
-      ["sym:svc/math.go#Add", "Associated signal"],
-      ["sym:svc/math.go#Validate", "Associated signal"]
+      ["sym:svc/math.go#Add", "Associated signal"]
     ]);
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.test_signal).toContain("static candidate:");
 
@@ -200,7 +201,8 @@ describe("RTM builder", () => {
     expect(scoped.summary).toMatchObject({
       total: 3,
       proven: 0,
-      associated: 2,
+      associated: 1,
+      candidate: 1,
       coverage_confirmed: 0,
       coverage_total: 3
     });
@@ -215,7 +217,8 @@ describe("RTM builder", () => {
     expect(rtm.summary).toMatchObject({
       total: 4,
       proven: 1,
-      associated: 2,
+      associated: 1,
+      candidate: 1,
       no_link: 1,
       coverage_confirmed: 1,
       coverage_total: 4
@@ -418,7 +421,8 @@ describe("RTM builder", () => {
       total: 4,
       proven: 0,
       runtime_covered: 1,
-      associated: 3,
+      associated: 2,
+      candidate: 1,
       no_link: 0,
       coverage_confirmed: 0
     });
@@ -426,7 +430,12 @@ describe("RTM builder", () => {
     expect(renderRtmMarkdown(rtm)).toContain("| Runtime-covered | 1 |");
   });
 
-  it("credits deterministic file-level associations through one-hop barrel imports", () => {
+  it("does NOT propagate candidate signals through barrel imports, and never upgrades them to associated", () => {
+    // Epistemic fix (Jul 17): a lexical/Jaccard candidate edge is a lead, not
+    // evidence. Previously one candidate match on a barrel file marked its whole
+    // import subtree "associated" — on Twenty CRM that inflated 93% of behaviors
+    // into the test-signal tier. Candidates now (a) stay on the matched file only
+    // and (b) surface as their own "candidate" tier.
     const g = graph();
     g.edges.push(
       makeEdge({
@@ -452,14 +461,15 @@ describe("RTM builder", () => {
     );
 
     const rtm = buildRtm(g, emptyLedger());
+    // The imported file's symbols must NOT inherit the barrel's candidate signal.
     const sub = rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub");
-
-    expect(sub).toMatchObject({
-      status: "Associated signal",
-      evidence_tier: "associated"
-    });
-    expect(sub?.test_signal).toContain("tests/basic.test.ts");
-    expect(rtm.summary.proven).toBe(0);
+    expect(sub?.evidence_tier).toBe("none");
+    expect(sub?.status).toBe("No integration signal");
+    // Symbols in the matched file itself surface as candidate — visible, but never evidence.
+    for (const row of rtm.rows.filter((r) => r.file === "src/index.ts")) {
+      expect(row.evidence_tier).toBe("candidate");
+      expect(row.status).toBe("Candidate signal (unconfirmed)");
+    }
   });
 
   it("does not let AI-suggested links affect public Proven or Associated status", () => {
@@ -547,7 +557,7 @@ describe("RTM builder", () => {
     const rtm = buildRtm(graph(), ledger);
 
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub")?.status).toBe("No integration signal");
-    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Validate")?.status).toBe("Associated signal");
+    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Validate")?.status).toBe("Candidate signal (unconfirmed)");
     expect(rtm.summary).toMatchObject({ reproven_this_run: 0, attempted: 1, kept_rate: 0 });
   });
 
@@ -571,13 +581,15 @@ describe("RTM builder", () => {
   });
 
   it("renders metadata-only markdown and csv with deterministic suggestions", () => {
-    const rtm = buildRtm(graph(), emptyLedger(), { statuses: ["no-link", "associated"] });
+    const rtm = buildRtm(graph(), emptyLedger(), { statuses: ["no-link", "associated", "candidate"] });
     const md = renderRtmMarkdown(rtm);
     const csv = renderRtmCsv(rtm);
 
+    // Validate carries only a lexical candidate edge → surfaces under its own
+    // "candidate" status filter now, never under "associated".
     expect(rtm.rows.map((r) => r.status)).toEqual([
       "No integration signal",
-      "Associated signal",
+      "Candidate signal (unconfirmed)",
       "Associated signal",
       "Associated signal"
     ]);

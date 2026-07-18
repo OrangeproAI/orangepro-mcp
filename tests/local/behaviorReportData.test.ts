@@ -213,7 +213,7 @@ describe("buildBehaviorReportData", () => {
     expect(data.repo).toBe("medusa");
     expect(data.scanned).toBe("2026-06-30");
     expect(data.analysisKind).toBe("static");
-    expect(data.summary).toEqual({ total: 2, proven: 0, associated: 2, none: 0, reachableUntested: 0, noSignal: 0 });
+    expect(data.summary).toEqual({ total: 2, proven: 0, associated: 1, candidate: 1, none: 0, reachableUntested: 0, noSignal: 0 });
     expect(data.proofGuidance).toMatchObject({
       state: "not_started",
       title: "0 Dynamically Proven means no dynamic proof has run yet"
@@ -223,7 +223,7 @@ describe("buildBehaviorReportData", () => {
     expect(data.zeroProofExplainer?.body.join(" ")).toContain("Dynamic proof requires executing tests in a sandbox");
     expect(data.proofGuidance.body).toContain("analysis pass");
     expect(data.proofGuidance.action).toContain("orangepro_prove_loop");
-    expect(data.summary.proven + data.summary.associated + data.summary.none).toBe(data.summary.total);
+    expect(data.summary.proven + data.summary.associated + data.summary.candidate + data.summary.none).toBe(data.summary.total);
     expect(Object.fromEntries(data.pipeline.map((s) => [s.key, s.on]))).toMatchObject({
       behaviors: "1",
       endpoints: "1",
@@ -236,7 +236,7 @@ describe("buildBehaviorReportData", () => {
     expect(data.behaviorGroups).toEqual([{ key: "src", count: 2 }]);
     expect(data.behaviors.map((b) => [b.sig, b.tier])).toEqual([
       ["OrdersController.create", "assoc"],
-      ["OrdersService.create", "assoc"]
+      ["OrdersService.create", "candidate"]
     ]);
   });
 
@@ -244,7 +244,7 @@ describe("buildBehaviorReportData", () => {
     const data = buildBehaviorReportData(graph(), dynamicLedger(), { repoRoot: "/tmp/medusa" });
 
     expect(data.analysisKind).toBe("static+dynamic");
-    expect(data.summary).toEqual({ total: 2, proven: 1, associated: 1, none: 0, reachableUntested: 0, noSignal: 0 });
+    expect(data.summary).toEqual({ total: 2, proven: 1, associated: 0, candidate: 1, none: 0, reachableUntested: 0, noSignal: 0 });
     expect(data.proofGuidance).toMatchObject({ state: "proven", title: "Dynamically Proven is active" });
     // Nonzero Dynamically Proven → no zero-proof explainer.
     expect(data.zeroProofExplainer).toBeNull();
@@ -252,7 +252,7 @@ describe("buildBehaviorReportData", () => {
     // Proven-first display ordering (v6): the proven row leads the grid.
     expect(data.behaviors.map((b) => [b.sig, b.tier])).toEqual([
       ["OrdersController.create", "proven"],
-      ["OrdersService.create", "assoc"]
+      ["OrdersService.create", "candidate"]
     ]);
   });
 
@@ -375,7 +375,8 @@ describe("buildBehaviorReportData — 0-Dynamically-Proven guidance names the do
     const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api", dynamicProof: dyn });
 
     expect(data.summary.proven).toBe(0);
-    expect(data.summary.associated).toBe(2); // static Associated signals preserved
+    expect(data.summary.associated).toBe(1); // hard static link preserved
+    expect(data.summary.candidate).toBe(1); // lexical candidate stays its own tier
     expect(data.proofGuidance.state).toBe("attempted");
     expect(data.proofGuidance.title).toContain("top 5");
     expect(data.proofGuidance.body).toContain("attempted the top 5");
@@ -420,7 +421,8 @@ describe("buildBehaviorReportData — 0-Dynamically-Proven guidance names the do
 
     expect(data.proofGuidance.state).toBe("not_started");
     expect(data.proofGuidance.body).toContain("Dynamic proof was not attempted in this run");
-    expect(data.summary.associated).toBe(2);
+    expect(data.summary.associated).toBe(1);
+    expect(data.summary.candidate).toBe(1);
   });
 
   it("dominantBlockReason tallies the most common category", () => {

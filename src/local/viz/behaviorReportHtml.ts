@@ -102,6 +102,10 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .beh-card:hover::before{opacity:1}
 .beh-card[data-t="proven"]{--gw:var(--gbg);border-color:rgba(63,185,80,.22)}
 .beh-card[data-t="proven"]:hover{border-color:var(--gbd)}
+.beh-card[data-t="candidate"]{--gw:rgba(163,113,247,.13)}
+.beh-card[data-t="candidate"]:hover{border-color:rgba(163,113,247,.38)}
+.beh-card[data-t="candidate"] .bc-bar{background:#a371f7}
+.b-cand{color:#a371f7;background:rgba(163,113,247,.13);border-color:rgba(163,113,247,.38)} .b-cand .d{background:#a371f7}
 .beh-card[data-t="assoc"]{--gw:var(--abg)}
 .beh-card[data-t="assoc"]:hover{border-color:var(--abd)}
 .beh-card[data-t="reach"]{--gw:var(--bbg)}
@@ -292,6 +296,7 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 <!-- TAB 3: FLOWS — bridge from "methods" to "user journeys" -->
 <section class="panel" id="panel-flows" role="tabpanel">
   <p class="bridge">A <b>flow</b> is the sequence of methods that execute when a real request hits your system. Each box is a method you already saw in the Behaviors tab — but here they're connected as a call chain. Solid lines = hard-coded calls. Dashed = framework-derived. <span style="color:var(--green)">Green boxes</span> pulse because a test proves they break if mutated.</p>
+  <p class="bridge" id="flow-cap-note" style="font-size:12px;opacity:.75"></p>
   <div id="flow-list"></div>
   <div class="ai-sec" id="ai-sec" hidden>
     <div class="ai-lbl">AI-suggested flows — plausible paths, not proven. Dashed borders = unverified.</div>
@@ -301,7 +306,8 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 
 <!-- TAB 4: RISKS — actionable -->
 <section class="panel" id="panel-risks" role="tabpanel">
-  <p class="bridge">These are the flows with the highest blast radius and the weakest test coverage. Each one tells you exactly what to do next.</p>
+  <p class="bridge">These are the flows with the highest blast radius and the weakest test coverage, <b>sorted highest risk first</b>. Each one tells you exactly what to do next.</p>
+  <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
   <div class="risk-tools" id="risk-tools"></div>
   <div id="risk-list"></div>
 </section>
@@ -344,7 +350,8 @@ $("#t-risk").textContent=D.risks.length;
 [
   {lbl:"Methods found",num:S.total,sub:"public, with observable outcome",t:"total"},
   {lbl:"Dynamically Proven",num:S.proven,sub:"test breaks if you change it",t:"proven"},
-  {lbl:"Test signal",num:S.associated,sub:"test touches it, no proof",t:"signal"},
+  {lbl:"Test signal",num:S.associated,sub:"hard static test link, no proof",t:"signal"},
+  {lbl:"Candidate",num:S.candidate??0,sub:"lexical match only — unconfirmed",t:"cand"},
   {lbl:"Reachable",num:S.reachableUntested,sub:"called but untested",t:"reach"},
   {lbl:"No signal",num:S.noSignal,sub:"nothing touches it",t:"nosig"},
 ].forEach(k=>{
@@ -363,11 +370,13 @@ $("#test-unit").textContent=D.scan.tests.unit;
 function tierOf(b){
   if(b.tier==="proven")return{cls:"proven",badge:"b-proven",label:"Dynamically Proven",ax:"ax-proven"};
   if(b.tier==="assoc")return{cls:"assoc",badge:"b-signal",label:"Test signal",ax:"ax-signal"};
+  if(b.tier==="candidate")return{cls:"candidate",badge:"b-cand",label:"Candidate",ax:"ax-signal"};
   if(b.tier==="none"&&b.reachable)return{cls:"reach",badge:"b-reach",label:"Reachable",ax:"ax-reach"};
   return{cls:"nosig",badge:"b-nosig",label:"No signal",ax:"ax-nosig"};
 }
 function ctaOf(b){
   if(b.tier==="proven")return"This method is Dynamically Proven. A test breaks if you mutate it. Keep it green.";
+  if(b.tier==="candidate")return"A test file is lexically similar to this behavior, but no import or call links them. Treat as untested until confirmed — run <code>npx -y @orangepro/orangepro-mcp start</code> to confirm or prove.";
   if(b.tier==="assoc")return"A test calls this method, but doesn't prove breakage. Run <code>npx -y @orangepro/orangepro-mcp start</code> to attempt dynamic proof.";
   if(b.tier==="none"&&b.reachable)return"This method is reachable from a tested path but has no direct test. Write one.";
   return"Nothing in your test suite touches this method. Write a test that calls it and asserts the output.";
@@ -393,7 +402,7 @@ const searchEl=$("#beh-search");
 searchEl.addEventListener("input",()=>{searchQ=searchEl.value.trim().toLowerCase();renderBeh();});
 // evidence-tier filter (Dynamically Proven first) so users can jump straight to a tier
 const tierWrap=$("#tier-filter");
-[["proven","Dynamically Proven"],["assoc","Test signal"],["reach","Reachable"],["nosig","No signal"]].forEach(([cls,label])=>{
+[["proven","Dynamically Proven"],["assoc","Test signal"],["candidate","Candidate"],["reach","Reachable"],["nosig","No signal"]].forEach(([cls,label])=>{
   const n=D.behaviors.filter(b=>tierOf(b).cls===cls).length;
   const btn=el("button","grp",\`<span>\${label}</span><span class="gc">\${n}</span>\`);
   btn.setAttribute("aria-pressed","false");
@@ -475,6 +484,11 @@ if(cf&&cf.flows.length){
 
 // risks + generated test samples
 const riskList=$("#risk-list"),riskTools=$("#risk-tools");
+if(D.viewMeta){
+  const rm=D.viewMeta.risks,fm=D.viewMeta.flows;
+  if(rm&&rm.scored>rm.shown)$("#risk-cap-note").textContent="Showing the top "+rm.shown+" of "+rm.scored.toLocaleString()+" scored behaviors — every behavior is scored; only the highest-risk are surfaced here. Full ranking: opro gaps --limit N, or .orangepro/graph.json.";
+  if(fm&&fm.shown>0&&fm.prunedByCaps>0)$("#flow-cap-note").textContent="Showing "+fm.shown.toLocaleString()+" flows, endpoint-anchored first. "+fm.prunedByCaps.toLocaleString()+" additional branch expansions were pruned by depth/branch/global rendering caps — pruning affects display only, not scoring.";
+}
 const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
 let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){

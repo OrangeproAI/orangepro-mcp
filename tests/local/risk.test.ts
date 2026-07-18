@@ -125,7 +125,7 @@ describe("rankRiskGaps", () => {
     expect(ranked.map((r) => r.id)).toEqual(["sym:src/api/users.ts#handleUser", "sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveUser"]);
     expect(ranked[0]).toMatchObject({ entry_point: true, incoming_refs: 1, git_churn: 0 });
     expect(ranked[0].reasons).toContain("near an API/route/handler entry point");
-    expect(ranked[0].reasons[0]).toMatch(/^ORS \d+ = P\d+ × I\d+ × D\d+$/);
+    expect(ranked[0].reasons[0]).toMatch(/^ORS \d+(\.\d+)? ≈ P\d+ × I\d+ × D\d+$/);
     expect(ranked[0].detection_difficulty).toBe(10);
     expect(ranked.some((r) => r.id.includes("confirmed"))).toBe(false);
     expect(ranked.some((r) => r.id.includes("helper"))).toBe(false);
@@ -148,8 +148,11 @@ describe("rankRiskGaps", () => {
 
     expect(byId.get("sym:src/api/orders.ts#POST")?.detection_difficulty).toBe(10);
     expect(byId.get("sym:src/api/orders.ts#POST")?.integration_signal).toBe("none");
-    expect(byId.get("sym:src/api/payments.ts#POST")?.detection_difficulty).toBe(5);
-    expect(byId.get("sym:src/api/payments.ts#POST")?.integration_signal).toBe("associated");
+    // Epistemic fix (Jul 17): an unconfirmed lexical/Jaccard candidate is a LEAD,
+    // not evidence. It gets its own tier (D=8), never the associated tier (D=5) —
+    // only a hard TESTED_BY/COVERS edge from a real TestCase earns "associated".
+    expect(byId.get("sym:src/api/payments.ts#POST")?.detection_difficulty).toBe(8);
+    expect(byId.get("sym:src/api/payments.ts#POST")?.integration_signal).toBe("candidate");
   });
 
   // REGRESSION (#147 review): the proven set (confirmedBehaviorIds) filters evidence_strength==="hard",

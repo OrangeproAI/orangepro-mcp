@@ -16,7 +16,7 @@ export interface BehaviorReportData {
    * (reachableUntested + noSignal === none): a none-tier behavior whose symbol
    * appears in a static flow is "Reachable Untested"; the rest are "No Signal".
    */
-  summary: { total: number; proven: number; associated: number; none: number; reachableUntested: number; noSignal: number };
+  summary: { total: number; proven: number; associated: number; candidate: number; none: number; reachableUntested: number; noSignal: number };
   proofGuidance: { state: "proven" | "attempted" | "not_started"; title: string; body: string; action: string };
   pipeline: Array<{ key: string; label: string; pr: string; on: "1" | "partial" | "0" }>;
   scan: {
@@ -26,7 +26,7 @@ export interface BehaviorReportData {
     excluded: { count: string; text: string };
   };
   behaviorGroups: Array<{ key: string; count: number }>;
-  behaviors: Array<{ sig: string; group: string; file: string; tier: "proven" | "assoc" | "none"; reachable: boolean; desc: string }>;
+  behaviors: Array<{ sig: string; group: string; file: string; tier: "proven" | "assoc" | "candidate" | "none"; reachable: boolean; desc: string }>;
   flows: BehaviorReportFlow[];
   /**
    * AI-suggested candidate flows — a clearly-labeled "verify these" worklist.
@@ -53,6 +53,11 @@ export interface BehaviorReportData {
   /** Verbatim "why 0 dynamic proof" explainer — populated ONLY when summary.proven === 0. Display copy; changes no classification. */
   zeroProofExplainer: { title: string; body: string[] } | null;
   /** Total generated tests recorded in the graph (honest count; 0 hides the CTA band). */
+  /** Cap disclosure: what the view shows vs what was computed. Display-only. */
+  viewMeta: {
+    risks: { shown: number; scored: number };
+    flows: { shown: number; prunedByCaps: number };
+  };
   generatedTotal: number;
   /** How many of those are rendered inline in risk cards (0 until linkage is wired). */
   shownCount: number;
@@ -215,16 +220,17 @@ function flowSymbolIds(graph: LocalGraph): Set<string> {
 }
 
 function isNoneTier(tier: RtmRow["evidence_tier"]): boolean {
-  return tier !== "proven" && tier !== "associated" && tier !== "runtime";
+  return tier !== "proven" && tier !== "associated" && tier !== "runtime" && tier !== "candidate";
 }
 
 function summaryFromRows(rows: RtmRow[], flowIds: Set<string>): BehaviorReportData["summary"] {
   const proven = rows.filter((r) => r.evidence_tier === "proven").length;
   const associated = rows.filter((r) => r.evidence_tier === "associated" || r.evidence_tier === "runtime").length;
+  const candidate = rows.filter((r) => r.evidence_tier === "candidate").length;
   const noneRows = rows.filter((r) => isNoneTier(r.evidence_tier));
   // DISPLAY-ONLY split of `none`: a none-tier symbol that shows up in a static flow is "Reachable Untested".
   const reachableUntested = noneRows.filter((r) => flowIds.has(r.behavior_id)).length;
-  return { total: rows.length, proven, associated, none: noneRows.length, reachableUntested, noSignal: noneRows.length - reachableUntested };
+  return { total: rows.length, proven, associated, candidate, none: noneRows.length, reachableUntested, noSignal: noneRows.length - reachableUntested };
 }
 
 /** Verbatim 0-dynamic-proof explainer copy. Rendered only when summary.proven === 0. */
@@ -359,8 +365,14 @@ function behaviorLists(rows: RtmRow[], flowIds: Set<string>): Pick<BehaviorRepor
   const behaviors = rows.map((row) => {
     const group = groupOf(row.file);
     groups.set(group, (groups.get(group) ?? 0) + 1);
-    const tier: "proven" | "assoc" | "none" =
-      row.evidence_tier === "proven" ? "proven" : row.evidence_tier === "associated" || row.evidence_tier === "runtime" ? "assoc" : "none";
+    const tier: "proven" | "assoc" | "candidate" | "none" =
+      row.evidence_tier === "proven"
+        ? "proven"
+        : row.evidence_tier === "associated" || row.evidence_tier === "runtime"
+          ? "assoc"
+          : row.evidence_tier === "candidate"
+            ? "candidate"
+            : "none";
     return {
       sig: row.behavior || row.code_symbol,
       group,
@@ -377,11 +389,21 @@ function behaviorLists(rows: RtmRow[], flowIds: Set<string>): Pick<BehaviorRepor
   };
 }
 
-function riskBucket(score: number): "critical" | "high" | "medium" | null {
-  if (score >= 500) return "critical";
-  if (score >= 200) return "high";
-  if (score > 0) return "medium";
-  return null;
+/**
+ * Severity is RELATIVE to this repo's own score distribution, mirroring the
+ * blast-radius tier table (>=0.75 of max -> Tier 0/critical, >=0.50 -> high,
+ * >=0.25 -> medium). Absolute cutoffs (old: 500/200) were calibrated to the
+ * pre-normalization scale and could never fire after ORS de-saturation — every
+ * risk rendered "medium". Relative bucketing also matches the methodology:
+ * ORS is a structural risk *indicator*, never an absolute risk claim.
+ */
+function riskBucket(score: number, maxScore: number): "critical" | "high" | "medium" | null {
+  if (score <= 0 || maxScore <= 0) return null;
+  const rel = score / maxScore;
+  if (rel >= 0.75) return "critical";
+  if (rel >= 0.5) return "high";
+  if (rel >= 0.25) return "medium";
+  return "medium";
 }
 
 function flowWhy(flow: BehaviorFlow, proof: "proven" | "none"): string {
@@ -391,6 +413,7 @@ function flowWhy(flow: BehaviorFlow, proof: "proven" | "none"): string {
 }
 
 function flows(graph: LocalGraph, rows: RtmRow[], risks: RiskGap[]): BehaviorReportFlow[] {
+  const maxRiskScore = risks.reduce((m, r) => Math.max(m, r.risk_score), 0);
   const nodesById = new Map(graph.nodes.map((n) => [n.external_id, n]));
   const proven = new Set(rows.filter((r) => r.evidence_tier === "proven").map((r) => r.behavior_id));
   const riskById = new Map(risks.map((r) => [r.id, r]));
@@ -416,7 +439,7 @@ function flows(graph: LocalGraph, rows: RtmRow[], risks: RiskGap[]): BehaviorRep
     return {
       title: flow.entry_point.title || flow.entry_point.external_id,
       trigger,
-      risk: risk ? riskBucket(risk.risk_score) : null,
+      risk: risk ? riskBucket(risk.risk_score, maxRiskScore) : null,
       proof,
       services,
       flow_tier: flow.flow_tier,
@@ -499,13 +522,14 @@ function riskGeneratedTests(
 }
 
 function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risks"] {
+  const maxRiskScore = risks.reduce((m, r) => Math.max(m, r.risk_score), 0);
   const riskIds = new Set(risks.map((r) => r.id));
   const firstRowForFile = new Map<string, string>();
   for (const r of risks) if (!firstRowForFile.has(r.file)) firstRowForFile.set(r.file, r.id);
   return risks.map((risk, idx) => {
     const methodMatch = risk.title.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(.+)$/i);
     const tags: Array<[label: string, kind: "risk" | "info" | "entry"]> = [];
-    const bucket = riskBucket(risk.risk_score);
+    const bucket = riskBucket(risk.risk_score, maxRiskScore);
     if (bucket) tags.push([`${bucket} risk`, "risk"]);
     tags.push([`${risk.incoming_refs} incoming refs`, "info"]);
     if (risk.entry_point) tags.push(["Entry point", "entry"]);
@@ -561,6 +585,17 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     candidateFlows: candidateFlows(graph),
     risks,
     zeroProofExplainer: summary.proven === 0 ? { title: ZERO_PROOF_EXPLAINER.title, body: [...ZERO_PROOF_EXPLAINER.body] } : null,
+    viewMeta: {
+      // Every denominator behavior is scored; the risks tab surfaces the top N.
+      risks: { shown: risks.length, scored: summary.total },
+      flows: {
+        shown: graph.analysis?.flows?.total_flows ?? 0,
+        prunedByCaps:
+          (graph.analysis?.flows?.dropped?.max_depth ?? 0) +
+          (graph.analysis?.flows?.dropped?.max_flows_per_entry ?? 0) +
+          (graph.analysis?.flows?.dropped?.global_cap ?? 0)
+      }
+    },
     generatedTotal: graph.generated_tests?.length ?? 0,
     shownCount: risks.reduce((acc, r) => acc + r.generatedTests.length, 0)
   };
