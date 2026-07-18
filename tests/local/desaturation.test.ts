@@ -153,3 +153,42 @@ describe("rankRiskGaps — ordering invariant", () => {
     for (let i = 1; i < scores.length; i++) expect(scores[i]).toBeLessThanOrEqual(scores[i - 1]);
   });
 });
+
+// ── Fix 8: governance markdown never mints Requirement nodes ─────────────────
+
+import { enrichFromMarkdown } from "../../src/local/enrich/markdown.js";
+
+describe("enrichFromMarkdown — governance exclusions", () => {
+  const templateMd = "## The author should do the following, if applicable\n\n- [ ] Add tests";
+  it("mints nothing from .github templates, CONTRIBUTING, and changelogs", () => {
+    for (const path of [
+      ".github/PULL_REQUEST_TEMPLATE.md",
+      ".github/ISSUE_TEMPLATE/bug.md",
+      "CONTRIBUTING.md",
+      "docs/CONTRIBUTING.md",
+      "CHANGELOG.md",
+      ".changeset/pretty-otters.md"
+    ]) {
+      expect(enrichFromMarkdown(path, templateMd).nodes).toHaveLength(0);
+    }
+  });
+  it("still mints requirements from product docs", () => {
+    const out = enrichFromMarkdown("docs/features.md", "## The API must support streaming responses\n\ndetails");
+    expect(out.nodes.length).toBeGreaterThan(0);
+  });
+});
+
+// ── Fix 9: doctor distinguishes survived mutants from non-assertion failures ──
+
+import { nonKillingNoteFor, NON_KILLING_NOTE, NON_ASSERTION_NOTE } from "../../src/local/proofDoctor.js";
+
+describe("proof doctor — non-close diagnosis", () => {
+  it("labels a non-assertion crash as failed-not-survived (opposite remediation)", () => {
+    expect(nonKillingNoteFor("associated_non_assertion_failure")).toBe(NON_ASSERTION_NOTE);
+    expect(NON_ASSERTION_NOTE).toContain("made the test FAIL");
+  });
+  it("keeps the survived-mutant wording for true survivors and legacy records", () => {
+    expect(nonKillingNoteFor("associated_survived")).toBe(NON_KILLING_NOTE);
+    expect(nonKillingNoteFor(undefined)).toBe(NON_KILLING_NOTE);
+  });
+});

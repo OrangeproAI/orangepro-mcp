@@ -503,7 +503,7 @@ async function main(): Promise<number> {
             out(`    open with: open ${coverageHtml}`);
           }
           if (coverageReport) out(`  coverage report:         ${coverageReport}`);
-          for (const w of [...res.warnings, ...aiFlowWarnings, ...htmlWarnings]) out(`  warning: ${w}`);
+          for (const w of [...new Set([...res.warnings, ...aiFlowWarnings, ...htmlWarnings])]) out(`  warning: ${w}`);
           const sugg = res.analysis.exclude_suggestions ?? [];
           if (sugg.length) {
             out("");
@@ -606,7 +606,8 @@ async function main(): Promise<number> {
             out(`     next: ${b.next_step}`);
           }
           for (const nk of res.non_killing) {
-            out(`  mutant survived: ${nk.target_symbol}${nk.test_path ? ` (test: ${nk.test_path})` : ""}`);
+            const nkLabel = nk.mutant_status === "associated_non_assertion_failure" ? "mutant failed (non-assertion)" : "mutant survived";
+            out(`  ${nkLabel}: ${nk.target_symbol}${nk.test_path ? ` (test: ${nk.test_path})` : ""}`);
             out(`     ${nk.note}`);
           }
         }

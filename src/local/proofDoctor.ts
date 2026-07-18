@@ -38,6 +38,10 @@ export interface ProofAttemptRecord {
   target_symbol: string;
   test_path?: string;
   classification: "proven" | "non_killing" | "needs_setup" | "gen_failed";
+  /** Oracle outcome detail — distinguishes a SURVIVED mutant (test passed) from
+   *  a NON-ASSERTION failure (mutant crashed the test before any assertion).
+   *  The two are opposite diagnoses with opposite remediations. */
+  mutant_status?: string;
   category?: string;
   reason?: string;
   deduped?: boolean;
@@ -123,6 +127,19 @@ export const NON_KILLING_NOTE =
   "Not proven: the test still passed while the target was mutated (possibly an equivalent mutation). " +
   "The mutant surviving is a proven negative about assertion strength — it is never counted as Dynamically Proven.";
 
+/** Opposite failure mode: the mutant DID make the test fail, but via a runtime
+ *  crash rather than a trusted assertion. The test exercises the target; the
+ *  proof standard (assertion failure) was not met. Misreporting this as
+ *  "mutant survived" sends users to fix the wrong thing. */
+export const NON_ASSERTION_NOTE =
+  "Not proven: the mutant made the test FAIL, but with a runtime error instead of a trusted assertion failure. " +
+  "The test does exercise the target; strengthen the assertion to check the target's returned value directly, or re-run — " +
+  "whether the crash or the assertion is hit first can vary between runs.";
+
+export function nonKillingNoteFor(mutantStatus?: string): string {
+  return mutantStatus === "associated_non_assertion_failure" ? NON_ASSERTION_NOTE : NON_KILLING_NOTE;
+}
+
 export interface ProofDoctorBlocker {
   category: ProofBlockerCategory;
   label: string;
@@ -151,7 +168,7 @@ export interface ProofDoctorResult {
   stale: boolean;
   headline: string;
   blockers: ProofDoctorBlocker[];
-  non_killing: Array<{ target_symbol: string; test_path?: string; note: string }>;
+  non_killing: Array<{ target_symbol: string; test_path?: string; mutant_status?: string; note: string }>;
   generated_at: string | null;
 }
 
@@ -167,6 +184,7 @@ interface AutoProveLike {
     target_symbol: string;
     test_path: string;
     classification: "proven" | "non_killing" | "needs_setup" | "gen_failed";
+    mutant_status?: string;
     reason?: string;
     category?: string;
     deduped?: boolean;
@@ -197,6 +215,7 @@ export function distillProofAttempts(
       target_symbol: a.target_symbol,
       test_path: a.test_path || undefined,
       classification: a.classification,
+      mutant_status: a.mutant_status,
       category: a.category,
       reason: a.reason ? redactSecrets(a.reason) : undefined,
       deduped: a.deduped,
@@ -393,7 +412,7 @@ export function buildProofDoctor(
     const key = `${a.target_symbol}\u0000${a.test_path ?? ""}`;
     if (seenSurvivors.has(key)) continue;
     seenSurvivors.add(key);
-    non_killing.push({ target_symbol: a.target_symbol, test_path: a.test_path, note: NON_KILLING_NOTE });
+    non_killing.push({ target_symbol: a.target_symbol, test_path: a.test_path, mutant_status: a.mutant_status, note: nonKillingNoteFor(a.mutant_status) });
   }
 
   let status: ProofDoctorResult["status"];
@@ -414,7 +433,7 @@ export function buildProofDoctor(
         : `0 Dynamically Proven — top blocker: ${top.label}.`;
   } else if (non_killing.length > 0) {
     status = "blocked";
-    headline = `0 Dynamically Proven — ${non_killing.length} attempt(s) ran but the mutant survived (see non_killing).`;
+    headline = `0 Dynamically Proven — ${non_killing.length} attempt(s) ran but did not close (see non_killing for the per-target outcome).`;
   } else {
     status = "no_data";
     headline = "No proof-attempt data yet — run `opro start` to attempt dynamic proof and record blockers.";

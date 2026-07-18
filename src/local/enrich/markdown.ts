@@ -8,6 +8,16 @@ import { GraphFragment } from "../types.js";
 const DETECTOR = "markdown_docs";
 const MAX_REQUIREMENTS = 60;
 
+/**
+ * Repo-governance and template markdown must never mint Requirement nodes.
+ * Hint words like "should"/"must" are ubiquitous in CONTRIBUTING files and
+ * PR/issue templates — on Hono, ".github/PULL_REQUEST_TEMPLATE.md" produced
+ * REQ-md-the-author-should-do-the-following-if-applicable and surfaced as the
+ * report's top suggested next action. Product docs (README, docs/) still count.
+ */
+const GOVERNANCE_MD_RE =
+  /(^|\/)\.github\/|(^|\/)(CONTRIBUTING|CODE_OF_CONDUCT|PULL_REQUEST_TEMPLATE|ISSUE_TEMPLATE|SECURITY|SUPPORT|CHANGELOG|LICENSE|GOVERNANCE|MAINTAINERS|CODEOWNERS|AUTHORS)[^\/]*$|(^|\/)\.changeset\//i;
+
 /** Words that suggest a heading describes a requirement/feature behavior. */
 const REQUIREMENT_HINTS: ReadonlyArray<string> = [
   "requirement",
@@ -66,6 +76,9 @@ function parseBullet(line: string): string | null {
  * Bounded to ~60 requirements; all captured text is secret-redacted.
  */
 export function enrichFromMarkdown(relPath: string, content: string): GraphFragment {
+  if (GOVERNANCE_MD_RE.test(relPath)) {
+    return { nodes: [], edges: [], candidate_edges: [], sources: [], warnings: [] };
+  }
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const warnings: string[] = [];
