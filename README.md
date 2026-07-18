@@ -23,7 +23,7 @@ The command writes:
 
 ```
 .orangepro/
-├── behavior-coverage.html   ← open this: interactive gap report
+├── behavior-coverage.html   ← open this: system map, risks, flows, behaviors
 ├── graph.json               ← deterministic evidence graph
 ├── COVERAGE_REPORT.md       ← coverage and gap summary
 ├── rtm.md                   ← requirements traceability matrix
@@ -31,6 +31,8 @@ The command writes:
 
 orangepro_generated/         ← contained generated tests; existing source files are untouched
 ```
+
+The report opens on a **system map** of your repo — entry lanes (GraphQL/HTTP/Jobs) flowing into the services they reach, sized by traffic, colored by evidence tier, risk-ringed — identical on every run. Each rerun shows a **delta banner**: what changed since last run, or "No changes — identical graph, identical ranking." Every one of the ~N behaviors gets a plain-English description; every top risk gets a deterministic context line and a state-aware next step.
 
 Run `opro export` when you want a machine-readable evidence pack.
 <img width="895" height="960" alt="Screenshot 2026-07-08 at 1 18 01 AM" src="https://github.com/user-attachments/assets/73b8a812-2eab-43a1-8aed-4289545e630b" />
@@ -181,11 +183,13 @@ Each generated test includes:
 - **Run hints** — where to write it, how to run it
 - **Scenario bucket + technique** — what failure mode it targets and how
 
+If the environment can't run tests yet (dependencies not installed, runner unconfigured), rejected drafts are kept as **Manual tests** — scenario, Given/When/Then steps, synthetic test data, and expected outcome in plain English, with the exact blocker named. Install dependencies and re-run `opro start` to turn them into runnable tests. Runnable tests always replace Manual tests for the same behavior; the two are never mixed.
+
 ---
 
 ## Test categories
 
-Generation is evidence-gated. A category is produced only when the graph has supporting evidence — never padded with generic filler. These are the public local generation buckets. The broader concern taxonomy used by planning prompts is not a public coverage taxonomy and does not change report tiers.
+Generation is evidence-gated. A category is produced only when the graph has supporting evidence — never padded with generic filler. These are the local generation buckets. The report additionally shows each risk's **applicable testing categories** (contract, boundary limits, integration flow, state lifecycle, failure recovery, …), derived deterministically from graph facts — covered categories from real attached tests render normally; the rest render locked, meaning "warranted here, generated on the platform," never "hidden tests exist." Neither taxonomy changes evidence tiers.
 
 | Category | What it targets |
 |----------|-----------------|
@@ -206,7 +210,8 @@ Every behavior gets exactly one tier. Nothing is labeled "tested" on faith.
 |------|---------------|------------------|
 | **Dynamically Proven** | A real test kills a targeted mutant of this behavior | `opro prove` after writing/running a test |
 | **Runtime-covered** | Coverage tool executed this code | `opro start --generate-coverage` |
-| **Statically Linked** | Import/name/structural match links a test to this code | Automatic during analysis |
+| **Statically Linked** | A test **imports and calls** this code — a hard structural link | Automatic during analysis |
+| **Unconfirmed Candidate** | A lexically similar test file exists, but nothing links it — a lead, **not evidence** | Automatic; upgrade it by writing the linking test |
 | **No Signal** | Nothing tests this behavior yet | — |
 
 > **"Dynamically Proven 0" is normal on first run.** Static analysis always runs. Dynamic proof requires running tests against targeted mutations. That's the trust model — nothing is Dynamically Proven until a real test kills a real mutant.
@@ -283,6 +288,8 @@ OrangePro separates **analysis** (what your code does) from **proof** (whether t
 | **Score** | Graph readiness score (0–100) with reasons | No |
 | **Generate** | Grounded tests for top gaps, per-behavior | Yes (BYOK) |
 | **Prove** | Mutation-kill oracle confirms test actually breaks if behavior changes | No |
+
+Reruns are cache-accelerated: unchanged files skip re-parsing, BYOK stages don't re-spend tokens on unchanged inputs, and proof certificates persist in a local ledger until the certified file changes. Upgrading the tool auto-invalidates caches.
 
 ---
 
