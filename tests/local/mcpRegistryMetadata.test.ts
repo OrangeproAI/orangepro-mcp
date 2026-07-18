@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { ORANGEPRO_VERSION } from "../../src/local/version.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -23,6 +24,9 @@ describe("MCP Registry metadata", () => {
     expect(lockfile.version).toBe(rootPackage.version);
     expect(lockfile.packages[""].version).toBe(rootPackage.version);
     expect(launcherPackage.mcpName).toBe(server.name);
+    expect(ORANGEPRO_VERSION).toBe(rootPackage.version);
+    const [, repositoryOwner] = new URL(server.repository.url).pathname.split("/");
+    expect(server.name.split("/")[0]).toBe(`io.github.${repositoryOwner}`);
   });
 
   it("describes a schema-safe package launch", () => {
