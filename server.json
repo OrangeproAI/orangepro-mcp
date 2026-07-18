@@ -1,7 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.orangeproai/orangepro",
-  "description": "Find behavioral test gaps and untested code paths. Builds a local evidence graph from your checkout, maps behavior coverage, ranks risks by blast radius, generates grounded integration tests that actually compile and run, and dynamically proves them via mutation kill. 100% local-first, BYOK (OpenAI/Anthropic/Ollama) — code never leaves your machine.",
+  "title": "OrangePro",
+  "description": "Find test gaps, generate grounded tests, and dynamically prove behavior with mutation testing.",
   "repository": {
     "url": "https://github.com/OrangeproAI/orangepro-mcp",
     "source": "github"
@@ -16,7 +17,7 @@
         "type": "stdio"
       },
       "runtimeHint": "npx",
-      "runtimeArguments": [
+      "packageArguments": [
         {
           "type": "positional",
           "value": "mcp",
@@ -26,9 +27,23 @@
       "environmentVariables": [
         {
           "name": "OPENAI_API_KEY",
-          "description": "Optional BYOK LLM key for AI candidate links and test generation. Also supports ANTHROPIC_API_KEY or OLLAMA_BASE_URL. Deterministic analysis, gap detection, and dynamic proof work without any key.",
+          "description": "Optional OpenAI BYOK key for AI candidate links and test generation.",
           "isRequired": false,
           "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Optional Anthropic BYOK key for AI candidate links and test generation.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "OLLAMA_BASE_URL",
+          "description": "Optional Ollama endpoint for local AI candidate links and test generation.",
+          "isRequired": false,
+          "isSecret": false,
           "format": "string"
         }
       ]
