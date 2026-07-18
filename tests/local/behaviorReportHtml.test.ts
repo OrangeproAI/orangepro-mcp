@@ -451,7 +451,10 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     // CTA band count is 0 (the template hides both sections when the data is empty).
     for (const r of data.risks) {
       expect(r.generatedTests).toEqual([]);
-      expect(r.applicableCategories).toEqual([]);
+      // Applicable categories derive from graph facts even with zero tests;
+      // covered stays empty, so every pill renders locked (capability, not claim).
+      expect(r.applicableCategories).toContain("contract");
+      expect(r.coveredCategories).toEqual([]);
     }
     expect(data.generatedTotal).toBe(0);
     expect(data.shownCount).toBe(0);
@@ -502,7 +505,8 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(html).toContain("Generate remaining tests on Platform");
     expect(html).not.toContain("0 more tests generated");
     // Category strip shows only the real attached concerns — nothing locked/fabricated.
-    expect(withTests!.applicableCategories).toEqual(["integration"]);
+    expect(withTests!.applicableCategories).toContain("contract"); // derived, not attached-echo
+    expect(withTests!.coveredCategories).toEqual([]); // legacy fixture test has no bucket → covers nothing
   });
 
   it("attaches a same-file generated test to exactly ONE deterministic row, labeled 'same-file target'", () => {
@@ -605,5 +609,26 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(intentHtml).toContain(">Manual test<"); // the badge itself
     const html = renderBehaviorReport(intentOnly);
     expect(html).toContain("Manual tests — env setup needed");
+  });
+
+  it("category strip: applicable derived from graph facts; uncovered categories render locked", () => {
+    const g = graph();
+    const sym = g.nodes.find((n) => n.kind === "CodeSymbol" && (n.title || "").length > 0);
+    g.generated_tests = [{
+      id: "gen:c1", run_id: "run:g",
+      title: "orders flow: rejects invalid order at boundary",
+      test_type: "integration" as const, framework_hint: "vitest",
+      body: "import { it } from 'vitest';\nit('x', () => {});",
+      bucket: "edge_case" as const,
+      grounding: { entity_ids: [sym!.external_id], source_refs: [], weak_relationships_used: [] },
+      weak_evidence_used: false, target_symbol_external_id: sym!.external_id
+    }];
+    const data = buildBehaviorReportData(g, provenLedger(g), { repoRoot: "/tmp/orders-api" });
+    const row = data.risks.find((r) => r.generatedTests.length > 0)!;
+    expect(row.applicableCategories).toContain("contract");            // always applicable
+    expect(row.applicableCategories.length).toBeGreaterThan(row.coveredCategories.length); // something to unlock
+    expect(row.coveredCategories).toEqual(["boundary_limits"]);        // edge_case bucket → boundary_limits
+    const html = renderBehaviorReport(data);
+    expect(html).toContain("cp-locked");                               // lock pills render again
   });
 });

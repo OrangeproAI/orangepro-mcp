@@ -49,6 +49,7 @@ export interface BehaviorReportData {
      * generated-test linkage is wired — the template hides both sections.
      */
     applicableCategories: string[];
+    coveredCategories: string[];
     generatedTests: Array<{ name: string; concern?: string; technique?: string; bucket?: string; assertion?: string; code: string; runnable?: boolean }>;
   }>;
   /** Verbatim "why 0 dynamic proof" explainer — populated ONLY when summary.proven === 0. Display copy; changes no classification. */
@@ -774,6 +775,34 @@ export function buildSystemMapModel(data: {
   };
 }
 
+/** Deterministic per-risk APPLICABLE concern categories — derived from graph
+ *  facts, never from whether tests exist. Covered = what attached tests
+ *  address (via bucket). Locked pills = applicable − covered: the platform
+ *  generates those categories; nothing pretends hidden tests already exist. */
+const CONCERN_ORDER = ["contract", "authorization_safety", "boundary_limits", "integration_flow", "state_lifecycle", "failure_recovery", "data_integrity", "concurrency_ordering"] as const;
+
+function riskApplicableConcerns(risk: RiskGap, verb: string): string[] {
+  const out = new Set<string>(["contract"]); // an observable behavior always has a contract to verify
+  const sens = risk.data_sensitivity ?? 1;
+  if (sens >= 9) out.add("authorization_safety");
+  if (sens >= 6) out.add("data_integrity");
+  if (risk.entry_point || verb !== "BEHAVIOR") out.add("boundary_limits"); // external inputs cross here
+  if ((risk.flow_position ?? 0) >= 3 || (risk.fan_out ?? 0) >= 1) out.add("integration_flow");
+  if ((risk.fan_out ?? 0) >= 1 && risk.git_churn > 0) out.add("state_lifecycle");
+  if ((risk.fan_out ?? 0) >= 2) out.add("failure_recovery"); // downstream dependencies can fail
+  if (/job|queue|cron|stream|lock|worker/i.test(risk.title + " " + risk.file)) out.add("concurrency_ordering");
+  return CONCERN_ORDER.filter((c) => out.has(c));
+}
+
+const BUCKET_TO_CONCERN: Record<string, string> = {
+  happy_path: "contract",
+  validation_error: "contract",
+  edge_case: "boundary_limits",
+  regression: "failure_recovery",
+  security_privacy: "authorization_safety",
+  integration_flow: "integration_flow"
+};
+
 /** State-aware next step — varies by attached tests, trigger kind, signal, and
  *  sensitivity, so no two cards read identically for different reasons. */
 function riskTodo(
@@ -823,11 +852,11 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
         const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
         const path = methodMatch?.[2] ?? risk.title;
+        const coveredCategories = [...new Set(generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)).filter((c): c is string => Boolean(c)))];
         return {
           generatedTests,
-          // Honest category strip: only the concerns of REAL attached tests —
-          // every pill renders as shown ("n of n"), none fabricated as locked.
-          applicableCategories: [...new Set(generatedTests.map((t) => t.concern).filter((c): c is string => Boolean(c)))],
+          applicableCategories: riskApplicableConcerns(risk, verb),
+          coveredCategories,
           verb,
           path,
           todo: riskTodo(risk, verb, path, generatedTests)
