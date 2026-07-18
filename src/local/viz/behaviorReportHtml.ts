@@ -185,6 +185,11 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .sm-crumb{display:flex;gap:8px;margin-bottom:12px}
 .sm-crumb-btn{appearance:none;background:var(--s2);border:1px solid var(--bd2);color:var(--ink2);font:600 11px var(--mono);padding:6px 11px;border-radius:7px;cursor:pointer}
 .sm-crumb-btn:hover{background:var(--s3);color:var(--ink)}
+.delta-wrap{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.delta-chip{font:600 11px var(--mono);padding:5px 10px;border-radius:999px;border:1px solid var(--bd2);background:var(--s2);color:var(--ink2)}
+.delta-chip.dc-up{border-color:var(--green);color:var(--green)}
+.delta-chip.dc-risk{border-color:var(--red);color:var(--red)}
+.delta-chip.dc-none{color:var(--muted)}
 .beh-empty{grid-column:1/-1;padding:22px;border:1px dashed var(--bd2);border-radius:10px;color:var(--muted);font-size:12.5px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
 .beh-empty p{margin:0}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
@@ -274,6 +279,7 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 <!-- TAB 1: YOUR CODE — familiar territory -->
 <section class="panel active" id="panel-codebase" role="tabpanel">
   <p class="bridge">We scanned your repo and found <b id="br-methods">—</b> public methods across <b id="br-services">—</b> services, with <b id="br-tests">—</b> test files. Here's what we're working with.</p>
+  <div id="delta-banner"></div>
   <div class="card" id="sysmap-card" hidden>
     <p class="card-lbl">Your system, as the graph sees it — entry lanes flowing into the services they reach. Node size = flow traffic; color = dominant evidence tier; red ring = top-20 risk. Identical on every run.</p>
     <div id="sysmap"></div>
@@ -345,6 +351,31 @@ window.DATA = __ORANGEPRO_DATA__;
 (function(){
 const D=window.DATA,$=(s)=>document.querySelector(s);
 
+
+// ── Delta since last run (display-only; baseline written each run) ──
+(function(){
+  var el2=document.getElementById("delta-banner");
+  var d=D.delta;
+  if(!el2||d===undefined)return;
+  if(d===null){el2.innerHTML='';return;} // first run — baseline just recorded, nothing to compare
+  var when=new Date(d.baselineTs);
+  var ago=isNaN(when.getTime())?"last run":when.toLocaleString();
+  if(!d.changed){
+    el2.innerHTML='<div class="delta-wrap"><span class="delta-chip dc-none">No changes since last run ('+ago+') — identical graph, identical ranking</span></div>';
+    return;
+  }
+  var chips=[];
+  function chip(txt,cls){chips.push('<span class="delta-chip '+(cls||'')+'">'+txt+'</span>');}
+  chip('Since '+ago+':','dc-none');
+  if(d.totalDelta)chip((d.totalDelta>0?'+':'')+d.totalDelta+' behaviors');
+  if(d.provenDelta)chip((d.provenDelta>0?'+':'')+d.provenDelta+' proven',d.provenDelta>0?'dc-up':'dc-risk');
+  if(d.associatedDelta)chip((d.associatedDelta>0?'+':'')+d.associatedDelta+' test signal');
+  if(d.generatedDelta)chip((d.generatedDelta>0?'+':'')+d.generatedDelta+' generated tests',d.generatedDelta>0?'dc-up':'');
+  d.newRisks.slice(0,3).forEach(function(p){chip('new in top-20: '+p.slice(0,40),'dc-risk');});
+  if(d.newRisks.length>3)chip('+'+(d.newRisks.length-3)+' more new risks','dc-risk');
+  d.droppedRisks.slice(0,2).forEach(function(p){chip('left top-20: '+p.slice(0,40),'dc-up');});
+  el2.innerHTML='<div class="delta-wrap">'+chips.join('')+'</div>';
+})();
 // ── System map: deterministic hero drawn from D.mapModel ──
 (function(){
   var M=D.mapModel;

@@ -78,7 +78,7 @@ import { changedImpact } from "./freshness/changed.js";
 import { explainTest } from "./explain/explain.js";
 import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
-import { buildBehaviorReportData, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
+import { buildBehaviorReportData, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { renderBehaviorReport } from "./viz/behaviorReportHtml.js";
 import { renderCoverageReport } from "./pack/coverageReport.js";
 import { confirmedCoverageByLayer } from "./score/coverage.js";
@@ -2550,9 +2550,25 @@ export function opBehaviorCoverageHtml(
   // proof-attempts sidecar ONLY when it anchors to the current graph+commit
   // (stale evidence is dropped — fail closed; display copy only, no tier math).
   const dyn = dynamicProof ?? sidecarDynamicProof(root, graph);
-  const html = renderBehaviorReport(buildBehaviorReportData(graph, loadLedger(root), { repoRoot: root, dynamicProof: dyn }));
+  const data = buildBehaviorReportData(graph, loadLedger(root), { repoRoot: root, dynamicProof: dyn });
+  // Delta-since-last-run: best-effort read of the previous snapshot; a missing
+  // or unreadable baseline means first run (banner hidden). Display-only —
+  // the delta never touches tiers, ranks, or counts.
+  const baselinePath = resolve(root, `${WORKSPACE_DIR}/report-baseline.json`);
+  try {
+    const prev = JSON.parse(readFileSync(baselinePath, "utf8")) as ReportBaseline;
+    if (prev && prev.summary && Array.isArray(prev.riskPaths)) data.delta = computeReportDelta(prev, data);
+  } catch {
+    data.delta = null;
+  }
+  const html = renderBehaviorReport(data);
   const htmlPath = resolve(root, outputPath);
   writeFileSync(htmlPath, html, "utf8");
+  try {
+    writeFileSync(baselinePath, JSON.stringify(reportBaselineOf(data, new Date().toISOString())), "utf8");
+  } catch {
+    // baseline write is advisory
+  }
   return { behavior_coverage_path: htmlPath };
 }
 
