@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "orangepro-local": {
+      "command": "npx",
+      "args": ["-y", "@orangepro/mcp-server@latest", "mcp"]
+    }
+  }
+}
