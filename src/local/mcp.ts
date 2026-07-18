@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { ORANGEPRO_VERSION } from "./version.js";
 import {
   opAnalyze,
   opAiFlows,
@@ -55,7 +56,7 @@ const DEFAULT_MARKDOWN_RTM_LIMIT = 500;
  * Codex, Claude, Copilot, …). First slice exposes NO upload or repo-write tools.
  */
 export function createLocalServer(): McpServer {
-  const server = new McpServer({ name: "orangepro-local", version: "0.2.0" });
+  const server = new McpServer({ name: "orangepro-local", version: ORANGEPRO_VERSION });
   const root = (ws?: string): string => ws || process.cwd();
 
   server.registerTool(

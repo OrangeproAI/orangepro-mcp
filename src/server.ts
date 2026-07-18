@@ -4,11 +4,12 @@ import { OrangeProClient } from "./apiClient.js";
 import { OrangeProConfig } from "./config.js";
 import { createOrangeProToolHandlers, TenantInput } from "./orangeproTools.js";
 import { createOrangeProQaToolHandlers } from "./qaTools.js";
+import { ORANGEPRO_VERSION } from "./local/version.js";
 
 export function createServer(config: OrangeProConfig, client = new OrangeProClient(config)): McpServer {
   const server = new McpServer({
     name: "orangepro",
-    version: "0.2.0"
+    version: ORANGEPRO_VERSION
   });
   const handlers = createOrangeProToolHandlers(client, config);
   const qaHandlers = createOrangeProQaToolHandlers(client, config);
