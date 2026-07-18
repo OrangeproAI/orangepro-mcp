@@ -552,4 +552,58 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     // Copy guard: no broken CTA command in the shipped report.
     expect(html).not.toContain("npx orangepro prove");
   });
+
+  it("suppresses English intents when a runnable generated test exists for the same target, shows them (with bucket) only as the fallback", () => {
+    const g = graph();
+    const sym = g.nodes.find((n) => n.kind === "CodeSymbol" && (n.title || "").length > 0);
+    expect(sym).toBeTruthy();
+    const intent = {
+      id: "gen:i1",
+      run_id: "run:g",
+      title: "orders flow — rejects order with missing customer",
+      test_type: "integration" as const,
+      framework_hint: "vitest",
+      body: "TEST INTENT (English — runnable code withheld in this environment):\nScenario: rejects order with missing customer",
+      bucket: "edge_case" as const,
+      grounding: { entity_ids: [sym!.external_id], source_refs: [], weak_relationships_used: [] },
+      weak_evidence_used: false,
+      target_symbol_external_id: sym!.external_id,
+      runnable: false,
+      unresolved_reason: "Unresolved import(s) @nestjs/testing"
+    };
+    const runnable = {
+      id: "gen:r1",
+      run_id: "run:g",
+      title: "orders flow: rejects invalid order at boundary",
+      test_type: "integration" as const,
+      framework_hint: "vitest",
+      body: "import { it } from 'vitest';\nit('rejects invalid order', () => {});",
+      bucket: "happy_path" as const,
+      grounding: { entity_ids: [sym!.external_id], source_refs: [], weak_relationships_used: [] },
+      weak_evidence_used: false,
+      target_symbol_external_id: sym!.external_id
+    };
+
+    // Case 1: runnable + intent for the SAME target → intent suppressed entirely.
+    g.generated_tests = [intent, runnable];
+    const withBoth = buildBehaviorReportData(g, provenLedger(g), { repoRoot: "/tmp/orders-api" });
+    const row1 = withBoth.risks.find((r) => r.generatedTests.length > 0);
+    expect(row1).toBeTruthy();
+    expect(row1!.generatedTests.every((t) => t.runnable !== false)).toBe(true);
+    expect(row1!.generatedTests.some((t) => t.name.includes("missing customer"))).toBe(false);
+    expect(row1!.generatedTests[0].bucket).toBe("happy_path"); // bucket chip data present
+
+    // Case 2: intent only → shown, labeled, with its bucket.
+    g.generated_tests = [intent];
+    const intentOnly = buildBehaviorReportData(g, provenLedger(g), { repoRoot: "/tmp/orders-api" });
+    const row2 = intentOnly.risks.find((r) => r.generatedTests.length > 0);
+    expect(row2).toBeTruthy();
+    expect(row2!.generatedTests[0].runnable).toBe(false);
+    expect(row2!.generatedTests[0].bucket).toBe("edge_case");
+    expect(row2!.generatedTests[0].assertion).not.toContain("English intent"); // badge carries the marker, once
+    const intentHtml = renderBehaviorReport(intentOnly);
+    expect(intentHtml).toContain(">English intent<"); // the badge itself
+    const html = renderBehaviorReport(intentOnly);
+    expect(html).toContain("English intents — env setup needed");
+  });
 });

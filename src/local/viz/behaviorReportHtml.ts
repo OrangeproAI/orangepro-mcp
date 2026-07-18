@@ -173,6 +173,18 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .risk-filter:hover{border-color:var(--bd2);color:var(--ink2)}
 .risk-filter[aria-pressed="true"]{border-color:var(--orange);background:var(--obg);color:var(--orange)}
 .risk-rank{font-size:10px;color:var(--orange);font-weight:700;margin-bottom:3px}
+.risk-ctx{font-size:12px;color:var(--ink3);line-height:1.5;margin:4px 0 6px}
+#sysmap svg{display:block;width:100%;height:auto}
+.sm-lane{fill:var(--s2);stroke:var(--bd2)}
+.sm-lane-lbl{font:600 11px var(--mono);fill:var(--ink2)}
+.sm-svc-lbl{font:600 10.5px var(--mono);fill:var(--ink2)}
+.sm-sub{font:9px var(--sans,sans-serif);fill:var(--muted)}
+.sm-edge{fill:none;opacity:.45}
+.sm-node{cursor:pointer}
+.sm-node:hover circle{stroke-width:2.5}
+.sm-crumb{display:flex;gap:8px;margin-bottom:12px}
+.sm-crumb-btn{appearance:none;background:var(--s2);border:1px solid var(--bd2);color:var(--ink2);font:600 11px var(--mono);padding:6px 11px;border-radius:7px;cursor:pointer}
+.sm-crumb-btn:hover{background:var(--s3);color:var(--ink)}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
 .risk-ep .v{color:var(--green);font-weight:700}
 .risk-tags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px}
@@ -260,6 +272,10 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 <!-- TAB 1: YOUR CODE — familiar territory -->
 <section class="panel active" id="panel-codebase" role="tabpanel">
   <p class="bridge">We scanned your repo and found <b id="br-methods">—</b> public methods across <b id="br-services">—</b> services, with <b id="br-tests">—</b> test files. Here's what we're working with.</p>
+  <div class="card" id="sysmap-card" hidden>
+    <p class="card-lbl">Your system, as the graph sees it — entry lanes flowing into the services they reach. Node size = flow traffic; color = dominant evidence tier; red ring = top-20 risk. Identical on every run.</p>
+    <div id="sysmap"></div>
+  </div>
   <div class="cols2">
     <div class="card">
       <p class="card-lbl">Framework</p>
@@ -326,6 +342,91 @@ window.DATA = __ORANGEPRO_DATA__;
 
 (function(){
 const D=window.DATA,$=(s)=>document.querySelector(s);
+
+// ── System map: deterministic hero drawn from D.mapModel ──
+(function(){
+  var M=D.mapModel;
+  if(!M||!M.lanes||!M.lanes.length||!M.services.length)return;
+  document.getElementById("sysmap-card").hidden=false;
+  var W=760,rowH=44,laneW=118,svcX=470,padT=18;
+  var H=padT*2+Math.max(M.lanes.length,M.services.length)*rowH;
+  var laneY={},svcY={};
+  M.lanes.forEach(function(l,i){laneY[l.id]=padT+i*rowH+(H-2*padT-M.lanes.length*rowH)/2+rowH/2;});
+  M.services.forEach(function(sv,i){svcY[sv.id]=padT+i*rowH+rowH/2;});
+  var laneColor={graphql:"var(--purple,#a78bfa)",http:"var(--blue)",job:"var(--orange)"};
+  var tierColor=function(t){var tot=t.proven+t.assoc+t.candidate+t.none||1;
+    if(t.proven/tot>=0.5)return "var(--green)";
+    if((t.proven+t.assoc)/tot>=0.5)return "var(--blue)";
+    if(t.none/tot>=0.5)return "var(--red)";
+    return "var(--purple,#a78bfa)";};
+  var maxF=M.services[0].flows||1;
+  var out='<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="System map">';
+  M.edges.forEach(function(e){
+    var y1=laneY[e.lane],y2=svcY[e.service];if(y1==null||y2==null)return;
+    var w=1+3*Math.log(1+e.flows)/Math.log(1+maxF);
+    out+='<path class="sm-edge" d="M '+(laneW+8)+' '+y1+' C '+(laneW+150)+' '+y1+', '+(svcX-150)+' '+y2+', '+(svcX-14)+' '+y2+'" stroke="'+(laneColor[e.lane]||"var(--muted)")+'" stroke-width="'+w.toFixed(1)+'"/>';
+  });
+  M.lanes.forEach(function(l){
+    var y=laneY[l.id];
+    out+='<rect class="sm-lane" x="4" y="'+(y-15)+'" width="'+laneW+'" height="30" rx="7"/>';
+    out+='<text class="sm-lane-lbl" x="14" y="'+(y-1)+'">'+l.label+'</text>';
+    out+='<text class="sm-sub" x="14" y="'+(y+11)+'">'+l.flows+' flow'+(l.flows===1?'':'s')+'</text>';
+  });
+  M.services.forEach(function(sv){
+    var y=svcY[sv.id];
+    var r=7+7*Math.sqrt(sv.flows/maxF);
+    var ring=sv.riskRanks.length?'<circle cx="'+svcX+'" cy="'+y+'" r="'+(r+3.5)+'" fill="none" stroke="var(--red)" stroke-width="'+(sv.critical?2.5:1.4)+'"'+(sv.critical?'':' stroke-dasharray="3 2"')+'/>':'';
+    var label=sv.label.length>30?sv.label.slice(0,29)+"…":sv.label;
+    var riskTxt=sv.riskRanks.length?(" · risk #"+sv.riskRanks[0]):"";
+    out+='<g class="sm-node" data-svc="'+sv.label.replace(/"/g,"&quot;")+'">'+ring
+      +'<circle cx="'+svcX+'" cy="'+y+'" r="'+r.toFixed(1)+'" fill="'+tierColor(sv.tiers)+'" fill-opacity=".85" stroke="var(--bd2)"/>'
+      +'<text class="sm-svc-lbl" x="'+(svcX+r+10)+'" y="'+(y+1)+'">'+label+'</text>'
+      +'<text class="sm-sub" x="'+(svcX+r+10)+'" y="'+(y+13)+'">'+sv.flows+' flow'+(sv.flows===1?'':'s')+riskTxt+'</text>'
+      +'</g>';
+  });
+  out+='</svg>';
+  document.getElementById("sysmap").innerHTML=out;
+  document.getElementById("sysmap").addEventListener("click",function(ev){
+    var g=ev.target.closest?ev.target.closest(".sm-node"):null;
+    if(!g)return;
+    var svc=g.getAttribute("data-svc");
+    var search=document.getElementById("beh-search");
+    var tab=document.querySelector('[data-tab="behaviors"]');
+    if(tab)tab.click();
+    if(search){search.value=svc;search.dispatchEvent(new Event("input"));}
+    // Breadcrumb back to the map — tab-switching under the user with no
+    // visible return path is a trap; refresh must never be the escape hatch.
+    var bc=document.getElementById("sm-breadcrumb");
+    if(!bc){
+      bc=document.createElement("div");
+      bc.id="sm-breadcrumb";
+      bc.className="sm-crumb";
+      var panel=document.getElementById("panel-behaviors");
+      panel.insertBefore(bc,panel.firstChild);
+    }
+    bc.innerHTML='';
+    var backBtn=document.createElement("button");
+    backBtn.className="sm-crumb-btn";
+    backBtn.textContent="\u2190 Back to system map";
+    backBtn.addEventListener("click",function(){
+      if(search){search.value="";search.dispatchEvent(new Event("input"));}
+      bc.remove();
+      var home=document.querySelector('[data-tab="codebase"]');
+      if(home)home.click();
+      window.scrollTo({top:0});
+    });
+    var clearBtn=document.createElement("button");
+    clearBtn.className="sm-crumb-btn";
+    clearBtn.textContent="\u2715 Clear filter \u201c"+svc+"\u201d";
+    clearBtn.addEventListener("click",function(){
+      if(search){search.value="";search.dispatchEvent(new Event("input"));}
+      bc.remove();
+    });
+    bc.appendChild(backBtn);
+    bc.appendChild(clearBtn);
+    window.scrollTo({top:0});
+  });
+})();
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
 const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
 const S=D.summary;
@@ -367,6 +468,29 @@ $("#test-int").textContent=D.scan.tests.integration;
 $("#test-unit").textContent=D.scan.tests.unit;
 
 // behaviors
+function humanizeSig(sig){
+  const m=String(sig||"");
+  const method=m.includes(".")?m.slice(m.lastIndexOf(".")+1):m;
+  const owner=m.includes(".")?m.slice(0,m.lastIndexOf(".")):"";
+  const words=method.replace(/[_$]/g," ").replace(/([a-z0-9])([A-Z])/g,"$1 $2").toLowerCase().trim();
+  return {words:words||m, owner};
+}
+function describeBehavior(b){
+  const h=humanizeSig(b.sig);
+  const mod=(b.file||"").split("/").slice(0,-1).slice(-2).join("/")||b.group||"";
+  const reach=[];
+  for(const f of D.flows){
+    if(!f.trigger)continue;
+    if((f.steps||[]).some(st=>st.sig===b.sig)||f.title===b.sig){reach.push(f.trigger.verb+" "+f.trigger.path);if(reach.length>=2)break;}
+  }
+  const tierTxt=b.tier==="proven"?"Its behavior is dynamically proven: a test fails when this code is mutated."
+    :b.tier==="assoc"?"A real test imports and calls it, but no mutation proof exists yet."
+    :b.tier==="candidate"?"Only a lexically similar test file was found — an unconfirmed lead, not evidence."
+    :"No test signal of any kind was found for it.";
+  const s1="\u201c"+h.words+"\u201d"+(h.owner?" on "+h.owner:"")+" — a behavior in "+(mod||"this repo")+".";
+  const s2=reach.length?"A user or system reaches it via "+reach.join(" and ")+(reach.length>=2?" (and possibly more)":"")+".":(b.reachable?"It appears inside at least one statically traced call chain.":"No entry-anchored call chain reaches it in the static flow set.");
+  return s1+" "+s2+" "+tierTxt;
+}
 function tierOf(b){
   if(b.tier==="proven")return{cls:"proven",badge:"b-proven",label:"Dynamically Proven",ax:"ax-proven"};
   if(b.tier==="assoc")return{cls:"assoc",badge:"b-signal",label:"Test signal",ax:"ax-signal"};
@@ -430,7 +554,9 @@ const drill=$("#drill"),dc=$("#drill-content");
 function showDrill(i){
   const b=D.behaviors[i];if(!b)return;
   const t=tierOf(b);
+  const bDesc=describeBehavior(b);
   dc.innerHTML=\`<h2 class="drill-title">\${esc(b.sig)}</h2>
+    <div class="drill-row"><h4>In English</h4><p>\${esc(bDesc)}</p></div>
     <div class="drill-row"><h4>Evidence</h4><span class="badge \${t.badge}"><span class="d"></span>\${t.label}</span></div>
     <div class="drill-row"><h4>File</h4><p class="mono">\${esc(b.file)}</p></div>
     <div class="drill-row"><h4>What to do</h4><div class="abox \${t.ax}">\${ctaOf(b)}</div></div>\`;
@@ -526,17 +652,21 @@ function riskCardHtml(r){
     // single-function targets legitimately get UNIT tests (0-hop per the
     // methodology's hop table); hardcoding "(integration)" contradicted the
     // per-test chips whenever the generator produced unit tests.
+    const allIntent=r.generatedTests.every(t=>t.runnable===false);
     const kinds=[...new Set(r.generatedTests.map(t=>t.concern).filter(Boolean))];
-    const kindLbl=kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
+    const kindLbl=allIntent?" (English intents — env setup needed)":kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
     testsHtml=\`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests\${esc(kindLbl)}</div>\`;
     r.generatedTests.forEach(t=>{
       const cBadge=t.concern?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(t.concern.replace('_',' '))}</span>\`:'';
-      testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
+      const iBadge=t.runnable===false?\`<span class="badge b-cand" style="margin-left:6px;font-size:9px">English intent</span>\`:'';
+      const bBadge=t.bucket?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(String(t.bucket).replace(/_/g,' '))}</span>\`:'';
+      testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}\${bBadge}\${iBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
     });
     testsHtml+=\`</div>\`;
   }
+  const ctxHtml=r.context?\`<div class="risk-ctx">\${esc(r.context)}</div>\`:'';
   return \`<div class="risk-rank">#\${r.rank}</div>
-     <div class="risk-ep"><span class="v">\${esc(r.verb)}</span> \${esc(r.path)}</div>
+     <div class="risk-ep"><span class="v">\${esc(r.verb)}</span> \${esc(r.path)}</div>\${ctxHtml}
      <div class="risk-tags">\${tags}</div>
      <div class="todo">\${esc(r.todo)}</div>\${testsHtml}\${catHtml}\`;
 }

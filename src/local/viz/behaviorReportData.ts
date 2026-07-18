@@ -38,6 +38,7 @@ export interface BehaviorReportData {
     rank: number;
     verb: string;
     path: string;
+    context?: string;
     desc: string;
     tags: Array<[label: string, kind: "risk" | "info" | "entry"]>;
     todo: string;
@@ -48,12 +49,13 @@ export interface BehaviorReportData {
      * generated-test linkage is wired — the template hides both sections.
      */
     applicableCategories: string[];
-    generatedTests: Array<{ name: string; concern?: string; technique?: string; assertion?: string; code: string }>;
+    generatedTests: Array<{ name: string; concern?: string; technique?: string; bucket?: string; assertion?: string; code: string; runnable?: boolean }>;
   }>;
   /** Verbatim "why 0 dynamic proof" explainer — populated ONLY when summary.proven === 0. Display copy; changes no classification. */
   zeroProofExplainer: { title: string; body: string[] } | null;
   /** Total generated tests recorded in the graph (honest count; 0 hides the CTA band). */
   /** Cap disclosure: what the view shows vs what was computed. Display-only. */
+  mapModel: SystemMapModel;
   viewMeta: {
     risks: { shown: number; scored: number };
     flows: { shown: number; prunedByCaps: number };
@@ -511,14 +513,181 @@ function riskGeneratedTests(
     if (!isFirstRowForFile) return [];
     return fileOf(t.target_symbol_external_id) === gap.file ? [{ t, sameFile: true }] : [];
   });
-  return linked.slice(0, 2).map(({ t, sameFile }) => ({
+  // Mutually exclusive display: when ANY runnable generated test exists for
+  // this target, English intents are suppressed — intents are strictly the
+  // fallback for environments where runnable code was withheld. Never mix.
+  const runnableLinked = linked.filter(({ t }) => t.runnable !== false);
+  const shown = runnableLinked.length > 0 ? runnableLinked : linked;
+  return shown.slice(0, 2).map(({ t, sameFile }) => ({
     name: t.title,
     concern: t.test_type && t.test_type !== "unknown" ? t.test_type : undefined,
-    assertion: [sameFile ? "same-file target" : "", t.framework_hint, t.weak_evidence_used ? "weak evidence disclosed" : ""]
+    bucket: t.bucket,
+    // The "English intent" marker renders ONCE, as the badge next to the name —
+    // the assertion line stays pure metadata (framework, same-file, disclosure).
+    assertion: [
+      sameFile ? "same-file target" : "",
+      t.framework_hint,
+      t.weak_evidence_used ? "weak evidence disclosed" : ""
+    ]
       .filter(Boolean)
       .join(" · "),
-    code: t.body
+    code: t.body,
+    runnable: t.runnable !== false
   }));
+}
+
+/** Deterministic 1–2 line behavior context from graph facts only — no LLM.
+ *  Sensitivity label mirrors deriveDataSensitivity's tiers. */
+function riskContext(risk: RiskGap): string {
+  const sens =
+    (risk.data_sensitivity ?? 1) >= 10 ? "payment/billing-sensitive"
+    : (risk.data_sensitivity ?? 1) >= 9 ? "auth/session-sensitive"
+    : (risk.data_sensitivity ?? 1) >= 7 ? "order/transaction"
+    : (risk.data_sensitivity ?? 1) >= 6 ? "customer/user-data"
+    : (risk.data_sensitivity ?? 1) >= 3 ? "notification/webhook"
+    : "";
+  const pos = (risk.flow_position ?? 0) >= 5
+    ? "an entry point"
+    : (risk.flow_position ?? 0) >= 3
+      ? `${5 - (risk.flow_position ?? 0)} call${5 - (risk.flow_position ?? 0) === 1 ? "" : "s"} from the nearest entry point`
+      : "deep in the call graph";
+  const parts = [
+    `Sits at ${pos}${sens ? ` on ${sens} paths` : ""}.`,
+    `${risk.incoming_refs} caller${risk.incoming_refs === 1 ? "" : "s"}, ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days — and no test proves its behavior.`
+  ];
+  return parts.join(" ");
+}
+
+
+/** Deterministic system-map model: trigger lanes → deepest services reached,
+ *  weighted by flow traffic, tier-mixed, risk-ringed. Pure function of report
+ *  data — identical every run; the map IS the determinism demo. */
+export interface SystemMapModel {
+  lanes: Array<{ id: string; label: string; flows: number }>;
+  services: Array<{
+    id: string;
+    label: string;
+    flows: number;
+    tiers: { proven: number; assoc: number; candidate: number; none: number };
+    riskRanks: number[];
+    critical: boolean;
+  }>;
+  edges: Array<{ lane: string; service: string; flows: number }>;
+}
+
+const LANE_OF: Record<string, { id: string; label: string }> = {
+  MUTATION: { id: "graphql", label: "GraphQL" },
+  QUERY: { id: "graphql", label: "GraphQL" },
+  SUBSCRIPTION: { id: "graphql", label: "GraphQL" },
+  GET: { id: "http", label: "HTTP" },
+  POST: { id: "http", label: "HTTP" },
+  PUT: { id: "http", label: "HTTP" },
+  PATCH: { id: "http", label: "HTTP" },
+  DELETE: { id: "http", label: "HTTP" },
+  JOB: { id: "job", label: "Jobs" }
+};
+
+function ownerOfSig(sig: string): string {
+  const base = sig.includes("#") ? sig.slice(sig.indexOf("#") + 1) : sig;
+  return base.includes(".") ? base.slice(0, base.indexOf(".")) : base;
+}
+
+export function buildSystemMapModel(data: {
+  flows: BehaviorReportFlow[];
+  risks: BehaviorReportData["risks"];
+  behaviors: BehaviorReportData["behaviors"];
+}, maxServices = 12): SystemMapModel {
+  const laneFlows = new Map<string, number>();
+  const svcFlows = new Map<string, number>();
+  const edgeFlows = new Map<string, number>();
+  for (const f of data.flows) {
+    if (!f.trigger) continue;
+    const lane = LANE_OF[(f.trigger.verb || "").toUpperCase()];
+    if (!lane) continue;
+    const steps = f.steps ?? [];
+    const last = steps.length ? steps[steps.length - 1] : undefined;
+    const svc = last ? ownerOfSig(last.sig) : "";
+    if (!svc) continue;
+    laneFlows.set(lane.id, (laneFlows.get(lane.id) ?? 0) + 1);
+    svcFlows.set(svc, (svcFlows.get(svc) ?? 0) + 1);
+    const key = lane.id + "\u0000" + svc;
+    edgeFlows.set(key, (edgeFlows.get(key) ?? 0) + 1);
+  }
+  const top = [...svcFlows.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, maxServices);
+  const topSet = new Set(top.map(([k]) => k));
+
+  const tiersBySvc = new Map<string, { proven: number; assoc: number; candidate: number; none: number }>();
+  for (const b of data.behaviors) {
+    const svc = ownerOfSig(b.sig);
+    if (!topSet.has(svc)) continue;
+    const t = tiersBySvc.get(svc) ?? { proven: 0, assoc: 0, candidate: 0, none: 0 };
+    if (b.tier === "proven") t.proven++;
+    else if (b.tier === "assoc") t.assoc++;
+    else if (b.tier === "candidate") t.candidate++;
+    else t.none++;
+    tiersBySvc.set(svc, t);
+  }
+  const riskBySvc = new Map<string, { ranks: number[]; critical: boolean }>();
+  for (const r of data.risks) {
+    const svc = ownerOfSig(r.path);
+    if (!topSet.has(svc)) continue;
+    const e = riskBySvc.get(svc) ?? { ranks: [], critical: false };
+    e.ranks.push(r.rank);
+    if (r.tags.some(([label, kind]) => kind === "risk" && label.startsWith("critical"))) e.critical = true;
+    riskBySvc.set(svc, e);
+  }
+
+  const laneOrder = ["graphql", "http", "job"];
+  return {
+    lanes: laneOrder
+      .filter((id) => laneFlows.has(id))
+      .map((id) => ({ id, label: id === "graphql" ? "GraphQL" : id === "http" ? "HTTP" : "Jobs", flows: laneFlows.get(id) ?? 0 })),
+    services: top.map(([label, flows]) => ({
+      id: label,
+      label,
+      flows,
+      tiers: tiersBySvc.get(label) ?? { proven: 0, assoc: 0, candidate: 0, none: 0 },
+      riskRanks: (riskBySvc.get(label)?.ranks ?? []).sort((a, b) => a - b),
+      critical: riskBySvc.get(label)?.critical ?? false
+    })),
+    edges: [...edgeFlows.entries()]
+      .map(([k, flows]) => ({ lane: k.split("\u0000")[0], service: k.split("\u0000")[1], flows }))
+      .filter((e) => topSet.has(e.service))
+      .sort((a, b) => a.lane.localeCompare(b.lane) || b.flows - a.flows || a.service.localeCompare(b.service))
+  };
+}
+
+/** State-aware next step — varies by attached tests, trigger kind, signal, and
+ *  sensitivity, so no two cards read identically for different reasons. */
+function riskTodo(
+  risk: RiskGap,
+  verb: string,
+  path: string,
+  generatedTests: Array<{ runnable?: boolean }>
+): string {
+  if (generatedTests.length && generatedTests.every((t) => t.runnable !== false)) {
+    return "Run the generated test below in your repo; follow its prove handoff so a mutation failure can mint Dynamically Proven.";
+  }
+  if (generatedTests.length) {
+    return "Install this repo's dependencies / set up the test runner, then re-run `opro start` to turn the English intents below into runnable tests.";
+  }
+  const call =
+    verb !== "BEHAVIOR"
+      ? `issues ${verb} ${path}`
+      : risk.entry_point
+        ? `invokes ${risk.title} through its entry point`
+        : `calls ${risk.title} directly`;
+  const sens = (risk.data_sensitivity ?? 1) >= 9
+    ? " Include a negative case: invalid or expired credentials must fail closed."
+    : (risk.data_sensitivity ?? 1) >= 7
+      ? " Include a failure case: a rejected transaction must leave no partial state."
+      : "";
+  if (risk.integration_signal === "candidate") {
+    return `A similarly named test exists but nothing links it. Write a test that imports and ${call}, asserting the observable outcome — that upgrades this from unconfirmed candidate to a hard link.${sens}`;
+  }
+  return `No test signal exists. Start with one integration test that ${call} and asserts the observable outcome.${sens}`;
 }
 
 function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risks"] {
@@ -537,18 +706,21 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
       rank: idx + 1,
       ...(() => {
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
+        const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
+        const path = methodMatch?.[2] ?? risk.title;
         return {
           generatedTests,
           // Honest category strip: only the concerns of REAL attached tests —
           // every pill renders as shown ("n of n"), none fabricated as locked.
-          applicableCategories: [...new Set(generatedTests.map((t) => t.concern).filter((c): c is string => Boolean(c)))]
+          applicableCategories: [...new Set(generatedTests.map((t) => t.concern).filter((c): c is string => Boolean(c)))],
+          verb,
+          path,
+          todo: riskTodo(risk, verb, path, generatedTests)
         };
       })(),
-      verb: methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR",
-      path: methodMatch?.[2] ?? risk.title,
+      context: riskContext(risk),
       desc: risk.reasons.join(" · "),
-      tags,
-      todo: "Write an integration or behavior test that calls this behavior and asserts the observable outcome."
+      tags
     };
   });
 }
@@ -569,6 +741,8 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20 });
   const lists = behaviorLists(rows, flowIds);
   const risks = riskRows(riskGaps, graph);
+  const sortedBehaviors = [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b));
+  const flowRows = flows(graph, rows, riskGaps);
   return {
     repo: path.basename(repoRoot || graph.workspace.name || "repo"),
     scanned: (graph.updated_at || graph.created_at || new Date(0).toISOString()).slice(0, 10),
@@ -580,11 +754,12 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     scan: scanBlock(graph, rows),
     behaviorGroups: lists.behaviorGroups,
     // Proven first so the strongest evidence leads the grid (stable within tiers).
-    behaviors: [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b)),
-    flows: flows(graph, rows, riskGaps),
+    behaviors: sortedBehaviors,
+    flows: flowRows,
     candidateFlows: candidateFlows(graph),
     risks,
     zeroProofExplainer: summary.proven === 0 ? { title: ZERO_PROOF_EXPLAINER.title, body: [...ZERO_PROOF_EXPLAINER.body] } : null,
+    mapModel: buildSystemMapModel({ flows: flowRows, risks, behaviors: sortedBehaviors }),
     viewMeta: {
       // Every denominator behavior is scored; the risks tab surfaces the top N.
       risks: { shown: risks.length, scored: summary.total },
