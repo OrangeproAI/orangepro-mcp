@@ -670,7 +670,7 @@ function riskCardHtml(r){
   // category strip: show which concern categories apply to this flow
   let catHtml='';
   if(r.applicableCategories&&r.applicableCategories.length){
-    const shownConcerns=new Set((r.generatedTests||[]).map(t=>t.concern).filter(Boolean));
+    const shownConcerns=new Set(r.coveredCategories||[]);
     const pills=r.applicableCategories.map(c=>{
       const shown=shownConcerns.has(c);
       const label=c.replace(/_/g,' ');
