@@ -2412,7 +2412,7 @@ export async function generateTests(
             test_type: gc.ctx.test_layer,
             framework_hint: framework,
             body: [
-              "TEST INTENT (English — runnable code withheld in this environment):",
+              "MANUAL TEST (automated runnable test withheld in this environment):",
               `Scenario: ${scenario.title}`,
               ...(scenario.assertion_targets.length ? [`Verify: ${scenario.assertion_targets.join("; ")}`] : []),
               ...(scenario.rationale ? [`Why: ${scenario.rationale}`] : []),

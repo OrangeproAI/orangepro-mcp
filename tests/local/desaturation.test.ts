@@ -279,4 +279,19 @@ describe("buildSystemMapModel", () => {
     const b = JSON.stringify(buildSystemMapModel({ flows: [...flows], risks: [...risks], behaviors: [...behaviors] } as never));
     expect(a).toBe(b);
   });
+
+  it("conserves lane totals: hidden traffic aggregates into a per-lane rest node", () => {
+    // 5 job flows to 5 different low-traffic services + maxServices=2 → the
+    // lane must still account for every flow via the rest node.
+    const jobFlows = [1, 2, 3, 4, 5].map((n) => ({
+      title: "job" + n, trigger: { verb: "JOB", path: "queue:q" + n }, risk: null, proof: "none" as const,
+      services: 1, flow_tier: "hard: reachable" as const, why: "",
+      steps: [{ sig: "JobSvc" + n + ".run", tier: "hard" as const, edge: null, desc: "" }]
+    }));
+    const m = buildSystemMapModel({ flows: [...flows, ...jobFlows], risks, behaviors } as never, 2);
+    const jobLane = m.lanes.find((l) => l.id === "job");
+    const jobEdgeSum = m.edges.filter((e) => e.lane === "job").reduce((a, e) => a + e.flows, 0);
+    expect(jobEdgeSum).toBe(jobLane?.flows); // conservation: drawn == stated
+    expect(m.services.some((sv) => sv.rest && sv.id === "rest:job")).toBe(true);
+  });
 });
