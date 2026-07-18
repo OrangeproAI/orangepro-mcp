@@ -2105,7 +2105,7 @@ export async function opStart(
             },
             providerDeps
           );
-          accepted += generated.generated_tests.length;
+          accepted += generated.generated_tests.filter((t) => t.runnable !== false).length;
           warnings.push(...generated.warnings.map((w) => `generate: ${w}`));
         }
         if (accepted === 0) warnings.push("generate: provider returned no accepted tests for the top risk targets.");

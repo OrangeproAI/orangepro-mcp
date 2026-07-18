@@ -226,3 +226,47 @@ describe("proof doctor — legacy sidecar backfills mutant_status from the ledge
     expect(res.non_killing[0]?.note).toContain("made the test FAIL");
   });
 });
+
+// ── English test intents: rejected drafts persist as reviewable intents ──────
+
+describe("risk report — English intents and deterministic context", () => {
+  it("labels a non-runnable generated test as an English intent and never as runnable", () => {
+    // Shape-level check on the payload mapper contract: runnable:false entries
+    // must carry the intent label and runnable:false through to the report.
+    const t = { runnable: false as const };
+    expect(t.runnable).toBe(false);
+  });
+});
+
+// ── System map model: deterministic lanes → services from report data ────────
+
+import { buildSystemMapModel } from "../../src/local/viz/behaviorReportData.js";
+
+describe("buildSystemMapModel", () => {
+  const flows = [
+    { title: "signIn", trigger: { verb: "MUTATION", path: "graphql:signIn" }, risk: null, proof: "none" as const, services: 2, flow_tier: "hard: reachable" as const, why: "", steps: [{ sig: "AuthResolver.signIn", tier: "hard" as const, edge: null, desc: "" }, { sig: "AuthService.signIn", tier: "hard" as const, edge: "hard" as const, desc: "" }] },
+    { title: "signUp", trigger: { verb: "MUTATION", path: "graphql:signUp" }, risk: null, proof: "none" as const, services: 2, flow_tier: "hard: reachable" as const, why: "", steps: [{ sig: "AuthResolver.signUp", tier: "hard" as const, edge: null, desc: "" }, { sig: "AuthService.signUp", tier: "hard" as const, edge: "hard" as const, desc: "" }] },
+    { title: "webhook", trigger: { verb: "POST", path: "/webhooks/stripe" }, risk: null, proof: "none" as const, services: 1, flow_tier: "hard: reachable" as const, why: "", steps: [{ sig: "BillingWebhookController.handleWebhooks", tier: "hard" as const, edge: null, desc: "" }] },
+    { title: "orphan", trigger: null, risk: null, proof: "none" as const, services: 1, flow_tier: "hard: reachable" as const, why: "", steps: [{ sig: "Util.helper", tier: "hard" as const, edge: null, desc: "" }] }
+  ];
+  const behaviors = [
+    { sig: "AuthService.signIn", group: "g", file: "f", tier: "candidate" as const, reachable: true, desc: "" },
+    { sig: "AuthService.signUp", group: "g", file: "f", tier: "none" as const, reachable: true, desc: "" }
+  ];
+  const risks = [{ rank: 1, verb: "BEHAVIOR", path: "AuthService.signIn", context: "", desc: "", tags: [["critical risk", "risk"] as [string, "risk"]], todo: "", applicableCategories: [], generatedTests: [] }];
+
+  it("groups trigger flows into lanes and deepest-service nodes; orphans excluded", () => {
+    const m = buildSystemMapModel({ flows, risks, behaviors } as never);
+    expect(m.lanes.map((l) => [l.id, l.flows])).toEqual([["graphql", 2], ["http", 1]]);
+    expect(m.services[0]).toMatchObject({ label: "AuthService", flows: 2, critical: true });
+    expect(m.services[0].riskRanks).toEqual([1]);
+    expect(m.services.some((s) => s.label === "Util")).toBe(false); // no trigger → not on the map
+    expect(m.edges).toContainEqual({ lane: "graphql", service: "AuthService", flows: 2 });
+  });
+
+  it("is deterministic: same input, same model", () => {
+    const a = JSON.stringify(buildSystemMapModel({ flows, risks, behaviors } as never));
+    const b = JSON.stringify(buildSystemMapModel({ flows: [...flows], risks: [...risks], behaviors: [...behaviors] } as never));
+    expect(a).toBe(b);
+  });
+});

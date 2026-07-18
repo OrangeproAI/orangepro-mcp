@@ -2378,12 +2378,41 @@ export async function generateTests(
         const runnable = isRunnable(body, framework, import_provenance, importErrors) && !compileIssue;
         if (!runnable) {
           const reason = unresolved_reason ?? compileIssue ?? runnableFailureReason(body, framework, import_provenance, importErrors, declaredDeps);
-          warnings.push(`Dropped non-runnable v5 generated test for "${gc.ctx.behavior_title}" / "${scenario.title}": ${reason}`);
+          warnings.push(`Non-runnable v5 generated test for "${gc.ctx.behavior_title}" / "${scenario.title}" kept as an English intent (no run command): ${reason}`);
           missing.push({
             external_id: behavior.external_id,
             title: gc.ctx.behavior_title,
             reason,
             needed: ["a compiling generated test with a real assertion and resolvable subject import"]
+          });
+          // Preserve the grounded INTENT in English, never the rejected code.
+          // The scenario plan (title / assertion targets / rationale) is the
+          // reviewable half of the draft; withholding the body entirely also
+          // removes any residual source-echo risk. runnable:false + the reason
+          // keep this honestly a draft — it ships with no run command and can
+          // never enter the proof-ready set.
+          generated.push({
+            id: `${run_id}-t${generated.length + 1}`,
+            run_id,
+            title: `${gc.ctx.behavior_title} — ${scenario.title}`,
+            test_type: gc.ctx.test_layer,
+            framework_hint: framework,
+            body: [
+              "TEST INTENT (English — runnable code withheld in this environment):",
+              `Scenario: ${scenario.title}`,
+              ...(scenario.assertion_targets.length ? [`Verify: ${scenario.assertion_targets.join("; ")}`] : []),
+              ...(scenario.rationale ? [`Why: ${scenario.rationale}`] : []),
+              "",
+              `Runnable code withheld because: ${reason}`,
+              "Set up the environment (install dependencies / configure the test runner), then re-run `opro start` to generate runnable tests for this behavior."
+            ].join("\n"),
+            bucket: bucketForV5Scenario(scenario),
+            prompt_version: PROMPT_VERSION_V5,
+            grounding: { entity_ids: gc.entityIds, source_refs: [], weak_relationships_used: [] },
+            weak_evidence_used: false,
+            target_symbol_external_id: behavior.external_id,
+            runnable: false,
+            unresolved_reason: reason
           });
           continue;
         }
