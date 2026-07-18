@@ -1067,17 +1067,21 @@ describe("autoProve — unified dynamic-proof budget (default 5)", () => {
 describe("autoProve — trust guard: static Associated never becomes Dynamically Proven", () => {
   it("all attempts setup-blocked → proven 0, RTM proven 0, Associated tier preserved", async () => {
     const W = makeWorkspaceWithExistingTests();
-    const associatedBefore = opRtm(W, { format: "json" }).summary.associated;
-    expect(associatedBefore).toBeGreaterThan(0);
+    // Epistemic fix (Jul 17): lexical matches surface as the CANDIDATE tier
+    // (associated requires a hard TestCase edge). The trust-guard intent is
+    // unchanged: whatever static tier exists must never inflate proven.
+    const before = opRtm(W, { format: "json" }).summary;
+    const staticBefore = before.associated + before.candidate;
+    expect(staticBefore).toBeGreaterThan(0);
 
     // Every baseline fails → every attempt is an honest non-proof, never proven.
     const res = await autoProve(W, {}, baseDeps(NO_ENV, { dynamicProofRunner: proofRunner("baseline_fail") }));
 
-    expect(res.attempted).toBeGreaterThan(0); // the associated tests WERE attempted
+    expect(res.attempted).toBeGreaterThan(0); // the statically-linked tests WERE attempted
     expect(res.proven).toBe(0); // but none closed
-    const rtmAfter = opRtm(W, { format: "json" });
-    expect(rtmAfter.summary.proven).toBe(0); // static Associated signals did NOT inflate proven
-    expect(rtmAfter.summary.associated).toBe(associatedBefore); // breadth preserved
+    const after = opRtm(W, { format: "json" }).summary;
+    expect(after.proven).toBe(0); // static signals did NOT inflate proven
+    expect(after.associated + after.candidate).toBe(staticBefore); // breadth preserved
   });
 });
 

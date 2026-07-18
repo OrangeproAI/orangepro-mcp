@@ -102,7 +102,7 @@ export interface GapArea {
   none: number;
   /** dynamic Proven / total. */
   confirmed_pct: number;
-  sample_gaps: Array<{ title: string; file?: string; status: "associated" | "none" }>;
+  sample_gaps: Array<{ title: string; file?: string; status: "associated" | "candidate" | "none" }>;
 }
 
 /** A TestCase sample for the connectivity graph's "connected" cluster. */
@@ -139,7 +139,7 @@ export interface CodeBehaviorRow {
   file?: string;
   area: string;
   language: string;
-  evidence: "proven" | "runtime" | "associated" | "none";
+  evidence: "proven" | "runtime" | "associated" | "candidate" | "none";
 }
 
 export interface StaticFlowHopRow {
@@ -526,13 +526,17 @@ function codeAreaSummary(graph: LocalGraph, ledger?: Ledger): GapArea[] {
     } else if (publicRow?.evidence_tier === "runtime") {
       a.runtime_covered++;
     } else {
-      const sample = { title: n.title || n.external_id, file, status: "none" as const };
       if (publicRow?.evidence_tier === "associated") {
         a.inferred++;
-        a.associatedSamples.push({ ...sample, status: "associated" });
+        a.associatedSamples.push({ title: n.title || n.external_id, file, status: "associated" });
+      } else if (publicRow?.evidence_tier === "candidate") {
+        // Lexical/Jaccard candidate: a lead, not evidence — surfaced distinctly,
+        // never folded into the associated (test-linked) column.
+        a.inferred++;
+        a.associatedSamples.push({ title: n.title || n.external_id, file, status: "candidate" });
       } else {
         a.none++;
-        a.noLinkSamples.push(sample);
+        a.noLinkSamples.push({ title: n.title || n.external_id, file, status: "none" });
       }
     }
   }
@@ -564,7 +568,9 @@ function codeBehaviorRows(graph: LocalGraph, ledger?: Ledger): CodeBehaviorRow[]
           ? "runtime"
           : tier === "associated"
             ? "associated"
-            : "none";
+            : tier === "candidate"
+              ? "candidate"
+              : "none";
       return {
         id: n.external_id,
         title: n.title || n.external_id,
@@ -575,7 +581,7 @@ function codeBehaviorRows(graph: LocalGraph, ledger?: Ledger): CodeBehaviorRow[]
       };
     })
     .sort((a, b) => {
-      const rank = (x: CodeBehaviorRow) => (x.evidence === "none" ? 0 : x.evidence === "associated" ? 1 : x.evidence === "runtime" ? 2 : 3);
+      const rank = (x: CodeBehaviorRow) => (x.evidence === "none" ? 0 : x.evidence === "candidate" ? 1 : x.evidence === "associated" ? 2 : x.evidence === "runtime" ? 3 : 4);
       return rank(a) - rank(b) || a.area.localeCompare(b.area) || a.file.localeCompare(b.file) || a.title.localeCompare(b.title);
     });
 }

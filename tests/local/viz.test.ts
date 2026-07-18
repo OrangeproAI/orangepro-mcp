@@ -369,12 +369,14 @@ describe("viz payload (gap-first model)", () => {
     expect(gap.stats.behavior_total).toBe(4);
     expect(gap.code_behaviors).toEqual([
       {
+        // Epistemic fix (Jul 17): a lexical/Jaccard candidate edge is a lead,
+        // not evidence — its own tier, never "associated".
         id: "sym:app/users.py#load_user",
         title: "load_user",
         file: "app/users.py",
         area: "app",
         language: "Python",
-        evidence: "associated"
+        evidence: "candidate"
       },
       {
         id: "sym:src/web/logout.ts#logout",
@@ -410,11 +412,12 @@ describe("viz payload (gap-first model)", () => {
         total: 1,
         proven: 0,
         runtime_covered: 0,
-        associated: 1,
-        unlinked: 0,
+        // candidate is not test-linked: legacy table counts it as unlinked
+        associated: 0,
+        unlinked: 1,
         proven_pct: 0,
         runtime_pct: 0,
-        associated_pct: 100
+        associated_pct: 0
       }
     ]);
   });
@@ -456,6 +459,9 @@ describe("viz payload (gap-first model)", () => {
     });
 
     const { gap } = buildVizPayload(graph, scoreGraph(graph));
+    // Epistemic fix (Jul 17): candidate signals attach ONLY to the matched file
+    // and NEVER propagate through imports — one lexical match on a barrel file
+    // previously marked its whole import subtree "associated" (93% of Twenty).
     expect(gap.code_behaviors).toEqual([
       {
         id: "sym:src/vanilla.ts#proxy",
@@ -463,7 +469,7 @@ describe("viz payload (gap-first model)", () => {
         file: "src/vanilla.ts",
         area: "src",
         language: "TypeScript/JavaScript",
-        evidence: "associated"
+        evidence: "none"
       }
     ]);
     expect(gap.language_tiers).toEqual([
@@ -472,11 +478,11 @@ describe("viz payload (gap-first model)", () => {
         total: 1,
         proven: 0,
         runtime_covered: 0,
-        associated: 1,
-        unlinked: 0,
+        associated: 0,
+        unlinked: 1,
         proven_pct: 0,
         runtime_pct: 0,
-        associated_pct: 100
+        associated_pct: 0
       }
     ]);
   });
@@ -687,7 +693,7 @@ describe("viz payload (gap-first model)", () => {
     expect(src?.not_structurally_confirmable).toBe(0);
     expect(src?.none).toBe(0);
     expect(src?.confirmed_pct).toBe(50);
-    expect(src?.sample_gaps).toEqual([{ title: "editProfile", file: "src/profile.ts", status: "associated" }]);
+    expect(src?.sample_gaps).toEqual([{ title: "editProfile", file: "src/profile.ts", status: "candidate" }]);
     expect(server?.total).toBe(1);
     expect(server?.confirmed).toBe(0);
     expect(server?.inferred).toBe(0);
