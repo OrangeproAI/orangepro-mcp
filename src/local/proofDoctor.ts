@@ -386,7 +386,8 @@ export function buildProofDoctor(
   graph: LocalGraph,
   rtm: RtmResult,
   attempts: ProofAttemptsFile | null,
-  opts: ProofDoctorOptions = {}
+  opts: ProofDoctorOptions = {},
+  ledger?: { records: Array<{ target_symbol: string; ts: string; dynamic_proof?: { mutant_status?: string } }> } | null
 ): ProofDoctorResult {
   const io: PreflightIo = opts.io ?? { exists: existsSync, nodeVersion: process.version };
   const proven = rtm.summary.proven;
@@ -396,6 +397,20 @@ export function buildProofDoctor(
   const stale = Boolean(attempts && !proofAttemptsFresh(attempts, graph));
 
   const currentAttempts = attempts && !stale ? attempts : null;
+
+  // Legacy-sidecar backfill: proof-attempts files written before mutant_status
+  // was persisted carry no outcome detail, which forced every non-close into
+  // the "mutant survived" diagnosis. The ledger next to it is ground truth —
+  // recover mutant_status from the latest ledger record per target so the
+  // doctor self-heals without requiring a fresh `opro start`.
+  const ledgerStatusByTarget = new Map<string, string>();
+  for (const r of ledger?.records ?? []) {
+    const ms = r.dynamic_proof?.mutant_status;
+    if (!ms) continue;
+    ledgerStatusByTarget.set(r.target_symbol, ms); // records are append-ordered; last wins
+  }
+  const mutantStatusFor = (a: { target_symbol: string; mutant_status?: string }): string | undefined =>
+    a.mutant_status ?? ledgerStatusByTarget.get(a.target_symbol);
   const blocked = (currentAttempts?.attempts ?? []).filter((a) => a.classification === "needs_setup");
   const survivors = (currentAttempts?.attempts ?? []).filter((a) => a.classification === "non_killing");
 
@@ -412,7 +427,8 @@ export function buildProofDoctor(
     const key = `${a.target_symbol}\u0000${a.test_path ?? ""}`;
     if (seenSurvivors.has(key)) continue;
     seenSurvivors.add(key);
-    non_killing.push({ target_symbol: a.target_symbol, test_path: a.test_path, mutant_status: a.mutant_status, note: nonKillingNoteFor(a.mutant_status) });
+    const ms = mutantStatusFor(a);
+    non_killing.push({ target_symbol: a.target_symbol, test_path: a.test_path, mutant_status: ms, note: nonKillingNoteFor(ms) });
   }
 
   let status: ProofDoctorResult["status"];
