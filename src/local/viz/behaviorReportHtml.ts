@@ -522,7 +522,13 @@ function riskCardHtml(r){
   }
   let testsHtml='';
   if(r.generatedTests&&r.generatedTests.length){
-    testsHtml=\`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests (integration)</div>\`;
+    // Honest header: derive the kind from the attached tests themselves —
+    // single-function targets legitimately get UNIT tests (0-hop per the
+    // methodology's hop table); hardcoding "(integration)" contradicted the
+    // per-test chips whenever the generator produced unit tests.
+    const kinds=[...new Set(r.generatedTests.map(t=>t.concern).filter(Boolean))];
+    const kindLbl=kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
+    testsHtml=\`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests\${esc(kindLbl)}</div>\`;
     r.generatedTests.forEach(t=>{
       const cBadge=t.concern?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(t.concern.replace('_',' '))}</span>\`:'';
       testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
