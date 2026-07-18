@@ -1,4 +1,5 @@
 import { SymbolExtraction } from "./symbols.js";
+import { createRequire } from "node:module";
 
 /**
  * Phase 5.4.2 — persistent PARSE cache.
@@ -59,6 +60,19 @@ import { SymbolExtraction } from "./symbols.js";
 // report ingestion; warm v15 entries lack the ranges and cannot be mapped.
 export const PARSER_VERSION = 17; // 17: Go method symbols receiver-qualified (Recv.M + member_of)
 
+/** Tool package version, folded into the cache guard so UPGRADES auto-invalidate
+ *  the cache — bumping PARSER_VERSION by hand is a discipline; this is a lock.
+ *  (The stale-cache incident: upgraded binary served old per-file results.) */
+export const TOOL_VERSION: string = (() => {
+  try {
+    // dist/local/analyze/ → ../../../package.json
+    const req = createRequire(import.meta.url);
+    return String((req("../../../package.json") as { version?: string }).version ?? "0");
+  } catch {
+    return "0";
+  }
+})();
+
 const SYMBOL_KINDS = new Set(["function", "class", "const", "method"]);
 
 interface ParseEntry {
@@ -68,6 +82,7 @@ interface ParseEntry {
 
 export interface ParseCacheData {
   version: number;
+  tool?: string;
   entries: Record<string, ParseEntry>;
 }
 
@@ -104,7 +119,7 @@ export class ParseCache {
   constructor(data?: ParseCacheData | null) {
     this.entries = new Map();
     // A version mismatch (or no data) starts empty — never trust a stale schema.
-    if (!data || data.version !== PARSER_VERSION || !data.entries || typeof data.entries !== "object") return;
+    if (!data || data.version !== PARSER_VERSION || data.tool !== TOOL_VERSION || !data.entries || typeof data.entries !== "object") return;
     for (const [key, raw] of Object.entries(data.entries)) {
       if (!raw || typeof raw !== "object") continue;
       const entry: ParseEntry = {};
@@ -161,6 +176,6 @@ export class ParseCache {
       const e = this.entries.get(key);
       if (e) entries[key] = e;
     }
-    return { version: PARSER_VERSION, entries };
+    return { version: PARSER_VERSION, tool: TOOL_VERSION, entries };
   }
 }

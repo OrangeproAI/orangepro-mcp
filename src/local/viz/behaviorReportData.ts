@@ -57,6 +57,8 @@ export interface BehaviorReportData {
   /** Total generated tests recorded in the graph (honest count; 0 hides the CTA band). */
   /** Cap disclosure: what the view shows vs what was computed. Display-only. */
   mapModel: SystemMapModel;
+  /** Delta vs the previous run's snapshot (null on first run / unreadable baseline). Display-only. */
+  delta?: ReportDelta | null;
   viewMeta: {
     risks: { shown: number; scored: number };
     flows: { shown: number; prunedByCaps: number };
@@ -567,6 +569,58 @@ function riskContext(risk: RiskGap): string {
   return parts.join(" ");
 }
 
+
+
+/** Snapshot of one run, persisted so the NEXT run can show what changed. */
+export interface ReportBaseline {
+  ts: string;
+  summary: BehaviorReportData["summary"];
+  riskPaths: string[]; // top-20 in rank order
+  generatedTotal: number;
+}
+
+export interface ReportDelta {
+  baselineTs: string;
+  changed: boolean;
+  totalDelta: number;
+  provenDelta: number;
+  associatedDelta: number;
+  candidateDelta: number;
+  noneDelta: number;
+  newRisks: string[];      // entered the top-20
+  droppedRisks: string[];  // left the top-20
+  generatedDelta: number;
+}
+
+/** Pure delta between a persisted baseline and the current report data.
+ *  Deterministic: same inputs, same delta. */
+export function computeReportDelta(prev: ReportBaseline, cur: BehaviorReportData): ReportDelta {
+  const curPaths = cur.risks.map((r) => r.path);
+  const prevSet = new Set(prev.riskPaths);
+  const curSet = new Set(curPaths);
+  const newRisks = curPaths.filter((p) => !prevSet.has(p));
+  const droppedRisks = prev.riskPaths.filter((p) => !curSet.has(p));
+  const d: ReportDelta = {
+    baselineTs: prev.ts,
+    changed: false,
+    totalDelta: cur.summary.total - prev.summary.total,
+    provenDelta: cur.summary.proven - prev.summary.proven,
+    associatedDelta: cur.summary.associated - prev.summary.associated,
+    candidateDelta: cur.summary.candidate - prev.summary.candidate,
+    noneDelta: cur.summary.none - prev.summary.none,
+    newRisks,
+    droppedRisks,
+    generatedDelta: cur.generatedTotal - prev.generatedTotal
+  };
+  d.changed =
+    d.totalDelta !== 0 || d.provenDelta !== 0 || d.associatedDelta !== 0 || d.candidateDelta !== 0 ||
+    d.noneDelta !== 0 || d.generatedDelta !== 0 || newRisks.length > 0 || droppedRisks.length > 0;
+  return d;
+}
+
+export function reportBaselineOf(cur: BehaviorReportData, ts: string): ReportBaseline {
+  return { ts, summary: cur.summary, riskPaths: cur.risks.map((r) => r.path), generatedTotal: cur.generatedTotal };
+}
 
 /** Deterministic system-map model: trigger lanes → deepest services reached,
  *  weighted by flow traffic, tier-mixed, risk-ringed. Pure function of report

@@ -295,3 +295,46 @@ describe("buildSystemMapModel", () => {
     expect(m.services.some((sv) => sv.rest && sv.id === "rest:job")).toBe(true);
   });
 });
+
+// ── Delta since last run: pure, deterministic, display-only ─────────────────
+
+import { computeReportDelta, reportBaselineOf } from "../../src/local/viz/behaviorReportData.js";
+
+describe("computeReportDelta", () => {
+  const base = {
+    ts: "2026-07-17T00:00:00Z",
+    summary: { total: 100, proven: 1, associated: 10, candidate: 80, none: 9, reachableUntested: 2, noSignal: 7 },
+    riskPaths: ["A.x", "B.y", "C.z"],
+    generatedTotal: 5
+  };
+  const cur = (over: Record<string, unknown>) => ({
+    summary: { total: 100, proven: 1, associated: 10, candidate: 80, none: 9, reachableUntested: 2, noSignal: 7 },
+    risks: [{ path: "A.x" }, { path: "B.y" }, { path: "C.z" }],
+    generatedTotal: 5,
+    ...over
+  }) as never;
+
+  it("identical run → changed:false, all deltas zero", () => {
+    const d = computeReportDelta(base, cur({}));
+    expect(d.changed).toBe(false);
+    expect(d.totalDelta).toBe(0);
+    expect(d.newRisks).toEqual([]);
+  });
+
+  it("new proof + risk churn → changed with named entrants/exits", () => {
+    const d = computeReportDelta(base, cur({
+      summary: { total: 102, proven: 2, associated: 10, candidate: 81, none: 9, reachableUntested: 2, noSignal: 7 },
+      risks: [{ path: "A.x" }, { path: "D.new" }, { path: "C.z" }]
+    }));
+    expect(d.changed).toBe(true);
+    expect(d.totalDelta).toBe(2);
+    expect(d.provenDelta).toBe(1);
+    expect(d.newRisks).toEqual(["D.new"]);
+    expect(d.droppedRisks).toEqual(["B.y"]);
+  });
+
+  it("baseline round-trips through reportBaselineOf", () => {
+    const snap = reportBaselineOf(cur({}) as never, "2026-07-18T00:00:00Z");
+    expect(computeReportDelta(snap, cur({}) as never).changed).toBe(false);
+  });
+});
