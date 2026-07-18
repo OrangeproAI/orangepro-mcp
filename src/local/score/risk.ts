@@ -130,16 +130,6 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
   return out;
 }
 
-function countOutgoingCalls(symbolId: string, graph: LocalGraph): number {
-  const targets = new Set<string>();
-  for (const e of graph.edges) {
-    if (e.relationship_type === "CALLS" && e.from_external_id === symbolId) {
-      targets.add(e.to_external_id);
-    }
-  }
-  return targets.size;
-}
-
 function isEntryPoint(node: GraphNode): boolean {
   const file = symbolFile(node);
   const title = symbolTitle(node);
@@ -193,13 +183,21 @@ function deriveDataSensitivity(node: GraphNode): number {
   return 1;
 }
 
-function getFlowDepth(node: GraphNode, graph: LocalGraph): number {
+/** Prebuilt inputs for flow-depth queries — construct ONCE per ranking run.
+ *  Building the entry set (all-nodes scan) and reverse-call adjacency
+ *  (all-edges scan) inside every getFlowDepth call made risk ranking
+ *  quadratic: ~1.5B scans on a Twenty-sized repo (10.6k symbols × 2 calls
+ *  each × 72k nodes+edges). Semantics of the per-node BFS are unchanged. */
+export interface FlowDepthContext {
+  entryIds: Set<string>;
+  callers: Map<string, Set<string>>;
+  cache: Map<string, number>;
+}
+
+export function buildFlowDepthContext(graph: LocalGraph): FlowDepthContext {
   const entryIds = new Set(
     graph.nodes.filter((n) => n.kind === "CodeSymbol" && isEntryPoint(n)).map((n) => n.external_id)
   );
-  if (entryIds.has(node.external_id)) return 0;
-
-  // BFS backward over CALLS edges to find nearest entry point.
   const callers = new Map<string, Set<string>>();
   for (const e of graph.edges) {
     if (e.relationship_type === "CALLS") {
@@ -208,6 +206,17 @@ function getFlowDepth(node: GraphNode, graph: LocalGraph): number {
       callers.set(e.to_external_id, set);
     }
   }
+  return { entryIds, callers, cache: new Map() };
+}
+
+function getFlowDepth(node: GraphNode, ctx: FlowDepthContext): number {
+  const cached = ctx.cache.get(node.external_id);
+  if (cached !== undefined) return cached;
+  const { entryIds, callers } = ctx;
+  if (entryIds.has(node.external_id)) {
+    ctx.cache.set(node.external_id, 0);
+    return 0;
+  }
 
   let depth = 0;
   let frontier = new Set(callers.get(node.external_id) ?? []);
@@ -215,7 +224,10 @@ function getFlowDepth(node: GraphNode, graph: LocalGraph): number {
   while (frontier.size > 0 && depth < 6) {
     depth++;
     for (const id of frontier) {
-      if (entryIds.has(id)) return depth;
+      if (entryIds.has(id)) {
+        ctx.cache.set(node.external_id, depth);
+        return depth;
+      }
     }
     const next = new Set<string>();
     for (const id of frontier) {
@@ -228,7 +240,9 @@ function getFlowDepth(node: GraphNode, graph: LocalGraph): number {
     }
     frontier = next;
   }
-  return depth >= 6 ? 6 : depth;
+  const out = depth >= 6 ? 6 : depth;
+  ctx.cache.set(node.external_id, out);
+  return out;
 }
 
 function complexityProxy(node: GraphNode): number {
@@ -266,7 +280,7 @@ interface RawScores {
 
 function computeRawORS(
   node: GraphNode,
-  graph: LocalGraph,
+  depthCtx: FlowDepthContext,
   incomingRefs: number,
   gitChurn: number,
   fanOut: number,
@@ -279,7 +293,7 @@ function computeRawORS(
   const rawP = gitChurn * 0.35 + fanOut * 0.3 + (isNew ? 15 : 0) + complexity * 0.2;
 
   const routeWeight = deriveRouteWeight(node);
-  const flowDepth = getFlowDepth(node, graph);
+  const flowDepth = getFlowDepth(node, depthCtx);
   const flowPosition = Math.max(0, 5 - flowDepth);
   const dataSensitivity = deriveDataSensitivity(node);
   const rawI = incomingRefs * 0.3 + routeWeight * 0.3 + flowPosition * 0.2 + dataSensitivity * 0.2;
@@ -367,7 +381,16 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   };
 
   const entryPoint = new Map(symbols.map((s) => [s.external_id, isEntryPoint(s)]));
-  const fanOut = new Map(symbols.map((s) => [s.external_id, countOutgoingCalls(s.external_id, graph)]));
+  // Single pass over edges (was one full edge scan PER symbol).
+  const fanOutTargets = new Map<string, Set<string>>();
+  for (const e of graph.edges) {
+    if (e.relationship_type !== "CALLS" || !symbolIds.has(e.from_external_id)) continue;
+    const set = fanOutTargets.get(e.from_external_id) ?? new Set<string>();
+    set.add(e.to_external_id);
+    fanOutTargets.set(e.from_external_id, set);
+  }
+  const fanOut = new Map(symbols.map((s) => [s.external_id, fanOutTargets.get(s.external_id)?.size ?? 0]));
+  const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
   const candidateLinked = candidateSignalIds(graph, symbolIds);
   const detectionFor = (id: string): "associated" | "candidate" | "none" =>
@@ -399,7 +422,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     const git_churn = symbolChurn(s);
     const fan_out = fanOut.get(s.external_id) ?? 0;
     const ts = firstCommitTs.get(file) ?? 0;
-    return computeRawORS(s, graph, incoming_refs, git_churn, fan_out, detectionFor(s.external_id), ts, nowSec);
+    return computeRawORS(s, depthCtx, incoming_refs, git_churn, fan_out, detectionFor(s.external_id), ts, nowSec);
   });
 
   const pScores = normalizeScores(rawScores.map((r) => r.p));
@@ -414,7 +437,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const isEntry = entryPoint.get(s.external_id) ?? false;
       const route_weight = deriveRouteWeight(s);
       const data_sensitivity = deriveDataSensitivity(s);
-      const flow_position = Math.max(0, 5 - getFlowDepth(s, graph));
+      const flow_position = Math.max(0, 5 - getFlowDepth(s, depthCtx));
       const complexity_proxy = complexityProxy(s);
       const firstTs = firstCommitTs.get(file) ?? 0;
       const is_new_code = firstTs > 0 && nowSec - firstTs < NEW_CODE_SECONDS;

@@ -317,7 +317,10 @@ async function main(): Promise<number> {
         out("  - opro agent --client claude-code");
         out("  - opro agent --client cursor");
         out("  - opro agent --client opencode");
-        for (const w of res.warnings) out(`  warning: ${w}`);
+        // opStart aggregates warnings from ai-flows generate AND apply — the same
+        // message (e.g. the prompt entry cap) can legitimately arrive twice.
+        // Dedupe at print time; JSON output keeps the raw array.
+        for (const w of [...new Set(res.warnings)]) out(`  warning: ${w}`);
       }
       return 0;
     }
