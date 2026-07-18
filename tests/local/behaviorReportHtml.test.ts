@@ -506,7 +506,7 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(html).not.toContain("0 more tests generated");
     // Category strip shows only the real attached concerns — nothing locked/fabricated.
     expect(withTests!.applicableCategories).toContain("contract"); // derived, not attached-echo
-    expect(withTests!.coveredCategories).toEqual([]); // legacy fixture test has no bucket → covers nothing
+    expect(withTests!.coveredCategories).toEqual(["integration_flow"]); // integration-layer test covers the category even without a bucket
   });
 
   it("attaches a same-file generated test to exactly ONE deterministic row, labeled 'same-file target'", () => {
@@ -627,7 +627,8 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     const row = data.risks.find((r) => r.generatedTests.length > 0)!;
     expect(row.applicableCategories).toContain("contract");            // always applicable
     expect(row.applicableCategories.length).toBeGreaterThan(row.coveredCategories.length); // something to unlock
-    expect(row.coveredCategories).toEqual(["boundary_limits"]);        // edge_case bucket → boundary_limits
+    expect(row.coveredCategories).toContain("boundary_limits");        // edge_case bucket → boundary_limits
+    expect(row.coveredCategories).toContain("integration_flow");       // integration-layer test covers the category
     const html = renderBehaviorReport(data);
     expect(html).toContain("cp-locked");                               // lock pills render again
   });

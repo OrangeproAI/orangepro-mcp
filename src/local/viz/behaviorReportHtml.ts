@@ -678,7 +678,7 @@ function riskCardHtml(r){
     }).join('');
     const shownN=r.applicableCategories.filter(c=>shownConcerns.has(c)).length;
     const totalN=r.applicableCategories.length;
-    catHtml=\`<div class="cat-strip"><div class="cat-strip-lbl">Testing categories for this flow (\${shownN} of \${totalN} shown)</div><div class="cat-pills">\${pills}</div></div>\`;
+    catHtml=\`<div class="cat-strip"><div class="cat-strip-lbl">Applicable testing categories for this flow (\${shownN} of \${totalN} covered)</div><div class="cat-pills">\${pills}</div></div>\`;
   }
   let testsHtml='';
   if(r.generatedTests&&r.generatedTests.length){

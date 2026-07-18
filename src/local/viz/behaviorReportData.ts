@@ -537,6 +537,13 @@ function riskGeneratedTests(
   }));
 }
 
+/** Incoming refs are method-attributed and can be fractional (a file-level
+ *  reference split across its symbols). Display rounds; sub-1 shows "<1". */
+function fmtRefs(n: number): string {
+  if (n > 0 && n < 1) return "<1";
+  return String(Math.round(n));
+}
+
 /** Deterministic 1–2 line behavior context from graph facts only — no LLM.
  *  Sensitivity label mirrors deriveDataSensitivity's tiers. */
 function riskContext(risk: RiskGap): string {
@@ -552,9 +559,10 @@ function riskContext(risk: RiskGap): string {
     : (risk.flow_position ?? 0) >= 3
       ? `${5 - (risk.flow_position ?? 0)} call${5 - (risk.flow_position ?? 0) === 1 ? "" : "s"} from the nearest entry point`
       : "deep in the call graph";
+  const refs = fmtRefs(risk.incoming_refs);
   const parts = [
     `Sits at ${pos}${sens ? ` on ${sens} paths` : ""}.`,
-    `${risk.incoming_refs} caller${risk.incoming_refs === 1 ? "" : "s"}, ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days — and no test proves its behavior.`
+    `${refs} caller${refs === "1" ? "" : "s"}, ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days — and no test proves its behavior.`
   ];
   return parts.join(" ");
 }
@@ -844,7 +852,7 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
     const tags: Array<[label: string, kind: "risk" | "info" | "entry"]> = [];
     const bucket = riskBucket(risk.risk_score, maxRiskScore);
     if (bucket) tags.push([`${bucket} risk`, "risk"]);
-    tags.push([`${risk.incoming_refs} incoming refs`, "info"]);
+    tags.push([`${fmtRefs(risk.incoming_refs)} incoming refs`, "info"]);
     if (risk.entry_point) tags.push(["Entry point", "entry"]);
     return {
       rank: idx + 1,
@@ -852,7 +860,12 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
         const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
         const path = methodMatch?.[2] ?? risk.title;
-        const coveredCategories = [...new Set(generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)).filter((c): c is string => Boolean(c)))];
+        const coveredCategories = [...new Set([
+          ...generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)),
+          // An integration/api/e2e-layer test covers the integration_flow
+          // category by construction — the chip and the pill must agree.
+          ...generatedTests.map((t) => (t.concern === "integration" || t.concern === "api" || t.concern === "e2e" ? "integration_flow" : undefined))
+        ].filter((c): c is string => Boolean(c)))];
         return {
           generatedTests,
           applicableCategories: riskApplicableConcerns(risk, verb),

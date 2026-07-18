@@ -2400,26 +2400,33 @@ export async function generateTests(
             needed: ["a compiling generated test with a real assertion and resolvable subject import"]
           });
           // Preserve the grounded INTENT in English, never the rejected code.
+          // The scenario fields were authored by a model that saw source
+          // excerpts — scrub the composed body with the same guard as code.
           // The scenario plan (title / assertion targets / rationale) is the
           // reviewable half of the draft; withholding the body entirely also
           // removes any residual source-echo risk. runnable:false + the reason
           // keep this honestly a draft — it ships with no run command and can
           // never enter the proof-ready set.
+          const manualBody = sanitizeGeneratedBody([
+              `Scenario: ${scenario.title}`,
+              ...(scenario.steps && scenario.steps.length
+                ? ["Steps:", ...scenario.steps.map((st, n) => `  ${n + 1}. ${st}`)]
+                : []),
+              ...(scenario.test_data ? [`Test data: ${scenario.test_data}`] : []),
+              ...(scenario.assertion_targets.length ? [`Expected: ${scenario.assertion_targets.join("; ")}`] : []),
+              ...(scenario.rationale ? [`Why this test: ${scenario.rationale}`] : []),
+              "",
+              // Concise blocker: first clause only — the full remedy is one line.
+              `Blocked by: ${reason.split(" — ")[0]}`,
+              "Fix: install this repo's dependencies / configure the test runner, then re-run \`opro start\`."
+            ].join("\n"), gc.ctx.source_excerpts, "//").body;
           generated.push({
             id: `${run_id}-t${generated.length + 1}`,
             run_id,
             title: `${gc.ctx.behavior_title} — ${scenario.title}`,
             test_type: gc.ctx.test_layer,
             framework_hint: framework,
-            body: [
-              "MANUAL TEST (automated runnable test withheld in this environment):",
-              `Scenario: ${scenario.title}`,
-              ...(scenario.assertion_targets.length ? [`Verify: ${scenario.assertion_targets.join("; ")}`] : []),
-              ...(scenario.rationale ? [`Why: ${scenario.rationale}`] : []),
-              "",
-              `Runnable code withheld because: ${reason}`,
-              "Set up the environment (install dependencies / configure the test runner), then re-run `opro start` to generate runnable tests for this behavior."
-            ].join("\n"),
+            body: manualBody,
             bucket: bucketForV5Scenario(scenario),
             prompt_version: PROMPT_VERSION_V5,
             grounding: { entity_ids: gc.entityIds, source_refs: [], weak_relationships_used: [] },
