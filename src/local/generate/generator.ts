@@ -589,7 +589,7 @@ export function gatherContext(
     acceptance_criteria: acceptance,
     workflow_steps: workflow,
     framework,
-    test_layer: inferLayer(behavior, framework),
+    test_layer: inferLayer(behavior, framework, graph),
     code_context: dedupe(codeContext),
     source_excerpts: excerpts,
     weak_context: dedupe(weakContext),
@@ -643,13 +643,27 @@ function flowChainFor(graph: LocalGraph, behavior: GraphNode): FlowStep[] | unde
   });
 }
 
-function inferLayer(behavior: GraphNode, framework: string): TestLayer {
+function inferLayer(behavior: GraphNode, framework: string, graph?: LocalGraph): TestLayer {
   const fw = framework.toLowerCase();
   if (fw.includes("playwright") || fw.includes("cypress")) return "e2e";
   if (fw.includes("supertest")) return "api";
   if (fw.includes("testing-library")) return "component";
   const hint = String(behavior.properties.test_layer ?? "");
   if (hint) return hint as TestLayer;
+  // Graph-aware default (hop-count methodology): a behavior that an endpoint
+  // implements, or that participates in a multi-step call chain, is an
+  // INTEGRATION target — the code→flows→behaviors journey is the product;
+  // "unit" is only for genuinely 0-hop leaf functions. The old blanket
+  // "unit" default stamped every vitest/jest repo unit-first.
+  if (graph) {
+    const id = behavior.external_id;
+    const isEntryHandler = graph.edges.some((e) => e.relationship_type === "IMPLEMENTED_IN" && e.to_external_id === id);
+    if (isEntryHandler) return "integration";
+    const inChain =
+      graph.edges.some((e) => e.relationship_type === "CALLS" && (e.from_external_id === id || e.to_external_id === id)) ||
+      (graph.analysis?.flows?.flows ?? []).some((f) => f.entry_point.external_id === id || f.hops.some((h) => h.from === id || h.to === id));
+    if (inChain) return "integration";
+  }
   return "unit";
 }
 

@@ -185,6 +185,8 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .sm-crumb{display:flex;gap:8px;margin-bottom:12px}
 .sm-crumb-btn{appearance:none;background:var(--s2);border:1px solid var(--bd2);color:var(--ink2);font:600 11px var(--mono);padding:6px 11px;border-radius:7px;cursor:pointer}
 .sm-crumb-btn:hover{background:var(--s3);color:var(--ink)}
+.beh-empty{grid-column:1/-1;padding:22px;border:1px dashed var(--bd2);border-radius:10px;color:var(--muted);font-size:12.5px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+.beh-empty p{margin:0}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
 .risk-ep .v{color:var(--green);font-weight:700}
 .risk-tags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px}
@@ -511,6 +513,31 @@ const behSide=$("#beh-groups"),behGrid=$("#beh-grid");
 function renderBeh(){
   behGrid.innerHTML="";
   const rows=D.behaviors.filter(b=>(!activeGrp||b.group===activeGrp)&&(!activeTier||tierOf(b).cls===activeTier)&&(!searchQ||(b.sig+" "+b.file).toLowerCase().includes(searchQ)));
+  if(rows.length===0){
+    const parts=[];
+    if(searchQ)parts.push('search \u201c'+searchQ+'\u201d');
+    if(activeTier)parts.push('the selected evidence tier');
+    if(activeGrp)parts.push('package \u201c'+activeGrp+'\u201d');
+    const why=parts.length?parts.join(' + '):'the current filters';
+    const box=el("div","beh-empty",
+      '<p>No behaviors match '+esc(why)+'. Filters combine \u2014 clearing one usually brings results back.</p>');
+    if(searchQ){
+      const b1=el("button","sm-crumb-btn","\u2715 Clear search");
+      b1.onclick=function(){searchEl.value="";searchQ="";renderBeh();};
+      box.append(b1);
+    }
+    if(activeTier||activeGrp){
+      const b2=el("button","sm-crumb-btn","Show all behaviors");
+      b2.onclick=function(){
+        activeTier=null;activeGrp=null;
+        [...document.querySelectorAll("#tier-filter .grp,#beh-groups .grp")].forEach(x=>x.setAttribute("aria-pressed","false"));
+        renderBeh();
+      };
+      box.append(b2);
+    }
+    behGrid.append(box);
+    return;
+  }
   rows.forEach(b=>{
     const t=tierOf(b);
     const c=el("div","beh-card",
