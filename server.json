@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.orangeproai/orangepro",
+  "title": "OrangePro",
+  "description": "Find test gaps, generate grounded tests, and dynamically prove behavior with mutation testing.",
+  "repository": {
+    "url": "https://github.com/OrangeproAI/orangepro-mcp",
+    "source": "github"
+  },
+  "version": "0.2.5",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@orangepro/mcp-server",
+      "version": "0.2.5",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Run in MCP server mode (stdio transport)"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "OPENAI_API_KEY",
+          "description": "Optional OpenAI BYOK key for AI candidate links and test generation.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Optional Anthropic BYOK key for AI candidate links and test generation.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "OLLAMA_BASE_URL",
+          "description": "Optional Ollama endpoint for local AI candidate links and test generation.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
