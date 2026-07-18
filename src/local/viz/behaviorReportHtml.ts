@@ -266,9 +266,9 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 
 <nav class="tabs" role="tablist">
   <button class="tab" role="tab" aria-selected="true" data-tab="codebase">Your Code</button>
-  <button class="tab" role="tab" aria-selected="false" data-tab="behaviors">Behaviors <span class="tc" id="t-beh">—</span></button>
-  <button class="tab" role="tab" aria-selected="false" data-tab="flows">Flows <span class="tc" id="t-flow">—</span></button>
   <button class="tab" role="tab" aria-selected="false" data-tab="risks">Risks <span class="tc" id="t-risk">—</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="flows">Flows <span class="tc" id="t-flow">—</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="behaviors">Behaviors <span class="tc" id="t-beh">—</span></button>
 </nav>
 
 <!-- TAB 1: YOUR CODE — familiar territory -->
@@ -377,6 +377,13 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
   M.services.forEach(function(sv){
     var y=svcY[sv.id];
     var r=7+7*Math.sqrt(sv.flows/maxF);
+    if(sv.rest){
+      out+='<g><circle cx="'+svcX+'" cy="'+y+'" r="'+r.toFixed(1)+'" fill="none" stroke="var(--muted)" stroke-dasharray="4 3" stroke-width="1.3"/>'
+        +'<text class="sm-svc-lbl" x="'+(svcX+r+10)+'" y="'+(y+1)+'" fill="var(--muted)">'+sv.label+'</text>'
+        +'<text class="sm-sub" x="'+(svcX+r+10)+'" y="'+(y+13)+'">'+sv.flows+' flow'+(sv.flows===1?'':'s')+' below the cut</text>'
+        +'</g>';
+      return;
+    }
     var ring=sv.riskRanks.length?'<circle cx="'+svcX+'" cy="'+y+'" r="'+(r+3.5)+'" fill="none" stroke="var(--red)" stroke-width="'+(sv.critical?2.5:1.4)+'"'+(sv.critical?'':' stroke-dasharray="3 2"')+'/>':'';
     var label=sv.label.length>30?sv.label.slice(0,29)+"…":sv.label;
     var riskTxt=sv.riskRanks.length?(" · risk #"+sv.riskRanks[0]):"";
@@ -681,11 +688,11 @@ function riskCardHtml(r){
     // per-test chips whenever the generator produced unit tests.
     const allIntent=r.generatedTests.every(t=>t.runnable===false);
     const kinds=[...new Set(r.generatedTests.map(t=>t.concern).filter(Boolean))];
-    const kindLbl=allIntent?" (English intents — env setup needed)":kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
+    const kindLbl=allIntent?" (Manual tests — env setup needed)":kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
     testsHtml=\`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests\${esc(kindLbl)}</div>\`;
     r.generatedTests.forEach(t=>{
       const cBadge=t.concern?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(t.concern.replace('_',' '))}</span>\`:'';
-      const iBadge=t.runnable===false?\`<span class="badge b-cand" style="margin-left:6px;font-size:9px">English intent</span>\`:'';
+      const iBadge=t.runnable===false?\`<span class="badge b-cand" style="margin-left:6px;font-size:9px">Manual test</span>\`:'';
       const bBadge=t.bucket?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(String(t.bucket).replace(/_/g,' '))}</span>\`:'';
       testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}\${bBadge}\${iBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
     });

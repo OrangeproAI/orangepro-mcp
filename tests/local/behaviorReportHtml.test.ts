@@ -600,10 +600,10 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(row2).toBeTruthy();
     expect(row2!.generatedTests[0].runnable).toBe(false);
     expect(row2!.generatedTests[0].bucket).toBe("edge_case");
-    expect(row2!.generatedTests[0].assertion).not.toContain("English intent"); // badge carries the marker, once
+    expect(row2!.generatedTests[0].assertion).not.toContain("Manual test"); // badge carries the marker, once
     const intentHtml = renderBehaviorReport(intentOnly);
-    expect(intentHtml).toContain(">English intent<"); // the badge itself
+    expect(intentHtml).toContain(">Manual test<"); // the badge itself
     const html = renderBehaviorReport(intentOnly);
-    expect(html).toContain("English intents — env setup needed");
+    expect(html).toContain("Manual tests — env setup needed");
   });
 });

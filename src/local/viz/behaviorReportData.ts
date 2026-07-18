@@ -571,6 +571,9 @@ export interface SystemMapModel {
     tiers: { proven: number; assoc: number; candidate: number; none: number };
     riskRanks: number[];
     critical: boolean;
+    /** Aggregated "everything below the cut" node for one lane — keeps each
+     *  lane's drawn edges summing to its stated flow count. */
+    rest?: { services: number };
   }>;
   edges: Array<{ lane: string; service: string; flows: number }>;
 }
@@ -660,9 +663,38 @@ export function buildSystemMapModel(data: {
     for (const [l, n] of perLane) if (n > bestN) { best = l; bestN = n; }
     return ["graphql", "http", "job"].indexOf(best);
   };
-  const top = [...svcFlows.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, maxServices)
+  const byTraffic = [...svcFlows.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const chosen = new Set<string>();
+  // 1) Every lane is guaranteed its top 2 services — a lane with 56 flows must
+  //    never render edge-less just because its traffic is spread thin.
+  for (const laneId of ["graphql", "http", "job"]) {
+    let taken = 0;
+    for (const [svc] of byTraffic) {
+      if (taken >= 2) break;
+      if (laneRank(svc) === ["graphql", "http", "job"].indexOf(laneId) && !chosen.has(svc)) {
+        chosen.add(svc);
+        taken++;
+      }
+    }
+  }
+  // 2) Top-risk owners with real flow traffic join the map (up to 3) so the
+  //    red rings — the whole point of the overlay — survive full scale.
+  let riskAdds = 0;
+  for (const r of data.risks) {
+    if (riskAdds >= 3) break;
+    const owner = ownerOfSig(r.path);
+    if ((svcFlows.get(owner) ?? 0) > 0 && !chosen.has(owner)) {
+      chosen.add(owner);
+      riskAdds++;
+    }
+  }
+  // 3) Fill remaining slots by global traffic.
+  for (const [svc] of byTraffic) {
+    if (chosen.size >= maxServices + riskAdds) break;
+    chosen.add(svc);
+  }
+  const top = byTraffic
+    .filter(([svc]) => chosen.has(svc))
     // Group vertically under each service's dominant lane so edges flow in
     // bands instead of crossing the whole canvas.
     .sort((a, b) => laneRank(a[0]) - laneRank(b[0]) || b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -690,22 +722,55 @@ export function buildSystemMapModel(data: {
   }
 
   const laneOrder = ["graphql", "http", "job"];
+  // Conservation: edges drawn per lane must sum to the lane's stated count.
+  // Everything below the cut aggregates into one dashed "+N more services"
+  // node per lane — 51 job flows must never silently vanish.
+  const shownEdges = [...edgeFlows.entries()]
+    .map(([k, flows]) => ({ lane: k.split("\u0000")[0], service: k.split("\u0000")[1], flows }))
+    .filter((e) => topSet.has(e.service));
+  const shownPerLane = new Map<string, number>();
+  for (const e of shownEdges) shownPerLane.set(e.lane, (shownPerLane.get(e.lane) ?? 0) + e.flows);
+  const restNodes: SystemMapModel["services"] = [];
+  const restEdges: SystemMapModel["edges"] = [];
+  for (const laneId of laneOrder) {
+    const total = laneFlows.get(laneId) ?? 0;
+    const shown = shownPerLane.get(laneId) ?? 0;
+    if (total - shown <= 0) continue;
+    const hiddenSvcs = new Set<string>();
+    for (const [k, n] of edgeFlows) {
+      const [l, svc] = k.split("\u0000");
+      if (l === laneId && !topSet.has(svc) && n > 0) hiddenSvcs.add(svc);
+    }
+    const restId = "rest:" + laneId;
+    restNodes.push({
+      id: restId,
+      label: "+" + hiddenSvcs.size + " more services",
+      flows: total - shown,
+      tiers: { proven: 0, assoc: 0, candidate: 0, none: 0 },
+      riskRanks: [],
+      critical: false,
+      rest: { services: hiddenSvcs.size }
+    });
+    restEdges.push({ lane: laneId, service: restId, flows: total - shown });
+  }
   return {
     lanes: laneOrder
       .filter((id) => laneFlows.has(id))
       .map((id) => ({ id, label: id === "graphql" ? "GraphQL" : id === "http" ? "HTTP" : "Jobs", flows: laneFlows.get(id) ?? 0 })),
-    services: top.map(([label, flows]) => ({
-      id: label,
-      label,
-      flows,
-      tiers: tiersBySvc.get(label) ?? { proven: 0, assoc: 0, candidate: 0, none: 0 },
-      riskRanks: (riskBySvc.get(label)?.ranks ?? []).sort((a, b) => a - b),
-      critical: riskBySvc.get(label)?.critical ?? false
-    })),
-    edges: [...edgeFlows.entries()]
-      .map(([k, flows]) => ({ lane: k.split("\u0000")[0], service: k.split("\u0000")[1], flows }))
-      .filter((e) => topSet.has(e.service))
-      .sort((a, b) => a.lane.localeCompare(b.lane) || b.flows - a.flows || a.service.localeCompare(b.service))
+    services: [
+      ...top.map(([label, flows]) => ({
+        id: label,
+        label,
+        flows,
+        tiers: tiersBySvc.get(label) ?? { proven: 0, assoc: 0, candidate: 0, none: 0 },
+        riskRanks: (riskBySvc.get(label)?.ranks ?? []).sort((a, b) => a - b),
+        critical: riskBySvc.get(label)?.critical ?? false
+      })),
+      ...restNodes
+    ],
+    edges: [...shownEdges, ...restEdges].sort(
+      (a, b) => a.lane.localeCompare(b.lane) || b.flows - a.flows || a.service.localeCompare(b.service)
+    )
   };
 }
 
