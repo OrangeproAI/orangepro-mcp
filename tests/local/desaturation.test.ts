@@ -167,7 +167,11 @@ describe("enrichFromMarkdown — governance exclusions", () => {
       "CONTRIBUTING.md",
       "docs/CONTRIBUTING.md",
       "CHANGELOG.md",
-      ".changeset/pretty-otters.md"
+      ".changeset/pretty-otters.md",
+      "packages/create-twenty-app/src/constants/template/AGENTS.md",
+      "packages/create-twenty-app/src/constants/template/SETUP.md",
+      "AGENTS.md",
+      "CLAUDE.md"
     ]) {
       expect(enrichFromMarkdown(path, templateMd).nodes).toHaveLength(0);
     }

@@ -16,7 +16,7 @@ const MAX_REQUIREMENTS = 60;
  * report's top suggested next action. Product docs (README, docs/) still count.
  */
 const GOVERNANCE_MD_RE =
-  /(^|\/)\.github\/|(^|\/)(CONTRIBUTING|CODE_OF_CONDUCT|PULL_REQUEST_TEMPLATE|ISSUE_TEMPLATE|SECURITY|SUPPORT|CHANGELOG|LICENSE|GOVERNANCE|MAINTAINERS|CODEOWNERS|AUTHORS)[^\/]*$|(^|\/)\.changeset\//i;
+  /(^|\/)\.github\/|(^|\/)(CONTRIBUTING|CODE_OF_CONDUCT|PULL_REQUEST_TEMPLATE|ISSUE_TEMPLATE|SECURITY|SUPPORT|CHANGELOG|LICENSE|GOVERNANCE|MAINTAINERS|CODEOWNERS|AUTHORS)[^\/]*$|(^|\/)\.changeset\/|\/templates?\/|(^|\/)(AGENTS|CLAUDE|GEMINI|COPILOT)\.md$|(^|\/)\.cursor(rules)?\//i;
 
 /** Words that suggest a heading describes a requirement/feature behavior. */
 const REQUIREMENT_HINTS: ReadonlyArray<string> = [
