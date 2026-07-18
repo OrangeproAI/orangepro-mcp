@@ -1265,8 +1265,9 @@ export function opDoctor(root: string): DoctorResult {
  */
 export function opProofDoctor(root: string): ProofDoctorResult {
   const graph = loadGraph(workspacePaths(root).graphPath);
-  const rtm = buildRtm(graph, loadLedger(root));
-  return buildProofDoctor(graph, rtm, loadProofAttempts(root));
+  const ledger = loadLedger(root);
+  const rtm = buildRtm(graph, ledger);
+  return buildProofDoctor(graph, rtm, loadProofAttempts(root), {}, ledger);
 }
 
 export function opGaps(root: string, opts: { limit?: number; min_priority?: string } = {}): GapsResult {

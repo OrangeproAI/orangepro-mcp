@@ -192,3 +192,33 @@ describe("proof doctor — non-close diagnosis", () => {
     expect(nonKillingNoteFor(undefined)).toBe(NON_KILLING_NOTE);
   });
 });
+
+import { buildProofDoctor } from "../../src/local/proofDoctor.js";
+
+describe("proof doctor — legacy sidecar backfills mutant_status from the ledger", () => {
+  it("diagnoses non-assertion failure even when the sidecar predates the field", () => {
+    const generatedAt = "2026-07-18T01:00:00Z";
+    const graph = {
+      schema_version: "orangepro.local_graph.v1",
+      workspace: { name: "r", root: "", root_hash: "", source_upload_policy: "metadata_only" as const },
+      created_at: generatedAt, updated_at: generatedAt, sources: [],
+      nodes: [], edges: [], candidate_edges: [], generation_runs: [], generated_tests: [],
+      manifest: { generated_at: generatedAt, git: null, files: {} }
+    } as never;
+    const rtm = { summary: { proven: 3, total: 82 }, rows: [] } as never;
+    // Legacy sidecar: classification only — no mutant_status (pre-fix writer).
+    const attempts = {
+      schema_version: "orangepro.proof_attempts.v1", generated_at: generatedAt,
+      graph_generated_at: generatedAt, git_commit: null, git_dirty: null,
+      attempted: 5, proven: 3,
+      attempts: [{ target_symbol: "sym:src/x.ts#X.run", test_path: "src/x.test.ts", classification: "non_killing" as const, language: "typescript" }],
+      skipped: []
+    } as never;
+    // Ledger ground truth: the mutant FAILED, just not at an assertion.
+    const ledger = { records: [{ target_symbol: "sym:src/x.ts#X.run", ts: generatedAt, dynamic_proof: { mutant_status: "associated_non_assertion_failure" } }] };
+
+    const res = buildProofDoctor(graph, rtm, attempts, {}, ledger as never);
+    expect(res.non_killing[0]?.mutant_status).toBe("associated_non_assertion_failure");
+    expect(res.non_killing[0]?.note).toContain("made the test FAIL");
+  });
+});
