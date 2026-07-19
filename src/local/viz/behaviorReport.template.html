@@ -98,6 +98,10 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .beh-card:hover::before{opacity:1}
 .beh-card[data-t="proven"]{--gw:var(--gbg);border-color:rgba(63,185,80,.22)}
 .beh-card[data-t="proven"]:hover{border-color:var(--gbd)}
+.beh-card[data-t="candidate"]{--gw:rgba(163,113,247,.13)}
+.beh-card[data-t="candidate"]:hover{border-color:rgba(163,113,247,.38)}
+.beh-card[data-t="candidate"] .bc-bar{background:#a371f7}
+.b-cand{color:#a371f7;background:rgba(163,113,247,.13);border-color:rgba(163,113,247,.38)} .b-cand .d{background:#a371f7}
 .beh-card[data-t="assoc"]{--gw:var(--abg)}
 .beh-card[data-t="assoc"]:hover{border-color:var(--abd)}
 .beh-card[data-t="reach"]{--gw:var(--bbg)}
@@ -165,6 +169,25 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .risk-filter:hover{border-color:var(--bd2);color:var(--ink2)}
 .risk-filter[aria-pressed="true"]{border-color:var(--orange);background:var(--obg);color:var(--orange)}
 .risk-rank{font-size:10px;color:var(--orange);font-weight:700;margin-bottom:3px}
+.risk-ctx{font-size:12px;color:var(--ink3);line-height:1.5;margin:4px 0 6px}
+#sysmap svg{display:block;width:100%;height:auto}
+.sm-lane{fill:var(--s2);stroke:var(--bd2)}
+.sm-lane-lbl{font:600 11px var(--mono);fill:var(--ink2)}
+.sm-svc-lbl{font:600 10.5px var(--mono);fill:var(--ink2)}
+.sm-sub{font:9px var(--sans,sans-serif);fill:var(--muted)}
+.sm-edge{fill:none;opacity:.45}
+.sm-node{cursor:pointer}
+.sm-node:hover circle{stroke-width:2.5}
+.sm-crumb{display:flex;gap:8px;margin-bottom:12px}
+.sm-crumb-btn{appearance:none;background:var(--s2);border:1px solid var(--bd2);color:var(--ink2);font:600 11px var(--mono);padding:6px 11px;border-radius:7px;cursor:pointer}
+.sm-crumb-btn:hover{background:var(--s3);color:var(--ink)}
+.delta-wrap{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.delta-chip{font:600 11px var(--mono);padding:5px 10px;border-radius:999px;border:1px solid var(--bd2);background:var(--s2);color:var(--ink2)}
+.delta-chip.dc-up{border-color:var(--green);color:var(--green)}
+.delta-chip.dc-risk{border-color:var(--red);color:var(--red)}
+.delta-chip.dc-none{color:var(--muted)}
+.beh-empty{grid-column:1/-1;padding:22px;border:1px dashed var(--bd2);border-radius:10px;color:var(--muted);font-size:12.5px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+.beh-empty p{margin:0}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
 .risk-ep .v{color:var(--green);font-weight:700}
 .risk-tags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px}
@@ -207,9 +230,8 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .cat-strip-lbl{font-size:9.5px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
 .cat-pills{display:flex;flex-wrap:wrap;gap:5px}
 .cat-pill{font-size:10px;padding:3px 8px;border-radius:4px;font-weight:600;letter-spacing:.01em;display:inline-flex;align-items:center;gap:4px}
-.cat-pill.cp-shown{background:var(--gbg);border:1px solid var(--gbd);color:var(--green)}
-.cat-pill.cp-locked{background:transparent;border:1px dashed var(--bd2);color:var(--faint)}
-.cat-pill.cp-locked::after{content:"\1F512";font-size:8px}
+.cat-pill.cp-drafted{background:var(--obg);border:1px solid var(--obd);color:var(--orange)}
+.cat-pill.cp-open{background:transparent;border:1px dashed var(--bd2);color:var(--faint)}
 /* PAYWALL CTA */
 .paywall{background:linear-gradient(135deg,rgba(240,136,62,.08),rgba(240,136,62,.02));border:1px dashed var(--obd);border-radius:9px;padding:14px 16px;margin-top:14px;text-align:center}
 .paywall-num{font-size:18px;font-weight:750;color:var(--orange);font-variant-numeric:tabular-nums}
@@ -244,14 +266,19 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 
 <nav class="tabs" role="tablist">
   <button class="tab" role="tab" aria-selected="true" data-tab="codebase">Your Code</button>
-  <button class="tab" role="tab" aria-selected="false" data-tab="behaviors">Behaviors <span class="tc" id="t-beh">—</span></button>
-  <button class="tab" role="tab" aria-selected="false" data-tab="flows">Flows <span class="tc" id="t-flow">—</span></button>
   <button class="tab" role="tab" aria-selected="false" data-tab="risks">Risks <span class="tc" id="t-risk">—</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="flows">Flows <span class="tc" id="t-flow">—</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="behaviors">Behaviors <span class="tc" id="t-beh">—</span></button>
 </nav>
 
 <!-- TAB 1: YOUR CODE — familiar territory -->
 <section class="panel active" id="panel-codebase" role="tabpanel">
   <p class="bridge">We scanned your repo and found <b id="br-methods">—</b> public methods across <b id="br-services">—</b> services, with <b id="br-tests">—</b> test files. Here's what we're working with.</p>
+  <div id="delta-banner"></div>
+  <div class="card" id="sysmap-card" hidden>
+    <p class="card-lbl">Your system, as the graph sees it — entry lanes flowing into the services they reach. Node size = flow traffic; color = dominant evidence tier; red ring = top-20 risk. Identical on every run.</p>
+    <div id="sysmap"></div>
+  </div>
   <div class="cols2">
     <div class="card">
       <p class="card-lbl">Framework</p>
@@ -288,6 +315,7 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 <!-- TAB 3: FLOWS — bridge from "methods" to "user journeys" -->
 <section class="panel" id="panel-flows" role="tabpanel">
   <p class="bridge">A <b>flow</b> is the sequence of methods that execute when a real request hits your system. Each box is a method you already saw in the Behaviors tab — but here they're connected as a call chain. Solid lines = hard-coded calls. Dashed = framework-derived. <span style="color:var(--green)">Green boxes</span> pulse because a test proves they break if mutated.</p>
+  <p class="bridge" id="flow-cap-note" style="font-size:12px;opacity:.75"></p>
   <div id="flow-list"></div>
   <div class="ai-sec" id="ai-sec" hidden>
     <div class="ai-lbl">AI-suggested flows — plausible paths, not proven. Dashed borders = unverified.</div>
@@ -297,7 +325,8 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 
 <!-- TAB 4: RISKS — actionable -->
 <section class="panel" id="panel-risks" role="tabpanel">
-  <p class="bridge">These are the flows with the highest blast radius and the weakest test coverage. Each one tells you exactly what to do next.</p>
+  <p class="bridge">These are the flows with the highest blast radius and the weakest test coverage, <b>sorted highest risk first</b>. Each one tells you exactly what to do next.</p>
+  <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
   <div class="risk-tools" id="risk-tools"></div>
   <div id="risk-list"></div>
 </section>
@@ -316,6 +345,123 @@ window.DATA={"repo":"hono","scanned":"2026-07-04","framework":"vitest","summary"
 
 (function(){
 const D=window.DATA,$=(s)=>document.querySelector(s);
+
+
+// ── Delta since last run (display-only; baseline written each run) ──
+(function(){
+  var el2=document.getElementById("delta-banner");
+  var d=D.delta;
+  if(!el2||d===undefined)return;
+  if(d===null){el2.innerHTML='';return;} // first run — baseline just recorded, nothing to compare
+  var when=new Date(d.baselineTs);
+  var ago=isNaN(when.getTime())?"last run":when.toLocaleString();
+  if(!d.changed){
+    el2.innerHTML='<div class="delta-wrap"><span class="delta-chip dc-none">No changes since last run ('+ago+') — identical graph, identical ranking</span></div>';
+    return;
+  }
+  var chips=[];
+  function chip(txt,cls){chips.push('<span class="delta-chip '+(cls||'')+'">'+txt+'</span>');}
+  chip('Since '+ago+':','dc-none');
+  if(d.totalDelta)chip((d.totalDelta>0?'+':'')+d.totalDelta+' behaviors');
+  if(d.provenDelta)chip((d.provenDelta>0?'+':'')+d.provenDelta+' proven',d.provenDelta>0?'dc-up':'dc-risk');
+  if(d.associatedDelta)chip((d.associatedDelta>0?'+':'')+d.associatedDelta+' test signal');
+  if(d.generatedDelta)chip((d.generatedDelta>0?'+':'')+d.generatedDelta+' generated tests',d.generatedDelta>0?'dc-up':'');
+  d.newRisks.slice(0,3).forEach(function(p){chip('new in top-20: '+p.slice(0,40),'dc-risk');});
+  if(d.newRisks.length>3)chip('+'+(d.newRisks.length-3)+' more new risks','dc-risk');
+  d.droppedRisks.slice(0,2).forEach(function(p){chip('left top-20: '+p.slice(0,40),'dc-up');});
+  el2.innerHTML='<div class="delta-wrap">'+chips.join('')+'</div>';
+})();
+// ── System map: deterministic hero drawn from D.mapModel ──
+(function(){
+  var M=D.mapModel;
+  if(!M||!M.lanes||!M.lanes.length||!M.services.length)return;
+  document.getElementById("sysmap-card").hidden=false;
+  var W=760,rowH=44,laneW=118,svcX=470,padT=18;
+  var H=padT*2+Math.max(M.lanes.length,M.services.length)*rowH;
+  var laneY={},svcY={};
+  M.lanes.forEach(function(l,i){laneY[l.id]=padT+i*rowH+(H-2*padT-M.lanes.length*rowH)/2+rowH/2;});
+  M.services.forEach(function(sv,i){svcY[sv.id]=padT+i*rowH+rowH/2;});
+  var laneColor={graphql:"var(--purple,#a78bfa)",http:"var(--blue)",job:"var(--orange)"};
+  var tierColor=function(t){var tot=t.proven+t.assoc+t.candidate+t.none||1;
+    if(t.proven/tot>=0.5)return "var(--green)";
+    if((t.proven+t.assoc)/tot>=0.5)return "var(--blue)";
+    if(t.none/tot>=0.5)return "var(--red)";
+    return "var(--purple,#a78bfa)";};
+  var maxF=M.services[0].flows||1;
+  var out='<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="System map">';
+  M.edges.forEach(function(e){
+    var y1=laneY[e.lane],y2=svcY[e.service];if(y1==null||y2==null)return;
+    var w=1+3*Math.log(1+e.flows)/Math.log(1+maxF);
+    out+='<path class="sm-edge" d="M '+(laneW+8)+' '+y1+' C '+(laneW+150)+' '+y1+', '+(svcX-150)+' '+y2+', '+(svcX-14)+' '+y2+'" stroke="'+(laneColor[e.lane]||"var(--muted)")+'" stroke-width="'+w.toFixed(1)+'"/>';
+  });
+  M.lanes.forEach(function(l){
+    var y=laneY[l.id];
+    out+='<rect class="sm-lane" x="4" y="'+(y-15)+'" width="'+laneW+'" height="30" rx="7"/>';
+    out+='<text class="sm-lane-lbl" x="14" y="'+(y-1)+'">'+l.label+'</text>';
+    out+='<text class="sm-sub" x="14" y="'+(y+11)+'">'+l.flows+' flow'+(l.flows===1?'':'s')+'</text>';
+  });
+  M.services.forEach(function(sv){
+    var y=svcY[sv.id];
+    var r=7+7*Math.sqrt(sv.flows/maxF);
+    if(sv.rest){
+      out+='<g><circle cx="'+svcX+'" cy="'+y+'" r="'+r.toFixed(1)+'" fill="none" stroke="var(--muted)" stroke-dasharray="4 3" stroke-width="1.3"/>'
+        +'<text class="sm-svc-lbl" x="'+(svcX+r+10)+'" y="'+(y+1)+'" fill="var(--muted)">'+sv.label+'</text>'
+        +'<text class="sm-sub" x="'+(svcX+r+10)+'" y="'+(y+13)+'">'+sv.flows+' flow'+(sv.flows===1?'':'s')+' below the cut</text>'
+        +'</g>';
+      return;
+    }
+    var ring=sv.riskRanks.length?'<circle cx="'+svcX+'" cy="'+y+'" r="'+(r+3.5)+'" fill="none" stroke="var(--red)" stroke-width="'+(sv.critical?2.5:1.4)+'"'+(sv.critical?'':' stroke-dasharray="3 2"')+'/>':'';
+    var label=sv.label.length>30?sv.label.slice(0,29)+"…":sv.label;
+    var riskTxt=sv.riskRanks.length?(" · risk #"+sv.riskRanks[0]):"";
+    out+='<g class="sm-node" data-svc="'+sv.label.replace(/"/g,"&quot;")+'">'+ring
+      +'<circle cx="'+svcX+'" cy="'+y+'" r="'+r.toFixed(1)+'" fill="'+tierColor(sv.tiers)+'" fill-opacity=".85" stroke="var(--bd2)"/>'
+      +'<text class="sm-svc-lbl" x="'+(svcX+r+10)+'" y="'+(y+1)+'">'+label+'</text>'
+      +'<text class="sm-sub" x="'+(svcX+r+10)+'" y="'+(y+13)+'">'+sv.flows+' flow'+(sv.flows===1?'':'s')+riskTxt+'</text>'
+      +'</g>';
+  });
+  out+='</svg>';
+  document.getElementById("sysmap").innerHTML=out;
+  document.getElementById("sysmap").addEventListener("click",function(ev){
+    var g=ev.target.closest?ev.target.closest(".sm-node"):null;
+    if(!g)return;
+    var svc=g.getAttribute("data-svc");
+    var search=document.getElementById("beh-search");
+    var tab=document.querySelector('[data-tab="behaviors"]');
+    if(tab)tab.click();
+    if(search){search.value=svc;search.dispatchEvent(new Event("input"));}
+    // Breadcrumb back to the map — tab-switching under the user with no
+    // visible return path is a trap; refresh must never be the escape hatch.
+    var bc=document.getElementById("sm-breadcrumb");
+    if(!bc){
+      bc=document.createElement("div");
+      bc.id="sm-breadcrumb";
+      bc.className="sm-crumb";
+      var panel=document.getElementById("panel-behaviors");
+      panel.insertBefore(bc,panel.firstChild);
+    }
+    bc.innerHTML='';
+    var backBtn=document.createElement("button");
+    backBtn.className="sm-crumb-btn";
+    backBtn.textContent="← Back to system map";
+    backBtn.addEventListener("click",function(){
+      if(search){search.value="";search.dispatchEvent(new Event("input"));}
+      bc.remove();
+      var home=document.querySelector('[data-tab="codebase"]');
+      if(home)home.click();
+      window.scrollTo({top:0});
+    });
+    var clearBtn=document.createElement("button");
+    clearBtn.className="sm-crumb-btn";
+    clearBtn.textContent="✕ Clear filter “"+svc+"”";
+    clearBtn.addEventListener("click",function(){
+      if(search){search.value="";search.dispatchEvent(new Event("input"));}
+      bc.remove();
+    });
+    bc.appendChild(backBtn);
+    bc.appendChild(clearBtn);
+    window.scrollTo({top:0});
+  });
+})();
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
 const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
 const S=D.summary;
@@ -340,7 +486,8 @@ $("#t-risk").textContent=D.risks.length;
 [
   {lbl:"Methods found",num:S.total,sub:"public, with observable outcome",t:"total"},
   {lbl:"Dynamically Proven",num:S.proven,sub:"test breaks if you change it",t:"proven"},
-  {lbl:"Test signal",num:S.associated,sub:"test touches it, no proof",t:"signal"},
+  {lbl:"Test signal",num:S.associated,sub:"hard static test link, no proof",t:"signal"},
+  {lbl:"Candidate",num:S.candidate??0,sub:"lexical match only — unconfirmed",t:"cand"},
   {lbl:"Reachable",num:S.reachableUntested,sub:"called but untested",t:"reach"},
   {lbl:"No signal",num:S.noSignal,sub:"nothing touches it",t:"nosig"},
 ].forEach(k=>{
@@ -356,14 +503,39 @@ $("#test-int").textContent=D.scan.tests.integration;
 $("#test-unit").textContent=D.scan.tests.unit;
 
 // behaviors
+function humanizeSig(sig){
+  const m=String(sig||"");
+  const method=m.includes(".")?m.slice(m.lastIndexOf(".")+1):m;
+  const owner=m.includes(".")?m.slice(0,m.lastIndexOf(".")):"";
+  const words=method.replace(/[_$]/g," ").replace(/([a-z0-9])([A-Z])/g,"$1 $2").toLowerCase().trim();
+  return {words:words||m, owner};
+}
+function describeBehavior(b){
+  const h=humanizeSig(b.sig);
+  const mod=(b.file||"").split("/").slice(0,-1).slice(-2).join("/")||b.group||"";
+  const reach=[];
+  for(const f of D.flows){
+    if(!f.trigger)continue;
+    if((f.steps||[]).some(st=>st.sig===b.sig)||f.title===b.sig){reach.push(f.trigger.verb+" "+f.trigger.path);if(reach.length>=2)break;}
+  }
+  const tierTxt=b.tier==="proven"?"Its behavior is dynamically proven: a test fails when this code is mutated."
+    :b.tier==="assoc"?"A real test imports and calls it, but no mutation proof exists yet."
+    :b.tier==="candidate"?"Only a lexically similar test file was found — an unconfirmed lead, not evidence."
+    :"No test signal of any kind was found for it.";
+  const s1="“"+h.words+"”"+(h.owner?" on "+h.owner:"")+" — a behavior in "+(mod||"this repo")+".";
+  const s2=reach.length?"A user or system reaches it via "+reach.join(" and ")+(reach.length>=2?" (and possibly more)":"")+".":(b.reachable?"It appears inside at least one statically traced call chain.":"No entry-anchored call chain reaches it in the static flow set.");
+  return s1+" "+s2+" "+tierTxt;
+}
 function tierOf(b){
   if(b.tier==="proven")return{cls:"proven",badge:"b-proven",label:"Dynamically Proven",ax:"ax-proven"};
   if(b.tier==="assoc")return{cls:"assoc",badge:"b-signal",label:"Test signal",ax:"ax-signal"};
+  if(b.tier==="candidate")return{cls:"candidate",badge:"b-cand",label:"Candidate",ax:"ax-signal"};
   if(b.tier==="none"&&b.reachable)return{cls:"reach",badge:"b-reach",label:"Reachable",ax:"ax-reach"};
   return{cls:"nosig",badge:"b-nosig",label:"No signal",ax:"ax-nosig"};
 }
 function ctaOf(b){
   if(b.tier==="proven")return"This method is Dynamically Proven. A test breaks if you mutate it. Keep it green.";
+  if(b.tier==="candidate")return"A test file is lexically similar to this behavior, but no import or call links them. Treat as untested until confirmed — run <code>npx -y @orangepro/orangepro-mcp start</code> to confirm or prove.";
   if(b.tier==="assoc")return"A test calls this method, but doesn't prove breakage. Run <code>npx -y @orangepro/orangepro-mcp start</code> to attempt dynamic proof.";
   if(b.tier==="none"&&b.reachable)return"This method is reachable from a tested path but has no direct test. Write one.";
   return"Nothing in your test suite touches this method. Write a test that calls it and asserts the output.";
@@ -374,6 +546,31 @@ const behSide=$("#beh-groups"),behGrid=$("#beh-grid");
 function renderBeh(){
   behGrid.innerHTML="";
   const rows=D.behaviors.filter(b=>(!activeGrp||b.group===activeGrp)&&(!activeTier||tierOf(b).cls===activeTier)&&(!searchQ||(b.sig+" "+b.file).toLowerCase().includes(searchQ)));
+  if(rows.length===0){
+    const parts=[];
+    if(searchQ)parts.push('search “'+searchQ+'”');
+    if(activeTier)parts.push('the selected evidence tier');
+    if(activeGrp)parts.push('package “'+activeGrp+'”');
+    const why=parts.length?parts.join(' + '):'the current filters';
+    const box=el("div","beh-empty",
+      '<p>No behaviors match '+esc(why)+'. Filters combine — clearing one usually brings results back.</p>');
+    if(searchQ){
+      const b1=el("button","sm-crumb-btn","✕ Clear search");
+      b1.onclick=function(){searchEl.value="";searchQ="";renderBeh();};
+      box.append(b1);
+    }
+    if(activeTier||activeGrp){
+      const b2=el("button","sm-crumb-btn","Show all behaviors");
+      b2.onclick=function(){
+        activeTier=null;activeGrp=null;
+        [...document.querySelectorAll("#tier-filter .grp,#beh-groups .grp")].forEach(x=>x.setAttribute("aria-pressed","false"));
+        renderBeh();
+      };
+      box.append(b2);
+    }
+    behGrid.append(box);
+    return;
+  }
   rows.forEach(b=>{
     const t=tierOf(b);
     const c=el("div","beh-card",
@@ -389,7 +586,7 @@ const searchEl=$("#beh-search");
 searchEl.addEventListener("input",()=>{searchQ=searchEl.value.trim().toLowerCase();renderBeh();});
 // evidence-tier filter (Dynamically Proven first) so users can jump straight to a tier
 const tierWrap=$("#tier-filter");
-[["proven","Dynamically Proven"],["assoc","Test signal"],["reach","Reachable"],["nosig","No signal"]].forEach(([cls,label])=>{
+[["proven","Dynamically Proven"],["assoc","Test signal"],["candidate","Candidate"],["reach","Reachable"],["nosig","No signal"]].forEach(([cls,label])=>{
   const n=D.behaviors.filter(b=>tierOf(b).cls===cls).length;
   const btn=el("button","grp",`<span>${label}</span><span class="gc">${n}</span>`);
   btn.setAttribute("aria-pressed","false");
@@ -417,7 +614,9 @@ const drill=$("#drill"),dc=$("#drill-content");
 function showDrill(i){
   const b=D.behaviors[i];if(!b)return;
   const t=tierOf(b);
+  const bDesc=describeBehavior(b);
   dc.innerHTML=`<h2 class="drill-title">${esc(b.sig)}</h2>
+    <div class="drill-row"><h4>In English</h4><p>${esc(bDesc)}</p></div>
     <div class="drill-row"><h4>Evidence</h4><span class="badge ${t.badge}"><span class="d"></span>${t.label}</span></div>
     <div class="drill-row"><h4>File</h4><p class="mono">${esc(b.file)}</p></div>
     <div class="drill-row"><h4>What to do</h4><div class="abox ${t.ax}">${ctaOf(b)}</div></div>`;
@@ -471,6 +670,11 @@ if(cf&&cf.flows.length){
 
 // risks + generated test samples
 const riskList=$("#risk-list"),riskTools=$("#risk-tools");
+if(D.viewMeta){
+  const rm=D.viewMeta.risks,fm=D.viewMeta.flows;
+  if(rm&&rm.scored>rm.shown)$("#risk-cap-note").textContent="Showing the top "+rm.shown+" of "+rm.scored.toLocaleString()+" scored behaviors — every behavior is scored; only the highest-risk are surfaced here. Full ranking: opro gaps --limit N, or .orangepro/graph.json.";
+  if(fm&&fm.shown>0&&fm.prunedByCaps>0)$("#flow-cap-note").textContent="Showing "+fm.shown.toLocaleString()+" flows, endpoint-anchored first. "+fm.prunedByCaps.toLocaleString()+" additional branch expansions were pruned by depth/branch/global rendering caps — pruning affects display only, not scoring.";
+}
 const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
 let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){
@@ -492,27 +696,38 @@ function riskCardHtml(r){
   // category strip: show which concern categories apply to this flow
   let catHtml='';
   if(r.applicableCategories&&r.applicableCategories.length){
-    const shownConcerns=new Set((r.generatedTests||[]).map(t=>t.concern).filter(Boolean));
+    const draftedConcerns=new Set(r.generatedCategories||[]);
     const pills=r.applicableCategories.map(c=>{
-      const shown=shownConcerns.has(c);
+      const drafted=draftedConcerns.has(c);
       const label=c.replace(/_/g,' ');
-      return `<span class="cat-pill ${shown?'cp-shown':'cp-locked'}">${esc(label)}</span>`;
+      const hint=drafted?'Generated draft attached; not coverage or proof':'Applicable category without a generated draft';
+      return `<span class="cat-pill ${drafted?'cp-drafted':'cp-open'}" title="${hint}">${esc(label)}</span>`;
     }).join('');
-    const shownN=r.applicableCategories.filter(c=>shownConcerns.has(c)).length;
+    const shownN=r.applicableCategories.filter(c=>draftedConcerns.has(c)).length;
     const totalN=r.applicableCategories.length;
-    catHtml=`<div class="cat-strip"><div class="cat-strip-lbl">Testing categories for this flow (${shownN} of ${totalN} shown)</div><div class="cat-pills">${pills}</div></div>`;
+    catHtml=`<div class="cat-strip"><div class="cat-strip-lbl">Generated drafts: ${shownN} of ${totalN} applicable testing categories</div><div class="cat-pills">${pills}</div></div>`;
   }
   let testsHtml='';
   if(r.generatedTests&&r.generatedTests.length){
-    testsHtml=`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests (integration)</div>`;
+    // Honest header: derive the kind from the attached tests themselves —
+    // single-function targets legitimately get UNIT tests (0-hop per the
+    // methodology's hop table); hardcoding "(integration)" contradicted the
+    // per-test chips whenever the generator produced unit tests.
+    const allIntent=r.generatedTests.every(t=>t.runnable===false);
+    const kinds=[...new Set(r.generatedTests.map(t=>t.concern).filter(Boolean))];
+    const kindLbl=allIntent?" (Manual tests — env setup needed)":kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
+    testsHtml=`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests${esc(kindLbl)}</div>`;
     r.generatedTests.forEach(t=>{
       const cBadge=t.concern?`<span class="badge b-info" style="margin-left:6px;font-size:9px">${esc(t.concern.replace('_',' '))}</span>`:'';
-      testsHtml+=`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">${esc(t.name)}${cBadge}</span><span class="gen-test-assert">${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">${esc(t.code)}</div></div>`;
+      const iBadge=t.runnable===false?`<span class="badge b-cand" style="margin-left:6px;font-size:9px">Manual test</span>`:'';
+      const bBadge=t.bucket?`<span class="badge b-info" style="margin-left:6px;font-size:9px">${esc(String(t.bucket).replace(/_/g,' '))}</span>`:'';
+      testsHtml+=`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">${esc(t.name)}${cBadge}${bBadge}${iBadge}</span><span class="gen-test-assert">${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">${esc(t.code)}</div></div>`;
     });
     testsHtml+=`</div>`;
   }
+  const ctxHtml=r.context?`<div class="risk-ctx">${esc(r.context)}</div>`:'';
   return `<div class="risk-rank">#${r.rank}</div>
-     <div class="risk-ep"><span class="v">${esc(r.verb)}</span> ${esc(r.path)}</div>
+     <div class="risk-ep"><span class="v">${esc(r.verb)}</span> ${esc(r.path)}</div>${ctxHtml}
      <div class="risk-tags">${tags}</div>
      <div class="todo">${esc(r.todo)}</div>${testsHtml}${catHtml}`;
 }

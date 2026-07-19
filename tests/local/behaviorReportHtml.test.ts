@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { renderBehaviorReport } from "../../src/local/viz/behaviorReportHtml.js";
 import { buildBehaviorReportData, type DynamicProofReportInput } from "../../src/local/viz/behaviorReportData.js";
@@ -8,6 +12,17 @@ import { LEDGER_SCHEMA_VERSION, targetFingerprint, type Ledger } from "../../src
 
 const EMPTY_LEDGER: Ledger = { schema_version: LEDGER_SCHEMA_VERSION, records: [] };
 const provenance = { source_scope_id: "repo", source_ref: "src/orders.controller.ts", detector: "test" };
+
+it("keeps the checked-in renderer byte-identical to its HTML template", () => {
+  const dir = mkdtempSync(join(tmpdir(), "opro-behavior-renderer-"));
+  const output = join(dir, "behaviorReportHtml.ts");
+  try {
+    execFileSync(process.execPath, [resolve("scripts/gen-behavior-report-renderer.mjs"), output], { stdio: "pipe" });
+    expect(readFileSync(output)).toEqual(readFileSync(resolve("src/local/viz/behaviorReportHtml.ts")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function codeSymbol(id: string, title: string, file: string): ReturnType<typeof makeNode> {
   return makeNode({
@@ -452,9 +467,9 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     for (const r of data.risks) {
       expect(r.generatedTests).toEqual([]);
       // Applicable categories derive from graph facts even with zero tests;
-      // covered stays empty, so every pill renders locked (capability, not claim).
+      // generated stays empty, so every pill remains an unfilled opportunity.
       expect(r.applicableCategories).toContain("contract");
-      expect(r.coveredCategories).toEqual([]);
+      expect(r.generatedCategories).toEqual([]);
     }
     expect(data.generatedTotal).toBe(0);
     expect(data.shownCount).toBe(0);
@@ -506,7 +521,7 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(html).not.toContain("0 more tests generated");
     // Category strip shows only the real attached concerns — nothing locked/fabricated.
     expect(withTests!.applicableCategories).toContain("contract"); // derived, not attached-echo
-    expect(withTests!.coveredCategories).toEqual(["integration_flow"]); // integration-layer test covers the category even without a bucket
+    expect(withTests!.generatedCategories).toEqual(["integration_flow"]); // draft target, never a coverage claim
   });
 
   it("attaches a same-file generated test to exactly ONE deterministic row, labeled 'same-file target'", () => {
@@ -604,14 +619,17 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(row2).toBeTruthy();
     expect(row2!.generatedTests[0].runnable).toBe(false);
     expect(row2!.generatedTests[0].bucket).toBe("edge_case");
+    expect(row2!.generatedCategories).toEqual(expect.arrayContaining(["boundary_limits", "integration_flow"]));
     expect(row2!.generatedTests[0].assertion).not.toContain("Manual test"); // badge carries the marker, once
     const intentHtml = renderBehaviorReport(intentOnly);
     expect(intentHtml).toContain(">Manual test<"); // the badge itself
+    expect(intentHtml).toContain("Generated draft attached; not coverage or proof");
+    expect(intentHtml).not.toContain("covered)");
     const html = renderBehaviorReport(intentOnly);
     expect(html).toContain("Manual tests — env setup needed");
   });
 
-  it("category strip: applicable derived from graph facts; uncovered categories render locked", () => {
+  it("category strip distinguishes generated drafts from unfilled applicable categories", () => {
     const g = graph();
     const sym = g.nodes.find((n) => n.kind === "CodeSymbol" && (n.title || "").length > 0);
     g.generated_tests = [{
@@ -626,10 +644,13 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     const data = buildBehaviorReportData(g, provenLedger(g), { repoRoot: "/tmp/orders-api" });
     const row = data.risks.find((r) => r.generatedTests.length > 0)!;
     expect(row.applicableCategories).toContain("contract");            // always applicable
-    expect(row.applicableCategories.length).toBeGreaterThan(row.coveredCategories.length); // something to unlock
-    expect(row.coveredCategories).toContain("boundary_limits");        // edge_case bucket → boundary_limits
-    expect(row.coveredCategories).toContain("integration_flow");       // integration-layer test covers the category
+    expect(row.applicableCategories.length).toBeGreaterThan(row.generatedCategories.length); // an applicable category remains undrafted
+    expect(row.generatedCategories).toContain("boundary_limits");      // edge_case bucket → boundary_limits
+    expect(row.generatedCategories).toContain("integration_flow");     // integration-layer draft targets the category
     const html = renderBehaviorReport(data);
-    expect(html).toContain("cp-locked");                               // lock pills render again
+    expect(html).toContain("cp-open");                                 // unfilled applicable pills render
+    expect(html).toContain("Generated drafts:");
+    expect(html).toContain("not coverage or proof");
+    expect(html).not.toContain("covered)");
   });
 });

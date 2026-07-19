@@ -88,6 +88,16 @@ describe("enumerateFlows", () => {
     expect(result.flows.map((f) => f.terminal).sort()).toEqual(["B", "C"]);
   });
 
+  it("keeps more than five branches per entry by default", () => {
+    const leaves = ["B", "C", "D", "E", "F", "G"];
+    const result = enumerateFlows(
+      graph([symbol("A", true), ...leaves.map((id) => symbol(id))], leaves.map((id) => call("A", id)))
+    );
+    expect(result.total_flows).toBe(6);
+    expect(result.dropped.max_flows_per_entry).toBe(0);
+    expect(result.options.max_flows_per_entry).toBe(20);
+  });
+
   it("terminates cycles without repeating nodes", () => {
     const result = enumerateFlows(graph([symbol("A", true), symbol("B")], [call("A", "B"), call("B", "A")]));
     expect(result.total_flows).toBe(1);

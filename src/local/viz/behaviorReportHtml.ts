@@ -234,9 +234,8 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .cat-strip-lbl{font-size:9.5px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
 .cat-pills{display:flex;flex-wrap:wrap;gap:5px}
 .cat-pill{font-size:10px;padding:3px 8px;border-radius:4px;font-weight:600;letter-spacing:.01em;display:inline-flex;align-items:center;gap:4px}
-.cat-pill.cp-shown{background:var(--gbg);border:1px solid var(--gbd);color:var(--green)}
-.cat-pill.cp-locked{background:transparent;border:1px dashed var(--bd2);color:var(--faint)}
-.cat-pill.cp-locked::after{content:"\\1F512";font-size:8px}
+.cat-pill.cp-drafted{background:var(--obg);border:1px solid var(--obd);color:var(--orange)}
+.cat-pill.cp-open{background:transparent;border:1px dashed var(--bd2);color:var(--faint)}
 /* PAYWALL CTA */
 .paywall{background:linear-gradient(135deg,rgba(240,136,62,.08),rgba(240,136,62,.02));border:1px dashed var(--obd);border-radius:9px;padding:14px 16px;margin-top:14px;text-align:center}
 .paywall-num{font-size:18px;font-weight:750;color:var(--orange);font-variant-numeric:tabular-nums}
@@ -447,7 +446,7 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
     bc.innerHTML='';
     var backBtn=document.createElement("button");
     backBtn.className="sm-crumb-btn";
-    backBtn.textContent="\u2190 Back to system map";
+    backBtn.textContent="← Back to system map";
     backBtn.addEventListener("click",function(){
       if(search){search.value="";search.dispatchEvent(new Event("input"));}
       bc.remove();
@@ -457,7 +456,7 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
     });
     var clearBtn=document.createElement("button");
     clearBtn.className="sm-crumb-btn";
-    clearBtn.textContent="\u2715 Clear filter \u201c"+svc+"\u201d";
+    clearBtn.textContent="✕ Clear filter “"+svc+"”";
     clearBtn.addEventListener("click",function(){
       if(search){search.value="";search.dispatchEvent(new Event("input"));}
       bc.remove();
@@ -527,7 +526,7 @@ function describeBehavior(b){
     :b.tier==="assoc"?"A real test imports and calls it, but no mutation proof exists yet."
     :b.tier==="candidate"?"Only a lexically similar test file was found — an unconfirmed lead, not evidence."
     :"No test signal of any kind was found for it.";
-  const s1="\u201c"+h.words+"\u201d"+(h.owner?" on "+h.owner:"")+" — a behavior in "+(mod||"this repo")+".";
+  const s1="“"+h.words+"”"+(h.owner?" on "+h.owner:"")+" — a behavior in "+(mod||"this repo")+".";
   const s2=reach.length?"A user or system reaches it via "+reach.join(" and ")+(reach.length>=2?" (and possibly more)":"")+".":(b.reachable?"It appears inside at least one statically traced call chain.":"No entry-anchored call chain reaches it in the static flow set.");
   return s1+" "+s2+" "+tierTxt;
 }
@@ -553,14 +552,14 @@ function renderBeh(){
   const rows=D.behaviors.filter(b=>(!activeGrp||b.group===activeGrp)&&(!activeTier||tierOf(b).cls===activeTier)&&(!searchQ||(b.sig+" "+b.file).toLowerCase().includes(searchQ)));
   if(rows.length===0){
     const parts=[];
-    if(searchQ)parts.push('search \u201c'+searchQ+'\u201d');
+    if(searchQ)parts.push('search “'+searchQ+'”');
     if(activeTier)parts.push('the selected evidence tier');
-    if(activeGrp)parts.push('package \u201c'+activeGrp+'\u201d');
+    if(activeGrp)parts.push('package “'+activeGrp+'”');
     const why=parts.length?parts.join(' + '):'the current filters';
     const box=el("div","beh-empty",
-      '<p>No behaviors match '+esc(why)+'. Filters combine \u2014 clearing one usually brings results back.</p>');
+      '<p>No behaviors match '+esc(why)+'. Filters combine — clearing one usually brings results back.</p>');
     if(searchQ){
-      const b1=el("button","sm-crumb-btn","\u2715 Clear search");
+      const b1=el("button","sm-crumb-btn","✕ Clear search");
       b1.onclick=function(){searchEl.value="";searchQ="";renderBeh();};
       box.append(b1);
     }
@@ -701,15 +700,16 @@ function riskCardHtml(r){
   // category strip: show which concern categories apply to this flow
   let catHtml='';
   if(r.applicableCategories&&r.applicableCategories.length){
-    const shownConcerns=new Set(r.coveredCategories||[]);
+    const draftedConcerns=new Set(r.generatedCategories||[]);
     const pills=r.applicableCategories.map(c=>{
-      const shown=shownConcerns.has(c);
+      const drafted=draftedConcerns.has(c);
       const label=c.replace(/_/g,' ');
-      return \`<span class="cat-pill \${shown?'cp-shown':'cp-locked'}">\${esc(label)}</span>\`;
+      const hint=drafted?'Generated draft attached; not coverage or proof':'Applicable category without a generated draft';
+      return \`<span class="cat-pill \${drafted?'cp-drafted':'cp-open'}" title="\${hint}">\${esc(label)}</span>\`;
     }).join('');
-    const shownN=r.applicableCategories.filter(c=>shownConcerns.has(c)).length;
+    const shownN=r.applicableCategories.filter(c=>draftedConcerns.has(c)).length;
     const totalN=r.applicableCategories.length;
-    catHtml=\`<div class="cat-strip"><div class="cat-strip-lbl">Applicable testing categories for this flow (\${shownN} of \${totalN} covered)</div><div class="cat-pills">\${pills}</div></div>\`;
+    catHtml=\`<div class="cat-strip"><div class="cat-strip-lbl">Generated drafts: \${shownN} of \${totalN} applicable testing categories</div><div class="cat-pills">\${pills}</div></div>\`;
   }
   let testsHtml='';
   if(r.generatedTests&&r.generatedTests.length){
