@@ -199,6 +199,29 @@ describe("start orchestration", () => {
     expect(existsSync(res.rtm.rtm_path)).toBe(true);
   });
 
+  it("compares the final report with the previous completed start run", async () => {
+    const W = makeTempDir();
+    writeStartFixture(W);
+    await opStart(W, { source: W, ai: false, noAuto: true }, deps);
+
+    const baselinePath = join(W, ".orangepro", "report-baseline.json");
+    const first = JSON.parse(readFileSync(baselinePath, "utf8")) as { summary: { total: number } };
+    const servicePath = join(W, "service.ts");
+    writeFileSync(
+      servicePath,
+      `${readFileSync(servicePath, "utf8")}\nexport function refundOrder(id: string): boolean {\n  return Boolean(id);\n}\n`,
+      "utf8"
+    );
+
+    const second = await opStart(W, { source: W, ai: false, noAuto: true }, deps);
+    const html = readFileSync(second.behavior_coverage_path ?? "", "utf8");
+    const finalBaseline = JSON.parse(readFileSync(baselinePath, "utf8")) as { summary: { total: number } };
+
+    expect(finalBaseline.summary.total).toBe(first.summary.total + 1);
+    expect(html).toContain('"changed":true');
+    expect(html).toContain('"totalDelta":1');
+  });
+
   it("auto-applies AI candidate links when a provider is configured without changing deterministic RTM status", async () => {
     const W = makeTempDir();
     writeStartFixture(W);

@@ -924,7 +924,8 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     dynamicProofRunner: deps.dynamicProofRunner,
     coverageRunner: deps.coverageRunner,
     analyze: deps.analyze,
-    aiProvider: deps.aiProvider
+    aiProvider: deps.aiProvider,
+    suppressBehaviorReportRefresh: deps.suppressBehaviorReportRefresh
   };
 
   const graph = loadGraph(workspacePaths(root).graphPath);
