@@ -32,7 +32,7 @@ The command writes:
 orangepro_generated/         ← contained generated tests; existing source files are untouched
 ```
 
-The report opens on a **system map** of your repo — entry lanes (GraphQL/HTTP/Jobs) flowing into the services they reach, sized by traffic, colored by evidence tier, risk-ringed — identical on every run. Each rerun shows a **delta banner**: what changed since last run, or "No changes — identical graph, identical ranking." Every one of the ~N behaviors gets a plain-English description; every top risk gets a deterministic context line and a state-aware next step.
+The report opens on a **system map** of your repo — entry lanes (GraphQL/HTTP/Jobs) flowing into the services they reach, sized by traffic, colored by evidence tier, risk-ringed — identical on every run. Each completed rerun shows a **delta banner** against the previous completed run. The report discloses when bounded path enumeration prunes additional branch expansions. Every behavior gets a plain-English description; every top risk gets a deterministic context line and a state-aware next step.
 
 Run `opro export` when you want a machine-readable evidence pack.
 <img width="895" height="960" alt="Screenshot 2026-07-08 at 1 18 01 AM" src="https://github.com/user-attachments/assets/73b8a812-2eab-43a1-8aed-4289545e630b" />
@@ -189,7 +189,7 @@ If the environment can't run tests yet (dependencies not installed, runner uncon
 
 ## Test categories
 
-Generation is evidence-gated. A category is produced only when the graph has supporting evidence — never padded with generic filler. These are the local generation buckets. The report additionally shows each risk's **applicable testing categories** (contract, boundary limits, integration flow, state lifecycle, failure recovery, …), derived deterministically from graph facts — covered categories from real attached tests render normally; the rest render locked, meaning "warranted here, generated on the platform," never "hidden tests exist." Neither taxonomy changes evidence tiers.
+Generation is evidence-gated. A category is produced only when the graph has supporting evidence — never padded with generic filler. These are the local generation buckets. The report additionally shows each risk's **applicable testing categories** (contract, boundary limits, integration flow, state lifecycle, failure recovery, …), derived deterministically from graph facts. Categories with generated drafts are highlighted as drafts; they are not coverage or proof, and remaining applicable categories stay outlined. Neither taxonomy changes evidence tiers.
 
 | Category | What it targets |
 |----------|-----------------|

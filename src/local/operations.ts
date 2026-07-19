@@ -375,6 +375,8 @@ export interface OperationDeps {
   dynamicProofRunner?: DynamicProofRunner;
   analyze?: typeof opAnalyze;
   aiProvider?: ModelProvider;
+  /** Internal start-orchestration guard: only the final report advances the run baseline. */
+  suppressBehaviorReportRefresh?: boolean;
 }
 
 function defaultDeps(): OperationDeps {
@@ -1786,10 +1788,12 @@ export function opProveLoop(root: string, opts: ProveLoopOptions, deps: Operatio
   // Best-effort report refresh (exactly like ai-flows --apply): a render failure
   // must never fail a completed proof — the ledger/cert is already written.
   let behaviorCoveragePath: string | undefined;
-  try {
-    behaviorCoveragePath = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`).behavior_coverage_path;
-  } catch {
-    // ponytail: swallow — refresh is advisory; DynamicProofResult carries no warnings channel.
+  if (!deps.suppressBehaviorReportRefresh) {
+    try {
+      behaviorCoveragePath = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`).behavior_coverage_path;
+    } catch {
+      // ponytail: swallow — refresh is advisory; DynamicProofResult carries no warnings channel.
+    }
   }
   return { ...proof, ...(behaviorCoveragePath ? { behavior_coverage_path: behaviorCoveragePath } : {}) };
 }
@@ -1882,10 +1886,12 @@ export async function opAiFlows(
     // Best-effort: a render failure must never fail apply (graph is saved).
     const warnings = [...result.warnings];
     let behaviorCoveragePath: string | undefined;
-    try {
-      behaviorCoveragePath = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`).behavior_coverage_path;
-    } catch (error) {
-      warnings.push(`behavior coverage view not written: ${error instanceof Error ? error.message : String(error)}`);
+    if (!deps.suppressBehaviorReportRefresh) {
+      try {
+        behaviorCoveragePath = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`).behavior_coverage_path;
+      } catch (error) {
+        warnings.push(`behavior coverage view not written: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     return { ...result, warnings, ...(behaviorCoveragePath ? { behavior_coverage_path: behaviorCoveragePath } : {}) };
   }
@@ -1950,11 +1956,12 @@ function writeStartStaticSnapshot(root: string, baseRef: string | undefined, war
   let behaviorCoveragePath: string | undefined;
   try {
     reportProgress("artifacts: writing static behavior view (proof still running)", { current: 4, total: 8 });
-    behaviorCoveragePath = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, {
-      attempted: 0,
-      proven: 0,
-      needsSetup: []
-    }).behavior_coverage_path;
+    behaviorCoveragePath = opBehaviorCoverageHtml(
+      root,
+      `${WORKSPACE_DIR}/behavior-coverage.html`,
+      { attempted: 0, proven: 0, needsSetup: [] },
+      { persistBaseline: false }
+    ).behavior_coverage_path;
   } catch (error) {
     warnings.push(`static behavior view not written: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -1975,7 +1982,9 @@ export async function opStart(
   const providerOpts = startProviderOverride(root, opts);
   const scanRoot = opts.source ? resolve(opts.source) : resolve(root);
   const providerEnv = loadProviderEnv([root, scanRoot], deps.env);
-  const providerDeps = { ...deps, env: providerEnv };
+  // `start` writes advisory/intermediate views before the final report. Keep
+  // those helpers from advancing report-baseline.json mid-run.
+  const providerDeps = { ...deps, env: providerEnv, suppressBehaviorReportRefresh: true };
   const scope = summarizeCorpusScope(scanRoot);
   reportProgress(`start: preflight found ${scope.files.toLocaleString()} source/doc file(s)`, { current: 1, total: 8 });
   reportProgress("start: running deterministic analysis", { current: 2, total: 8 });
@@ -2543,7 +2552,8 @@ export function opGraphHtml(root: string, outputPath = "orangepro-graph.html"): 
 export function opBehaviorCoverageHtml(
   root: string,
   outputPath = "orangepro-behavior-coverage.html",
-  dynamicProof?: DynamicProofReportInput
+  dynamicProof?: DynamicProofReportInput,
+  options: { persistBaseline?: boolean } = {}
 ): { behavior_coverage_path: string } {
   const graph = loadGraph(workspacePaths(root).graphPath);
   // Standalone regens have no this-run outcome: fall back to the persisted
@@ -2564,10 +2574,12 @@ export function opBehaviorCoverageHtml(
   const html = renderBehaviorReport(data);
   const htmlPath = resolve(root, outputPath);
   writeFileSync(htmlPath, html, "utf8");
-  try {
-    writeFileSync(baselinePath, JSON.stringify(reportBaselineOf(data, new Date().toISOString())), "utf8");
-  } catch {
-    // baseline write is advisory
+  if (options.persistBaseline !== false) {
+    try {
+      writeFileSync(baselinePath, JSON.stringify(reportBaselineOf(data, new Date().toISOString())), "utf8");
+    } catch {
+      // baseline write is advisory
+    }
   }
   return { behavior_coverage_path: htmlPath };
 }

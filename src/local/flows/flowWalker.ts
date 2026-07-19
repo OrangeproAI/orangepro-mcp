@@ -28,7 +28,7 @@ interface InternalFlow extends BehaviorFlow {
 }
 
 const DEFAULT_MAX_DEPTH = 8;
-const DEFAULT_MAX_FLOWS_PER_ENTRY = 5;
+const DEFAULT_MAX_FLOWS_PER_ENTRY = 20;
 const DEFAULT_GLOBAL_CAP = 500;
 const HIGH_ROUTE_RE = /payment|refund|checkout|cart|order|auth|login|token|customer|user|tax|fulfillment|ship/i;
 const MUTATION_METHOD_RE = /^(POST|PUT|PATCH|DELETE)\b/i;

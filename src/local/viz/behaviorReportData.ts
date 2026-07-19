@@ -44,12 +44,11 @@ export interface BehaviorReportData {
     todo: string;
     /**
      * v6 gap-card extensions (display-only). Concern categories that apply to
-     * this flow (snake_case keys, rendered as locked/shown pills) and the
-     * generated integration tests linked to it. Empty arrays until the
-     * generated-test linkage is wired — the template hides both sections.
+     * this flow and categories for which a generated draft is attached. Drafts
+     * are planning artifacts, never coverage or proof.
      */
     applicableCategories: string[];
-    coveredCategories: string[];
+    generatedCategories: string[];
     generatedTests: Array<{ name: string; concern?: string; technique?: string; bucket?: string; assertion?: string; code: string; runnable?: boolean }>;
   }>;
   /** Verbatim "why 0 dynamic proof" explainer — populated ONLY when summary.proven === 0. Display copy; changes no classification. */
@@ -914,16 +913,16 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
         const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
         const path = methodMatch?.[2] ?? risk.title;
-        const coveredCategories = [...new Set([
+        const generatedCategories = [...new Set([
           ...generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)),
-          // An integration/api/e2e-layer test covers the integration_flow
-          // category by construction — the chip and the pill must agree.
+          // An integration/api/e2e-layer draft targets integration_flow. This
+          // remains generation metadata until dynamic proof closes.
           ...generatedTests.map((t) => (t.concern === "integration" || t.concern === "api" || t.concern === "e2e" ? "integration_flow" : undefined))
         ].filter((c): c is string => Boolean(c)))];
         return {
           generatedTests,
           applicableCategories: riskApplicableConcerns(risk, verb),
-          coveredCategories,
+          generatedCategories,
           verb,
           path,
           todo: riskTodo(risk, verb, path, generatedTests)
