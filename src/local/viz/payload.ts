@@ -328,18 +328,15 @@ function codeAreaOf(sourceRefOrPath: string | undefined): string {
   }
 
   if (language === "python") {
-    if (["src", "app", "mealie"].includes(parts[0]) && parts.length > 2) return parts.slice(1, 3).join("/");
+    if (["src", "app"].includes(parts[0]) && parts.length > 2) return parts.slice(1, 3).join("/");
     return parts.length > 2 ? parts.slice(0, 2).join("/") : parentDir(parts);
   }
 
   if (language === "go") {
-    if (parts[0] === "server" && parts[1] === "channels" && parts[2]) return `server/${parts[2]}`;
     return parts.length > 2 ? parts.slice(0, 2).join("/") : parentDir(parts);
   }
 
   if (language === "typescript" || language === "javascript") {
-    if (parts[0] === "webapp" && parts[1] === "channels" && parts[2] === "src" && parts[3]) return `webapp/${parts[3]}`;
-    if (parts[0] === "frontend" && parts[1] === "app" && parts[2]) return `frontend/${parts[2]}`;
     return parts.length > 2 ? parts.slice(0, 2).join("/") : parentDir(parts);
   }
 

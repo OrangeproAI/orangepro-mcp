@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { parseArgs, collectSetupCommands } from "./cliArgs.js";
-import { TOOL_VERSION } from "./analyze/parseCache.js";
 import {
   opAnalyze,
   opAiFlows,
@@ -65,6 +64,7 @@ import {
 } from "./jobs/jobStore.js";
 import { runGenerateJob } from "./jobs/runner.js";
 import type { GenerateOptions } from "./types.js";
+import { ORANGEPRO_VERSION } from "./version.js";
 
 function out(line = ""): void {
   process.stdout.write(line + "\n");
@@ -209,14 +209,11 @@ function bar(value: number): string {
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
-  const [rawCommand, ...rawRest] = argv;
-  // --version/-v must never fall through to the default one-command start:
-  // an unrecognized-flag path that silently runs a full analysis (and spends
-  // BYOK tokens) is a trust bug, not a convenience.
-  if (rawCommand === "--version" || rawCommand === "-v" || rawCommand === "version") {
-    out(TOOL_VERSION);
+  if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v" || argv[0] === "version")) {
+    out(ORANGEPRO_VERSION);
     return 0;
   }
+  const [rawCommand, ...rawRest] = argv;
   const command = !rawCommand || rawCommand.startsWith("--") ? "start" : rawCommand;
   const rest = !rawCommand || rawCommand.startsWith("--") ? argv : rawRest;
   const { positionals, flags } = parseArgs(rest);
@@ -225,7 +222,7 @@ async function main(): Promise<number> {
 
   if (command === "help" || flags.help || flags.version) {
     if (flags.version) {
-      out(TOOL_VERSION);
+      out(ORANGEPRO_VERSION);
       return 0;
     }
     out(HELP);

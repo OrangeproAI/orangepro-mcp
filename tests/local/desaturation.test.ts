@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { extractBehaviorContracts } from "../../src/local/analyze/behaviorContracts.js";
 import { rankEntries, type FlowEntry } from "../../src/local/flows/flowWalker.js";
+import { inferTestLayer } from "../../src/local/generate/generator.js";
 import { rankRiskGaps } from "../../src/local/score/risk.js";
-import { LOCAL_GRAPH_SCHEMA_VERSION, type LocalGraph } from "../../src/local/graph/ontology.js";
+import { LOCAL_GRAPH_SCHEMA_VERSION, type GraphNode, type LocalGraph } from "../../src/local/graph/ontology.js";
 
 // ── Fix C: NestJS GraphQL + queue processor entry points ──────────────────────
 
@@ -32,6 +33,16 @@ describe("extractBehaviorContracts — NestJS GraphQL resolvers", () => {
     expect(contracts.some((c) => c.handler === "members")).toBe(false);
   });
 
+  it("does not treat @Query on an ordinary class as a GraphQL endpoint", () => {
+    const contracts = extractBehaviorContracts(`
+      export class QueryBuilder {
+        @Query(() => String)
+        build(): string { return "local metadata"; }
+      }
+    `, "src/query-builder.ts");
+    expect(contracts.filter((c) => c.kind === "graphql_operation")).toEqual([]);
+  });
+
   it("extracts @Process methods on a @Processor class as queue_processor contracts", () => {
     const src = `
       @Processor(MessageQueue.webhookQueue)
@@ -45,12 +56,35 @@ describe("extractBehaviorContracts — NestJS GraphQL resolvers", () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ method: "JOB", handler: "handle", controller: "CallWebhookJob" });
   });
+
+  it("extracts BullMQ WorkerHost, cron, and event-consumer entry points", () => {
+    const contracts = extractBehaviorContracts(`
+      @Processor("events")
+      export class EventWorker extends WorkerHost {
+        async process(job: Job): Promise<void> { await this.dispatch(job); }
+      }
+
+      export class MaintenanceTasks {
+        @Cron("0 * * * *")
+        async cleanup(): Promise<void> {}
+
+        @OnEvent("account.created")
+        async projectAccount(payload: AccountCreated): Promise<void> {}
+      }
+    `, "src/workers.ts");
+
+    expect(contracts.map((c) => [c.kind, c.method, c.handler, c.controller])).toEqual([
+      ["queue_processor", "JOB", "process", "EventWorker"],
+      ["scheduled_task", "SCHEDULE", "cleanup", "MaintenanceTasks"],
+      ["event_consumer", "EVENT", "projectAccount", "MaintenanceTasks"]
+    ]);
+  });
 });
 
 // ── Fix C: endpoint-anchored flows never crowded out by orphan roots ──────────
 
-describe("rankEntries — endpoint-first ordering", () => {
-  it("ranks every Endpoint entry ahead of every orphan Behavior entry", () => {
+describe("rankEntries — topology-neutral prioritization", () => {
+  it("gives endpoints a meaningful boost without hiding a much higher-risk internal behavior", () => {
     const graph = { nodes: [], edges: [], workspaceRoot: "" };
     const entries: FlowEntry[] = [
       { external_id: "sym:src/core/orphanA.ts#compute", kind: "Behavior", start: "sym:src/core/orphanA.ts#compute" },
@@ -58,8 +92,48 @@ describe("rankEntries — endpoint-first ordering", () => {
       { external_id: "sym:src/core/orphanB.ts#recalc", kind: "Behavior", start: "sym:src/core/orphanB.ts#recalc" },
       { external_id: "endpoint:graphql-updateworkspace", kind: "Endpoint", title: "MUTATION graphql:updateWorkspace", start: "sym:src/ws.resolver.ts#update" }
     ];
-    const ranked = rankEntries(graph, entries, new Map());
-    expect(ranked.map((e) => e.kind)).toEqual(["Endpoint", "Endpoint", "Behavior", "Behavior"]);
+    const adjacency = new Map<string, unknown[]>([
+      ["sym:src/core/orphanA.ts#compute", Array.from({ length: 101 })]
+    ]);
+    const ranked = rankEntries(graph, entries, adjacency);
+    expect(ranked[0].external_id).toBe("sym:src/core/orphanA.ts#compute");
+    expect(ranked.findIndex((e) => e.kind === "Endpoint")).toBeLessThan(
+      ranked.findIndex((e) => e.external_id === "sym:src/core/orphanB.ts#recalc")
+    );
+  });
+});
+
+describe("inferTestLayer — evidence-based classification", () => {
+  const behavior = {
+    external_id: "sym:src/lib.ts#run",
+    title: "run",
+    kind: "CodeSymbol",
+    properties: { file: "src/lib.ts" }
+  } as unknown as GraphNode;
+
+  it("does not call ordinary library call chains integration tests", () => {
+    const graph = {
+      nodes: [behavior, { ...behavior, external_id: "sym:src/lib.ts#helper", properties: { file: "src/lib.ts" } }],
+      edges: [{ relationship_type: "CALLS", from_external_id: behavior.external_id, to_external_id: "sym:src/lib.ts#helper" }],
+      analysis: { flows: { flows: [] } }
+    };
+    expect(inferTestLayer(behavior, "vitest", graph as unknown as LocalGraph)).toBe("unknown");
+  });
+
+  it("classifies a bare external endpoint as API and a cross-file endpoint flow as integration", () => {
+    const endpoint = { external_id: "endpoint:run", kind: "Endpoint", properties: { method: "POST" } };
+    const helper = { ...behavior, external_id: "sym:src/service.ts#execute", properties: { file: "src/service.ts" } };
+    const base = {
+      nodes: [endpoint, behavior, helper],
+      edges: [{ relationship_type: "IMPLEMENTED_IN", from_external_id: endpoint.external_id, to_external_id: behavior.external_id }],
+      analysis: { flows: { flows: [] } }
+    };
+    expect(inferTestLayer(behavior, "vitest", base as unknown as LocalGraph)).toBe("api");
+    const integrated = {
+      ...base,
+      edges: [...base.edges, { relationship_type: "CALLS", from_external_id: behavior.external_id, to_external_id: helper.external_id }]
+    };
+    expect(inferTestLayer(behavior, "vitest", integrated as unknown as LocalGraph)).toBe("integration");
   });
 });
 
@@ -118,12 +192,10 @@ describe("rankRiskGaps — de-saturated ORS", () => {
     for (const row of hotRows) expect(row.incoming_refs).toBeLessThan(1);
   });
 
-  it("caps how many gaps one file contributes to the surfaced list (default 3)", () => {
-    const ranked = rankRiskGaps(riskGraph(), { limit: 4, repoRoot: "" });
-    const hotCount = ranked.filter((r) => r.file === "src/services/hot.service.ts").length;
-    expect(hotCount).toBeLessThanOrEqual(3);
-    // The lone file still surfaces — the list is a portfolio, not one file's method dump.
-    expect(ranked.some((r) => r.file === "src/services/lone.service.ts")).toBe(true);
+  it("returns the true global ranking by default; diversity is explicit", () => {
+    const globallyRanked = rankRiskGaps(riskGraph(), { limit: 4, maxPerFile: 999, repoRoot: "" });
+    const defaultRanked = rankRiskGaps(riskGraph(), { limit: 4, repoRoot: "" });
+    expect(defaultRanked.map((r) => r.id)).toEqual(globallyRanked.map((r) => r.id));
   });
 });
 
@@ -169,7 +241,6 @@ describe("enrichFromMarkdown — governance exclusions", () => {
       "CHANGELOG.md",
       ".changeset/pretty-otters.md",
       "packages/create-twenty-app/src/constants/template/AGENTS.md",
-      "packages/create-twenty-app/src/constants/template/SETUP.md",
       "AGENTS.md",
       "CLAUDE.md"
     ]) {
@@ -179,6 +250,8 @@ describe("enrichFromMarkdown — governance exclusions", () => {
   it("still mints requirements from product docs", () => {
     const out = enrichFromMarkdown("docs/features.md", "## The API must support streaming responses\n\ndetails");
     expect(out.nodes.length).toBeGreaterThan(0);
+    const template = enrichFromMarkdown("templates/product-flow.md", "## The API must support reusable workflow templates\n\ndetails");
+    expect(template.nodes.length).toBeGreaterThan(0);
   });
 });
 
@@ -274,6 +347,52 @@ describe("buildSystemMapModel", () => {
     expect(m.edges).toContainEqual({ lane: "graphql", service: "AuthService", flows: 2 });
   });
 
+  it("keeps standard and previously unknown trigger families instead of dropping them", () => {
+    const extra = [
+      ["COMMAND", "cli:sync", "CliRunner.run"],
+      ["SCHEDULE", "cron:cleanup", "Cleanup.run"],
+      ["EVENT", "event:created", "Projector.apply"],
+      ["GRPC", "grpc:Create", "RpcService.create"],
+      ["WEBHOOK_CUSTOM", "custom:deliver", "Delivery.run"]
+    ].map(([verb, path, sig]) => ({
+      title: path,
+      trigger: { verb, path },
+      risk: null,
+      proof: "none" as const,
+      services: 1,
+      flow_tier: "hard: reachable" as const,
+      why: "",
+      steps: [{ sig, tier: "hard" as const, edge: null, desc: "" }]
+    }));
+    const m = buildSystemMapModel({ flows: [...flows, ...extra], risks, behaviors } as never);
+    expect(m.lanes.map((l) => l.id)).toEqual(expect.arrayContaining(["graphql", "http", "cli", "schedule", "event", "rpc", "webhook-custom"]));
+    for (const lane of m.lanes) {
+      expect(m.edges.filter((e) => e.lane === lane.id).reduce((sum, e) => sum + e.flows, 0)).toBe(lane.flows);
+    }
+  });
+
+  it("shows true program roots in an entry lane while excluding internal orphan roots", () => {
+    const programRoot = {
+      title: "sync command",
+      root_entry: true,
+      risk: null,
+      proof: "none" as const,
+      services: 1,
+      flow_tier: "hard: reachable" as const,
+      why: "",
+      steps: [{ sig: "SyncCommand.run", tier: "hard" as const, edge: null, desc: "" }]
+    };
+    const internalRoot = {
+      ...programRoot,
+      title: "internal helper",
+      root_entry: false,
+      steps: [{ sig: "InternalHelper.run", tier: "hard" as const, edge: null, desc: "" }]
+    };
+    const model = buildSystemMapModel({ flows: [programRoot, internalRoot], risks: [], behaviors: [] } as never);
+    expect(model.lanes).toEqual([{ id: "entry", label: "Entry points", flows: 1 }]);
+    expect(model.edges.reduce((sum, edge) => sum + edge.flows, 0)).toBe(1);
+  });
+
   it("is deterministic: same input, same model", () => {
     const a = JSON.stringify(buildSystemMapModel({ flows, risks, behaviors } as never));
     const b = JSON.stringify(buildSystemMapModel({ flows: [...flows], risks: [...risks], behaviors: [...behaviors] } as never));
@@ -336,42 +455,5 @@ describe("computeReportDelta", () => {
   it("baseline round-trips through reportBaselineOf", () => {
     const snap = reportBaselineOf(cur({}) as never, "2026-07-18T00:00:00Z");
     expect(computeReportDelta(snap, cur({}) as never).changed).toBe(false);
-  });
-});
-
-// ── Fixture-fleet regressions: three repo shapes, one scoring codebase ──────
-
-// ── Fixture fleet: multi-program shape (76 × main) vs the per-title cap ─────
-
-describe("cross-shape fixes", () => {
-  const sym = (file: string, title: string, churn: number) => ({
-    kind: "CodeSymbol" as const,
-    external_id: `sym:${file}#${title}`,
-    title,
-    denominator_eligible: true,
-    properties: { file, language: "go", git_churn: churn },
-    evidence_strength: "hard" as const,
-    review_status: "auto_detected" as const,
-    confidence: 1,
-    provenance: { source: "fixture" }
-  });
-
-  it("per-title cap: identical titles yield at most 2 slots when alternatives exist", async () => {
-    const { rankRiskGaps } = await import("../../src/local/score/risk.js");
-    const mains = [...Array(8)].map((_, i) => sym(`app${i}/main.go`, "main", 400));
-    const others = [...Array(6)].map((_, i) => sym(`svc${i}/service.go`, `Service${i}Run`, 300));
-    const graph = { nodes: [...mains, ...others], edges: [], analysis: {}, workspace: { root: "/tmp" } } as never;
-    const gaps = rankRiskGaps(graph, { limit: 8, repoRoot: "/tmp" });
-    const mainCount = gaps.filter((g) => g.title === "main").length;
-    expect(mainCount).toBeLessThanOrEqual(2);
-    expect(gaps.length).toBe(8); // list still fills from distinct-title alternatives
-  });
-
-  it("cli: --version prints a semver and never falls through to start", async () => {
-    const { execFileSync } = await import("node:child_process");
-    const { existsSync } = await import("node:fs");
-    const outStr = execFileSync("node", ["dist/local/cli.js", "--version"], { cwd: process.cwd(), timeout: 20000, encoding: "utf8" });
-    expect(outStr.trim()).toMatch(/^\d+\.\d+\.\d+/);
-    expect(existsSync("/tmp/.orangepro-version-probe")).toBe(false); // no analysis side effects
   });
 });

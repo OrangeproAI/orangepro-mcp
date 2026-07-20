@@ -86,9 +86,19 @@ for (const repo of repos) {
     );
     ok("pack contains no model prompt text", !packJson.includes(PROMPT_TEXT));
     ok("graph HTML contains no model prompt text", !html.includes(PROMPT_TEXT));
-    ok("graph HTML is offline (no network/CDN)", !/https?:\/\//.test(html));
+    const urls = [...html.matchAll(/https?:\/\/[^\s"'<>)]+/g)].map((m) => m[0]);
+    const inertUrlsOnly = urls.every((url) => url.startsWith("http://www.w3.org/") || url.startsWith("https://d3js.org"));
+    ok(
+      "graph HTML is offline (no network/CDN)",
+      !/<script[^>]+\bsrc=/i.test(html) && !/<link[^>]+href=/i.test(html) && inertUrlsOnly,
+      `${urls.length} inert namespace/license URL(s)`
+    );
     ok("readiness score computed", typeof score.overall === "number" && score.overall >= 0 && score.overall <= 100, `score=${score.overall}/${score.band}`);
-    ok("gaps computed", typeof gaps.total_behaviors === "number", `${gaps.gaps.length}/${gaps.total_behaviors} behaviors`);
+    ok(
+      "non-empty behavior denominator computed",
+      typeof gaps.total_behaviors === "number" && gaps.total_behaviors > 0,
+      `${gaps.gaps.length}/${gaps.total_behaviors} behaviors`
+    );
     ok(
       "generation grounded (or honest setup/thin guidance)",
       gen.generated_tests.every((t) => t.grounding.entity_ids.length > 0) || gen.warnings.length > 0 || gen.missing_evidence.length > 0,

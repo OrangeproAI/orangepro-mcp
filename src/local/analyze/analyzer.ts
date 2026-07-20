@@ -101,16 +101,8 @@ const CLIENT_FACTORY_NAME_RE = /(^|[.#])get[A-Z0-9_].*Client$/;
 const BEHAVIOR_OWNER_RE =
   /(Service|Controller|Resolver|Handler|Processor|Job|Worker|Queue|Consumer|Subscriber|Listener|Command|Gateway|Route|Router)$/;
 const UTILITY_DIRECTORY_EXCLUDE_RE =
-  /\/(utils?|helpers?|tools?|loaders?|dml|dal|orchestration|codemods?|oas|models?|migrations?|migration-scripts?|instrumentation|medusa-telemetry|medusa-test-utils|eslint-plugin)\//i;
-const FRAMEWORK_INTERNAL_PATH_EXCLUDE_RE =
-  /\/(http\/(?:routes-loader|routes-finder|routes-sorter|middlewares\/bodyparser)|medusa-app-loader|remote-query\/query)(?:\/|$)/i;
-const CLI_PACKAGE_PATH_EXCLUDE_RE = /\/(?:cli\/[^/]+\/src\/(?:commands|core|reporter)|packages\/[^/]+\/src\/commands)\//i;
-const BACKEND_RUNTIME_PATH_EXCLUDE_RE =
-  /\/(?:packages\/core\/framework\/src|packages\/modules\/(?:workflow-engine-[^/]+|link-modules)\/src)(?:\/|$)/i;
-const UI_PRODUCT_PATH_EXCLUDE_RE =
-  /\/(?:packages\/admin\/(?:dashboard|admin-bundler|admin-vite-plugin)\/src|packages\/design-system\/(?:toolbox|icons)\/src|www\/(?:apps|packages)\/[^/]+\/(?:app|src|providers|components|lib))(?:\/|$)/i;
-const SDK_CLIENT_PATH_EXCLUDE_RE = /\/(?:packages\/core\/js-sdk\/src|packages\/[^/]+\/(?:sdk|client)\/src)(?:\/|$)/i;
-const PLUGIN_ADMIN_PATH_EXCLUDE_RE = /\/(?:plugins\/[^/]+\/src\/admin|admin\/routes)\//i;
+  /\/(utils?|helpers?|tools?|loaders?|dml|dal|orchestration|codemods?|oas|models?|migrations?|migration-scripts?|instrumentation|eslint-plugin)\//i;
+const PRESENTATION_ASSET_PATH_RE = /\/(?:icons?|assets?)\//i;
 const INFRA_METHOD_SUFFIX_RE =
   /^get[A-Z0-9_].*(Identifier|RegistrationKey|Config|Registry|Options|Settings|Path|Directory|TmpDir|Program|PackageManager|Command|Expression|Recommendation|CircularReferences|PivotTableName|PropertyName|PropertyKey|UnderlyingType|ComputedColumnRegistry|EntityOverrideRegistry|InverseRegistry|RelativeDate|SelectsAndRelations|SetDifference|ResolvedPlugins|Token|Scope|Module|Column|Pivot|Ttl|Timeout|Interval|Size|Limit|Offset|Prefix|Suffix|Pattern|Handler|Resource)$/;
 const BUILD_BOOTSTRAP_PREFIX_RE =
@@ -144,23 +136,8 @@ function behaviorSurfaceExclusionReason(relPath: string, name: string, memberOf?
   if (UTILITY_DIRECTORY_EXCLUDE_RE.test(path)) {
     return "Utility/model/tooling path — infrastructure plumbing, excluded from the behavior denominator.";
   }
-  if (FRAMEWORK_INTERNAL_PATH_EXCLUDE_RE.test(path)) {
-    return "Framework-internal route/query plumbing — excluded from the behavior denominator.";
-  }
-  if (CLI_PACKAGE_PATH_EXCLUDE_RE.test(path)) {
-    return "CLI developer tooling path — excluded from the behavior denominator.";
-  }
-  if (BACKEND_RUNTIME_PATH_EXCLUDE_RE.test(path)) {
-    return "Framework/runtime/link plumbing path — excluded from backend behavior denominator.";
-  }
-  if (UI_PRODUCT_PATH_EXCLUDE_RE.test(path)) {
-    return "UI/docs/design-system path — excluded from backend behavior denominator.";
-  }
-  if (SDK_CLIENT_PATH_EXCLUDE_RE.test(path)) {
-    return "SDK/client package path — excluded from backend behavior denominator.";
-  }
-  if (PLUGIN_ADMIN_PATH_EXCLUDE_RE.test(path)) {
-    return "Plugin admin UI path — excluded from backend behavior denominator.";
+  if (PRESENTATION_ASSET_PATH_RE.test(path)) {
+    return "Presentation asset/icon path — excluded from the behavior denominator.";
   }
   if (FRAMEWORK_HOOK_METHOD_RE.test(methodName)) {
     return "Framework lifecycle hook — excluded from the behavior denominator.";
@@ -196,6 +173,67 @@ function behaviorSurfaceReason(relPath: string, name: string, memberOf?: string)
     return "Handler/service/job-like symbol name — countable behavior surface.";
   }
   return null;
+}
+
+const RUNTIME_SOURCE_EXT_RE = /\.(?:[cm]?[jt]sx?)$/i;
+
+/**
+ * Resolve package-level public entry modules from package metadata and the two
+ * conventional source entry paths. This gives libraries a semantic behavior
+ * surface without treating every exported helper in the repository as product
+ * behavior.
+ */
+function packagePublicEntryPaths(root: string, relPaths: string[]): Set<string> {
+  const normalizedPaths = new Set(relPaths.map((relPath) => relPath.replace(/\\/g, "/")));
+  const entries = new Set<string>();
+  const extensions = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
+
+  const addCandidate = (packageDir: string, rawTarget: string): void => {
+    if (!rawTarget || rawTarget.includes("*") || rawTarget.startsWith("#")) return;
+    const cleanTarget = rawTarget.replace(/^\.\//, "").split(/[?#]/, 1)[0];
+    if (!cleanTarget || cleanTarget.startsWith("../") || path.isAbsolute(cleanTarget)) return;
+    const relativeTarget = packageDir ? `${packageDir}/${cleanTarget}` : cleanTarget;
+    const candidates = new Set<string>([relativeTarget]);
+    const withoutExt = relativeTarget.replace(RUNTIME_SOURCE_EXT_RE, "");
+    for (const extension of extensions) candidates.add(`${withoutExt}${extension}`);
+
+    // Published packages often expose dist/index.js while analyzing src/index.ts.
+    const sourceBase = cleanTarget.replace(/^(?:dist|lib|build)\//, "src/").replace(RUNTIME_SOURCE_EXT_RE, "");
+    const sourceTarget = packageDir ? `${packageDir}/${sourceBase}` : sourceBase;
+    for (const extension of extensions) candidates.add(`${sourceTarget}${extension}`);
+
+    for (const candidate of candidates) {
+      if (normalizedPaths.has(candidate)) entries.add(candidate);
+    }
+  };
+
+  const collectTargets = (value: unknown, targets: string[]): void => {
+    if (typeof value === "string") {
+      targets.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) collectTargets(item, targets);
+    } else if (value && typeof value === "object") {
+      for (const item of Object.values(value as Record<string, unknown>)) collectTargets(item, targets);
+    }
+  };
+
+  for (const manifestPath of normalizedPaths) {
+    if (path.posix.basename(manifestPath) !== "package.json") continue;
+    const packageDir = path.posix.dirname(manifestPath) === "." ? "" : path.posix.dirname(manifestPath);
+    try {
+      const manifest = JSON.parse(readFileSync(path.join(root, manifestPath), "utf8")) as Record<string, unknown>;
+      const targets: string[] = [];
+      for (const field of ["exports", "main", "module", "browser"]) collectTargets(manifest[field], targets);
+      for (const target of targets) addCandidate(packageDir, target);
+    } catch {
+      // Malformed package metadata is reported elsewhere; it must not stop analysis.
+    }
+
+    for (const conventional of ["index", "src/index"]) {
+      for (const extension of extensions) addCandidate(packageDir, `${conventional}${extension}`);
+    }
+  }
+  return entries;
 }
 
 const FLOW_LINK_STOPWORDS = new Set([
@@ -351,6 +389,10 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   const maxSymbols = Math.max(1, opts.maxSymbols ?? MAX_TOTAL_SYMBOLS);
   const ignore = loadIgnore(root);
   const { files, truncated: filesCapHit, max_files: maxFiles } = walkFilesWithMeta(root, ignore, { maxFiles: opts.maxFiles });
+  const publicEntryFiles = packagePublicEntryPaths(
+    root,
+    files.map((file) => file.relPath)
+  );
   const warnings: string[] = [];
   // Wall-clock budget for the per-file scan (DISCLOSED partial when hit; never silent).
   const now = opts.now ?? (() => Date.now());
@@ -636,7 +678,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     if ((role === "test" || role === "code") && (language === "typescript" || language === "javascript")) {
       resolveFiles.push({ abs: file.absPath, rel: file.relPath, role: role === "test" ? "test" : "source" });
     }
-
     if (role === "test") {
       testFiles++;
       testFileStems.push({ relPath: file.relPath, stem: moduleStem(file.relPath), dir: dirOf(file.relPath) });
@@ -845,7 +886,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             : callableBehaviorCandidate && !surfaceExclusionReason
               ? behaviorSurfaceReason(file.relPath, sym.name, sym.member_of)
               : null;
-          const eligible = callableBehaviorCandidate && surfaceReason !== null;
+          const publicApiEntry = callableBehaviorCandidate && !surfaceExclusionReason && publicEntryFiles.has(file.relPath);
+          const eligible = callableBehaviorCandidate && (surfaceReason !== null || publicApiEntry);
           const behaviorSurfaceExcluded = callableBehaviorCandidate && surfaceExclusionReason !== null;
           const notEntryPointAdjacent = callableBehaviorCandidate && !eligible && !behaviorSurfaceExcluded;
           if (isBoilerplate) excludedBoilerplate++;
@@ -861,7 +903,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 ...(sym.end_line ? { end_line: sym.end_line } : {}),
                 ...(sym.member_of ? { member_of: sym.member_of } : {}),
                 ...(sym.callable !== undefined ? { callable_const: sym.callable } : {}),
-                ...(surfaceReason ? { behavior_surface: "entrypoint_adjacent" } : {}),
+                ...(surfaceReason ? { behavior_surface: "entrypoint_adjacent" } : publicApiEntry ? { behavior_surface: "public_api_entry" } : {}),
                 ...(behaviorSurfaceExcluded ? { denominator_reason_code: "infra_behavior_surface" } : {}),
                 ...(notEntryPointAdjacent ? { denominator_reason_code: "not_entry_point_adjacent" } : {})
               },
@@ -881,6 +923,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                   ? BOILERPLATE_REASON
                   : eligible && surfaceReason
                     ? surfaceReason
+                    : publicApiEntry
+                      ? "Callable export from a package public entry module — countable library behavior surface."
                     : behaviorSurfaceExcluded && surfaceExclusionReason
                       ? surfaceExclusionReason
                     : callableBehaviorCandidate

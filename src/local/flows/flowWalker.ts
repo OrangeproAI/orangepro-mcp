@@ -136,17 +136,14 @@ export function rankEntries(graph: FlowGraphInput, entries: FlowEntry[], adjacen
       gap.risk_score
     ])
   );
-  // Endpoint-anchored flows first. An Endpoint entry IS the definition of a
-  // user-triggerable behavior (June 27 agreement); orphan call-graph roots are
-  // useful but must never crowd endpoints out of the global cap — on Twenty,
-  // saturated risk ties let ~25 internal orphan methods consume all 500 flow
-  // slots while every HTTP/GraphQL entry point went unrendered.
+  // One score space across every topology. Endpoint fallback weight keeps real
+  // external triggers prominent, while a materially riskier internal/library
+  // behavior can still outrank them. A hard Endpoint/Behavior partition made
+  // server-shaped repos look good but hid critical roots in mixed/library repos.
   const score = (e: FlowEntry): number => Math.max(riskScores.get(e.start) ?? 0, fallbackScore(e, adjacency));
   const byScore = (a: FlowEntry, b: FlowEntry): number =>
-    score(b) - score(a) || a.external_id.localeCompare(b.external_id) || a.start.localeCompare(b.start);
-  const endpoints = entries.filter((e) => e.kind === "Endpoint").sort(byScore);
-  const behaviors = entries.filter((e) => e.kind !== "Endpoint").sort(byScore);
-  return [...endpoints, ...behaviors];
+    score(b) - score(a) || (a.kind === b.kind ? 0 : a.kind === "Endpoint" ? -1 : 1) || a.external_id.localeCompare(b.external_id) || a.start.localeCompare(b.start);
+  return [...entries].sort(byScore);
 }
 
 function prunePrefixSubsumed(flows: InternalFlow[]): InternalFlow[] {

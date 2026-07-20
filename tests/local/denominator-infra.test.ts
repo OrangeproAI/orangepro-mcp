@@ -190,3 +190,44 @@ describe("design-system/icons UI components excluded from the denominator (Medus
     expect(sym(frag, "sym:packages/modules/order/src/services/order.service.ts#OrderService.createOrder")!.denominator_eligible).toBe(true);
   });
 });
+
+describe("product roles are not excluded by another repository's package layout", () => {
+  it("retains CLI commands, SDK operations, and admin routes as behaviors", () => {
+    const root = repo({
+      "packages/acme/src/commands/sync.ts": "export function syncAccounts() { return 1; }\n",
+      "packages/payments/sdk/src/client.ts": "export function createPayment() { return 1; }\n",
+      "plugins/shop/src/admin/routes/orders.ts": "export function listOrders() { return 1; }\n"
+    });
+    const frag = analyzeRepo(root, { readContent: true });
+    for (const id of [
+      "sym:packages/acme/src/commands/sync.ts#syncAccounts",
+      "sym:packages/payments/sdk/src/client.ts#createPayment",
+      "sym:plugins/shop/src/admin/routes/orders.ts#listOrders"
+    ]) {
+      expect(sym(frag, id), id).toBeDefined();
+      expect(sym(frag, id)!.denominator_eligible, id).toBe(true);
+    }
+  });
+
+  it("counts callable exports from package public entry modules without widening to internal helpers", () => {
+    const root = repo({
+      "package.json": JSON.stringify({ exports: "./index.js" }),
+      "index.js": "export default async function pMap(values) { return values; }\n",
+      "src/internal.js": "export function coordinateConcurrency(values) { return values; }\n",
+      "packages/math/package.json": JSON.stringify({ exports: "./dist/index.js" }),
+      "packages/math/src/index.ts": "export function foldValues(values: number[]) { return values.length; }\n"
+    });
+    const frag = analyzeRepo(root, { readContent: true });
+
+    const rootApi = sym(frag, "sym:index.js#pMap");
+    const packageApi = sym(frag, "sym:packages/math/src/index.ts#foldValues");
+    const internalHelper = sym(frag, "sym:src/internal.js#coordinateConcurrency");
+    expect(rootApi).toBeDefined();
+    expect(rootApi!.denominator_eligible).toBe(true);
+    expect((rootApi!.properties as Record<string, unknown>).behavior_surface).toBe("public_api_entry");
+    expect(packageApi).toBeDefined();
+    expect(packageApi!.denominator_eligible).toBe(true);
+    expect(internalHelper).toBeDefined();
+    expect(internalHelper!.denominator_eligible).toBe(false);
+  });
+});

@@ -2354,17 +2354,9 @@ export interface ConfirmerOutput {
   capped_downgrades: number;
 }
 
-
-// ─── Cross-shape confirm fallbacks ──────────────────────────────────────────
-// The TS program confirms relative imports. Two ecosystem-semantic fallbacks
-// cover what it structurally cannot, WITHOUT loosening evidence standards:
-// both still require (import resolves to the impl file) AND (the symbol is
-// referenced in the test) — the same bar, reached by different resolution.
-//
-//  1. Workspace/alias resolution (TS monorepos): specifier → file via
-//     tsconfig paths (walking extends) and workspace package names, with
-//     built-path → src mapping (pkg/lib/x → pkg/src/x). General npm/tsc
-//     semantics — not tuned to any one repo.
+// Workspace/alias resolution is useful for candidate linkage in TS monorepos,
+// but resolution and a call reference are not assertion evidence. Keep this
+// resolver separate from the hard-proof confirmer below.
 
 import { readFileSync as _rf, existsSync as _ex, readdirSync as _rd } from "node:fs";
 import { dirname as _dn, join as _jn, resolve as _rs } from "node:path";
@@ -2461,48 +2453,6 @@ export function resolveSpecifier(spec: string, fromFile: string, repoRoot: strin
   return null;
 }
 
-const IMPORT_RE = /(?:import|export)[^'"\n]*from\s*['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
-
-/** Fallback confirm: does ANY import of testAbs resolve to implAbs, and is the symbol referenced? */
-export function confirmViaResolvedImport(testAbs: string, implAbs: string, names: string[], repoRoot: string, wsPkgs: Map<string, string>): Map<string, string> {
-  const out = new Map<string, string>();
-  let src = "";
-  try { src = _rf(testAbs, "utf8"); } catch { return out; }
-  let importsImpl = false;
-  let m: RegExpExecArray | null;
-  IMPORT_RE.lastIndex = 0;
-  while ((m = IMPORT_RE.exec(src)) !== null) {
-    const spec = m[1] ?? m[2];
-    if (!spec) continue;
-    const resolved = resolveSpecifier(spec, testAbs, repoRoot, wsPkgs);
-    if (resolved && _rs(resolved) === _rs(implAbs)) { importsImpl = true; break; }
-  }
-  if (!importsImpl) return out;
-  for (const n of names) {
-    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Call-syntax bar (invoke or construct), matching the associated tier's
-    // imports+calls semantics — bare name mentions do not count.
-    if (new RegExp("\\b" + esc + "\\s*[(<]").test(src) || new RegExp("\\bnew\\s+" + esc + "\\b").test(src)) {
-      out.set(n, "workspace-resolved import + call reference");
-    }
-  }
-  return out;
-}
-
-
-function findRepoRoot(anchor: string): string {
-  let dir = _ex(anchor) && !anchor.endsWith(".json") ? _dn(anchor) : _dn(anchor);
-  for (let i = 0; i < 15; i++) {
-    const pj = readJsonSafe(_jn(dir, "package.json"));
-    if (pj && (pj.workspaces || _ex(_jn(dir, ".git")))) return dir;
-    if (_ex(_jn(dir, "go.mod")) || _ex(_jn(dir, ".git"))) return dir;
-    const parent = _dn(dir);
-    if (parent === dir) return dir;
-    dir = parent;
-  }
-  return dir;
-}
-
 /**
  * Run the confirmer over every candidate (test -> impl) pair (the resolver-derived
  * MAY_RELATE_TO links). For each denominator-eligible exported symbol of the impl
@@ -2523,20 +2473,12 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
     absFiles.add(c.implAbs);
   }
   const ctx = buildConfirmProgram([...absFiles], anchorFile);
-  const repoRootForConfirm = findRepoRoot(anchorFile);
-  const wsPkgsForConfirm = workspacePackages(repoRootForConfirm);
 
   const seen = new Set<string>(); // dedup (testRel|symId)
   for (const c of candidates) {
     const names = symbolsByImpl.get(c.implRel);
     if (!names || names.length === 0) continue;
     const verdicts = confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
-    // Cross-shape fallbacks for names the TS program could not confirm:
-    const unconfirmed = names.filter((n) => verdicts.get(n)?.verdict !== "confirmed");
-    if (unconfirmed.length > 0) {
-      const wsHits = confirmViaResolvedImport(c.testAbs, c.implAbs, unconfirmed, repoRootForConfirm, wsPkgsForConfirm);
-      for (const [n, reason] of wsHits) verdicts.set(n, { verdict: "confirmed", reason });
-    }
     for (const [name, v] of verdicts) {
       attempted++;
       if (v.verdict !== "confirmed") continue;
