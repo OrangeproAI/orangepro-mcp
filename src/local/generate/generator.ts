@@ -589,7 +589,7 @@ export function gatherContext(
     acceptance_criteria: acceptance,
     workflow_steps: workflow,
     framework,
-    test_layer: inferLayer(behavior, framework, graph),
+    test_layer: inferTestLayer(behavior, framework, graph),
     code_context: dedupe(codeContext),
     source_excerpts: excerpts,
     weak_context: dedupe(weakContext),
@@ -643,28 +643,47 @@ function flowChainFor(graph: LocalGraph, behavior: GraphNode): FlowStep[] | unde
   });
 }
 
-function inferLayer(behavior: GraphNode, framework: string, graph?: LocalGraph): TestLayer {
+export function inferTestLayer(behavior: GraphNode, framework: string, graph?: LocalGraph): TestLayer {
   const fw = framework.toLowerCase();
   if (fw.includes("playwright") || fw.includes("cypress")) return "e2e";
   if (fw.includes("supertest")) return "api";
   if (fw.includes("testing-library")) return "component";
   const hint = String(behavior.properties.test_layer ?? "");
   if (hint) return hint as TestLayer;
-  // Graph-aware default (hop-count methodology): a behavior that an endpoint
-  // implements, or that participates in a multi-step call chain, is an
-  // INTEGRATION target — the code→flows→behaviors journey is the product;
-  // "unit" is only for genuinely 0-hop leaf functions. The old blanket
-  // "unit" default stamped every vitest/jest repo unit-first.
+  // Infer a layer only from evidence that actually distinguishes it. A CALLS
+  // edge alone says nothing about the intended test boundary: libraries and
+  // ordinary unit subjects call helpers too. External handlers are API targets;
+  // they become integration targets only when their reachable path crosses a
+  // source-file boundary. Ambiguous cases stay unknown instead of being tuned
+  // to a server application's topology.
   if (graph) {
     const id = behavior.external_id;
     const isEntryHandler = graph.edges.some((e) => e.relationship_type === "IMPLEMENTED_IN" && e.to_external_id === id);
-    if (isEntryHandler) return "integration";
-    const inChain =
-      graph.edges.some((e) => e.relationship_type === "CALLS" && (e.from_external_id === id || e.to_external_id === id)) ||
-      (graph.analysis?.flows?.flows ?? []).some((f) => f.entry_point.external_id === id || f.hops.some((h) => h.from === id || h.to === id));
-    if (inChain) return "integration";
+    const fileById = new Map(
+      graph.nodes
+        .filter((node) => node.kind === "CodeSymbol")
+        .map((node) => [node.external_id, String(node.properties.file ?? "")])
+    );
+    const behaviorFile = fileById.get(id) ?? "";
+    const crossesFile = (from: string, to: string): boolean => {
+      const fromFile = fileById.get(from) ?? "";
+      const toFile = fileById.get(to) ?? "";
+      return fromFile !== "" && toFile !== "" && fromFile !== toFile;
+    };
+    const directCrossBoundary = graph.edges.some(
+      (e) => e.relationship_type === "CALLS" && e.from_external_id === id && crossesFile(e.from_external_id, e.to_external_id)
+    );
+    const triggeredCrossBoundary = (graph.analysis?.flows?.flows ?? []).some((flow) => {
+      if (flow.entry_point.kind !== "Endpoint") return false;
+      const chain = flow.hops.length > 0 ? [flow.hops[0].from, ...flow.hops.map((hop) => hop.to)] : [];
+      if (!chain.includes(id)) return false;
+      const files = new Set(chain.map((symbolId) => fileById.get(symbolId) ?? "").filter(Boolean));
+      return files.size > 1;
+    });
+    if (isEntryHandler) return directCrossBoundary || triggeredCrossBoundary ? "integration" : "api";
+    if (behaviorFile && triggeredCrossBoundary) return "integration";
   }
-  return "unit";
+  return "unknown";
 }
 
 function tooThin(ctx: GenerationContext): { thin: boolean; needed: string[] } {

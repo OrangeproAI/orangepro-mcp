@@ -26,7 +26,7 @@ export interface RiskGap {
 
 export interface RiskGapOptions {
   limit?: number;
-  /** Max gaps surfaced per file in the ranked list (portfolio diversity). Default 3. */
+  /** Optional max gaps per file for an explicitly diversified portfolio. Omit for the true global ranking. */
   maxPerFile?: number;
   repoRoot?: string;
   churnWindow?: string;
@@ -484,23 +484,18 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     })
     .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id));
 
-  // Portfolio diversity: cap how many gaps a single file contributes to the
-  // surfaced list, then backfill with the remaining highest scores if short.
-  const maxPerFile = Math.max(1, opts.maxPerFile ?? 3);
-  // Multi-program repos flood identical titles (76 x main) across files;
-  // per-FILE cap cannot see it. Same diversity principle, second axis.
-  const maxPerTitle = 2;
-  const usedPerTitle = new Map<string, number>();
+  // The default API is the true global ranking because reports call this list
+  // "top risks". Callers may explicitly request a diversified portfolio, but
+  // that presentation policy must never silently redefine rank.
+  if (opts.maxPerFile === undefined) return ranked.slice(0, limit);
+  const maxPerFile = Math.max(1, opts.maxPerFile);
   const perFile = new Map<string, number>();
   const surfaced: RiskGap[] = [];
   const overflow: RiskGap[] = [];
   for (const gap of ranked) {
     const used = perFile.get(gap.file) ?? 0;
-    const titleKey = (gap.title || "").split("(")[0].trim();
-    const usedTitle = usedPerTitle.get(titleKey) ?? 0;
-    if (used < maxPerFile && usedTitle < maxPerTitle) {
+    if (used < maxPerFile) {
       perFile.set(gap.file, used + 1);
-      usedPerTitle.set(titleKey, usedTitle + 1);
       surfaced.push(gap);
     } else {
       overflow.push(gap);

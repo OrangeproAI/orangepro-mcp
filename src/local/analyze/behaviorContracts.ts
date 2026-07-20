@@ -1,6 +1,6 @@
 import { slugify } from "../util/ids.js";
 
-export type BehaviorContractKind = "http_endpoint" | "graphql_operation" | "queue_processor";
+export type BehaviorContractKind = "http_endpoint" | "graphql_operation" | "queue_processor" | "scheduled_task" | "event_consumer";
 export type BehaviorContractFramework = "nestjs" | "express" | "fastify" | "file_route";
 
 export interface BehaviorContract {
@@ -32,6 +32,10 @@ const NEST_GQL_METHOD_DECORATOR = /@(Query|Mutation|Subscription|ResolveField)\s
 const NEST_PROCESSOR_DECORATOR = /@Processor\s*\(\s*(?:(["'`])([^"'`]*)\1|[A-Za-z_$][A-Za-z0-9_$.]*)?\s*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
 const NEST_PROCESS_METHOD_DECORATOR = /@Process\s*\((?:[^()]|\([^()]*\))*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
 const NEST_CONTROLLER_DECORATOR = /@Controller\s*\(\s*(?:(["'`])([^"'`]*)\1)?\s*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+const NEST_RESOLVER_DECORATOR = /@Resolver(?:\s*\((?:[^()]|\([^()]*\))*\))?(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+const NEST_WORKER_PROCESS_METHOD = /(?:^|[\n;}])\s*(?:public\s+|protected\s+|override\s+|async\s+)*\b(process)\s*\(/g;
+const NEST_CRON_METHOD_DECORATOR = /@Cron\s*\((?:[^()]|\([^()]*\))*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+const NEST_EVENT_METHOD_DECORATOR = /@(OnEvent|EventPattern|MessagePattern)\s*\(\s*(?:(["'`])([^"'`]*)\2|(?:[^()]|\([^()]*\))*)\s*\)(?:\s|@[A-Za-z_$][A-Za-z0-9_$]*(?:\s*\((?:[^()]|\([^()]*\))*\))?|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*?(?:public\s+|private\s+|protected\s+|async\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
 const EXPRESS_ROUTER_CALL = /\b(?:router|app)\s*\.\s*(get|post|put|delete|patch|options|head|all)\s*\(\s*(["'`])([^"'`]*)\2\s*,\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?|\([^)]*\)\s*=>|async\s+\([^)]*\)\s*=>|function\s+[A-Za-z_$][A-Za-z0-9_$]*)/gi;
 const EXPRESS_ROUTE_CHAIN = /\b(?:router|app)\s*\.\s*route\s*\(\s*(["'`])([^"'`]*)\1\s*\)((?:\s*\.\s*(?:get|post|put|delete|patch|options|head|all)\s*\([^)]*\))+)/gi;
 const CHAINED_METHOD_CALL = /\.\s*(get|post|put|delete|patch|options|head|all)\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?|\([^)]*\)\s*=>|async\s+\([^)]*\)\s*=>|function\s+[A-Za-z_$][A-Za-z0-9_$]*)/gi;
@@ -44,6 +48,8 @@ export function extractBehaviorContracts(content: string, file: string): Behavio
     ...extractNestContracts(content, file),
     ...extractNestGraphqlContracts(content, file),
     ...extractNestProcessorContracts(content, file),
+    ...extractNestScheduledContracts(content, file),
+    ...extractNestEventContracts(content, file),
     ...extractRouterContracts(content, file, EXPRESS_ROUTER_CALL, "express"),
     ...extractExpressRouteChains(content, file),
     ...extractRouterContracts(content, file, FASTIFY_CALL, "fastify")
@@ -68,98 +74,131 @@ function extractFileRouteContracts(content: string, file: string): BehaviorContr
 }
 
 function extractNestContracts(content: string, file: string): BehaviorContract[] {
-  const controllers = [...content.matchAll(NEST_CONTROLLER_DECORATOR)].map((match) => ({
-    index: match.index ?? 0,
-    path: normalizeRoutePath(match[2] ?? ""),
-    name: match[3]
-  }));
+  const controllers = classRanges(content, NEST_CONTROLLER_DECORATOR, 3, 2);
   if (controllers.length === 0) return [];
   const contracts: BehaviorContract[] = [];
-  for (const match of content.matchAll(NEST_METHOD_DECORATOR)) {
-    const index = match.index ?? 0;
-    const controller = nearestController(controllers, index);
-    const method = httpMethod(match[1]);
-    const routePath = joinRoutePaths(controller?.path ?? "", match[3] ?? match[5] ?? "");
-    const handler = match[6];
-    contracts.push(makeContract({
-      file,
-      framework: "nestjs",
-      method,
-      path: routePath,
-      handler,
-      controller: controller?.name
-    }));
+  for (const controller of controllers) {
+    for (const match of controller.body.matchAll(NEST_METHOD_DECORATOR)) {
+      const method = httpMethod(match[1]);
+      const routePath = joinRoutePaths(normalizeRoutePath(controller.path ?? ""), match[3] ?? match[5] ?? "");
+      const handler = match[6];
+      contracts.push(makeContract({ file, framework: "nestjs", method, path: routePath, handler, controller: controller.name }));
+    }
   }
   return contracts;
 }
 
 function extractNestGraphqlContracts(content: string, file: string): BehaviorContract[] {
-  // GraphQL resolvers are first-class user-triggerable entry points. In
-  // NestJS-heavy monorepos (Twenty: 415 @Query/@Mutation methods vs 139 HTTP
-  // routes) skipping them left almost every user behavior without an Endpoint
-  // anchor, so static flows rooted at internal orphan methods instead.
   if (!/@(Query|Mutation|Subscription)\s*\(/.test(content)) return [];
-  const resolvers = [...content.matchAll(CLASS_DECLARATION)].map((match) => ({
-    index: match.index ?? 0,
-    path: "",
-    name: match[1]
-  }));
+  // Only methods lexically inside an actual @Resolver class qualify. Looking
+  // for @Query anywhere in a file misclassified query builders and ORM metadata.
+  const resolvers = classRanges(content, NEST_RESOLVER_DECORATOR, 1);
   if (resolvers.length === 0) return [];
   const contracts: BehaviorContract[] = [];
-  for (const match of content.matchAll(NEST_GQL_METHOD_DECORATOR)) {
-    const resolver = nearestController(resolvers, match.index ?? 0);
-    if (!resolver) continue;
-    const opKind = match[1].toUpperCase();
-    if (opKind === "RESOLVEFIELD") continue; // field resolvers are not user-triggerable operations
-    const handler = match[2];
-    contracts.push(makeContract({
-      file,
-      framework: "nestjs",
-      kind: "graphql_operation",
-      method: opKind,
-      path: `graphql:${handler}`,
-      handler,
-      controller: resolver.name
-    }));
+  for (const resolver of resolvers) {
+    for (const match of resolver.body.matchAll(NEST_GQL_METHOD_DECORATOR)) {
+      const opKind = match[1].toUpperCase();
+      if (opKind === "RESOLVEFIELD") continue;
+      const handler = match[2];
+      contracts.push(makeContract({ file, framework: "nestjs", kind: "graphql_operation", method: opKind, path: `graphql:${handler}`, handler, controller: resolver.name }));
+    }
   }
   return contracts;
 }
 
 function extractNestProcessorContracts(content: string, file: string): BehaviorContract[] {
-  // Background jobs and crons are behaviors (June 27 definition: user- or
-  // system-triggerable, cross-layer, observable outcome). Anchoring them lets
-  // the flow walker show queue-driven chains instead of orphan roots.
-  const processors = [...content.matchAll(NEST_PROCESSOR_DECORATOR)].map((match) => ({
-    index: match.index ?? 0,
-    path: normalizeRoutePath(match[2] ?? ""),
-    name: match[3]
-  }));
+  const processors = classRanges(content, NEST_PROCESSOR_DECORATOR, 3, 2);
   if (processors.length === 0) return [];
   const contracts: BehaviorContract[] = [];
-  for (const match of content.matchAll(NEST_PROCESS_METHOD_DECORATOR)) {
-    const processor = nearestController(processors, match.index ?? 0);
-    if (!processor) continue;
-    const handler = match[1];
-    contracts.push(makeContract({
-      file,
-      framework: "nestjs",
-      kind: "queue_processor",
-      method: "JOB",
-      path: `queue:${processor.path || processor.name}`,
-      handler,
-      controller: processor.name
-    }));
+  for (const processor of processors) {
+    const handlers = new Set<string>();
+    for (const match of processor.body.matchAll(NEST_PROCESS_METHOD_DECORATOR)) handlers.add(match[1]);
+    if (/\bextends\s+WorkerHost\b/.test(processor.header)) {
+      for (const match of processor.body.matchAll(NEST_WORKER_PROCESS_METHOD)) handlers.add(match[1]);
+    }
+    for (const handler of handlers) {
+      contracts.push(makeContract({ file, framework: "nestjs", kind: "queue_processor", method: "JOB", path: `queue:${processor.path || processor.name}`, handler, controller: processor.name }));
+    }
   }
   return contracts;
 }
 
-function nearestController(controllers: Array<{ index: number; path: string; name: string }>, index: number) {
-  let current: { index: number; path: string; name: string } | undefined;
-  for (const controller of controllers) {
-    if (controller.index <= index) current = controller;
-    else break;
+function extractNestScheduledContracts(content: string, file: string): BehaviorContract[] {
+  const contracts: BehaviorContract[] = [];
+  for (const owner of classRanges(content, CLASS_DECLARATION, 1)) {
+    for (const match of owner.body.matchAll(NEST_CRON_METHOD_DECORATOR)) {
+      const handler = match[1];
+      contracts.push(makeContract({ file, framework: "nestjs", kind: "scheduled_task", method: "SCHEDULE", path: `schedule:${handler}`, handler, controller: owner.name }));
+    }
   }
-  return current;
+  return contracts;
+}
+
+function extractNestEventContracts(content: string, file: string): BehaviorContract[] {
+  const contracts: BehaviorContract[] = [];
+  for (const owner of classRanges(content, CLASS_DECLARATION, 1)) {
+    for (const match of owner.body.matchAll(NEST_EVENT_METHOD_DECORATOR)) {
+      const handler = match[4];
+      const event = match[3] ?? handler;
+      contracts.push(makeContract({ file, framework: "nestjs", kind: "event_consumer", method: "EVENT", path: `event:${event}`, handler, controller: owner.name }));
+    }
+  }
+  return contracts;
+}
+
+interface ClassRange {
+  name: string;
+  path?: string;
+  header: string;
+  body: string;
+}
+
+function classRanges(content: string, pattern: RegExp, nameGroup: number, pathGroup?: number): ClassRange[] {
+  const ranges: ClassRange[] = [];
+  for (const match of content.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const open = content.indexOf("{", start + match[0].length);
+    if (open === -1) continue;
+    const close = matchingBrace(content, open);
+    if (close === -1) continue;
+    ranges.push({
+      name: match[nameGroup],
+      ...(pathGroup ? { path: match[pathGroup] ?? "" } : {}),
+      header: content.slice(start, open),
+      body: content.slice(open + 1, close)
+    });
+  }
+  return ranges;
+}
+
+function matchingBrace(content: string, open: number): number {
+  let depth = 0;
+  let quote = "";
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = open; i < content.length; i++) {
+    const c = content[i];
+    const next = content[i + 1] ?? "";
+    if (lineComment) {
+      if (c === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (c === "*" && next === "/") { blockComment = false; i++; }
+      continue;
+    }
+    if (quote) {
+      if (c === "\\") { i++; continue; }
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "/" && next === "/") { lineComment = true; i++; continue; }
+    if (c === "/" && next === "*") { blockComment = true; i++; continue; }
+    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i;
+  }
+  return -1;
 }
 
 function extractRouterContracts(

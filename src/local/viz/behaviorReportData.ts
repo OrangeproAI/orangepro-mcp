@@ -645,17 +645,33 @@ export interface SystemMapModel {
   edges: Array<{ lane: string; service: string; flows: number }>;
 }
 
-const LANE_OF: Record<string, { id: string; label: string }> = {
-  MUTATION: { id: "graphql", label: "GraphQL" },
-  QUERY: { id: "graphql", label: "GraphQL" },
-  SUBSCRIPTION: { id: "graphql", label: "GraphQL" },
-  GET: { id: "http", label: "HTTP" },
-  POST: { id: "http", label: "HTTP" },
-  PUT: { id: "http", label: "HTTP" },
-  PATCH: { id: "http", label: "HTTP" },
-  DELETE: { id: "http", label: "HTTP" },
-  JOB: { id: "job", label: "Jobs" }
-};
+interface TriggerLane { id: string; label: string; priority: number }
+
+const HTTP_TRIGGER_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "ALL"]);
+const GRAPHQL_TRIGGER_VERBS = new Set(["MUTATION", "QUERY", "SUBSCRIPTION"]);
+
+/** Map every trigger into a stable lane. Known protocol families get friendly
+ * labels; unknown framework adapters still receive a deterministic lane rather
+ * than being silently deleted from the system map. */
+export function laneForTrigger(trigger: { verb: string; path: string }): TriggerLane {
+  const verb = (trigger.verb || "OTHER").trim().toUpperCase();
+  const triggerPath = (trigger.path || "").toLowerCase();
+  if (HTTP_TRIGGER_VERBS.has(verb) || triggerPath.startsWith("http:")) return { id: "http", label: "HTTP", priority: 20 };
+  if (GRAPHQL_TRIGGER_VERBS.has(verb) || triggerPath.startsWith("graphql:")) return { id: "graphql", label: "GraphQL", priority: 10 };
+  if (["JOB", "QUEUE", "PROCESS", "WORKER"].includes(verb) || triggerPath.startsWith("queue:")) return { id: "job", label: "Jobs", priority: 30 };
+  if (["SCHEDULE", "CRON", "TIMER"].includes(verb) || triggerPath.startsWith("schedule:") || triggerPath.startsWith("cron:")) return { id: "schedule", label: "Scheduled", priority: 40 };
+  if (["EVENT", "MESSAGE", "CONSUME", "CONSUMER", "SUBSCRIBE"].includes(verb) || triggerPath.startsWith("event:")) return { id: "event", label: "Events", priority: 50 };
+  if (["COMMAND", "CLI"].includes(verb) || triggerPath.startsWith("cli:")) return { id: "cli", label: "CLI", priority: 60 };
+  if (["RPC", "GRPC"].includes(verb) || triggerPath.startsWith("rpc:") || triggerPath.startsWith("grpc:")) return { id: "rpc", label: "RPC", priority: 70 };
+  const id = verb.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "other";
+  const label = verb
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(" ") || "Other";
+  return { id, label, priority: 100 };
+}
 
 function ownerOfSig(sig: string): string {
   const base = sig.includes("#") ? sig.slice(sig.indexOf("#") + 1) : sig;
@@ -673,15 +689,21 @@ export function buildSystemMapModel(data: {
   // on a full-scale repo. A flow's representative service is its most
   // DISTINCTIVE owner: lowest global frequency, deepest step on ties, with
   // near-ubiquitous owners eligible only when a flow touches nothing else.
-  const laneIdOf = (f: (typeof data.flows)[number]): string | null => {
-    const classified = f.trigger && LANE_OF[(f.trigger.verb || "").toUpperCase()]?.id;
-    if (classified) return classified;
-    // Unclassified flows join the map ONLY when their root is a true entry
-    // point (main/CLI/worker programs on repos without route topology).
-    // Internal chains stay off-map — counted in the pruned disclosure.
-    return f.root_entry ? "entry" : null;
+  const laneForFlow = (flow: (typeof data.flows)[number]): TriggerLane | null => {
+    if (flow.trigger) return laneForTrigger(flow.trigger);
+    // A program root without a framework trigger is still a real product entry
+    // point (CLI/main). Internal call-graph roots remain excluded.
+    return flow.root_entry ? { id: "entry", label: "Entry points", priority: 80 } : null;
   };
-  const triggerFlows = data.flows.filter((f) => laneIdOf(f) !== null);
+  const triggerFlows = data.flows.filter((flow) => laneForFlow(flow) !== null);
+  const laneMeta = new Map<string, TriggerLane>();
+  for (const flow of triggerFlows) {
+    const lane = laneForFlow(flow)!;
+    laneMeta.set(lane.id, lane);
+  }
+  const laneOrder = [...laneMeta.values()]
+    .sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label) || a.id.localeCompare(b.id))
+    .map((lane) => lane.id);
   const ownerFreq = new Map<string, number>();
   for (const f of triggerFlows) {
     const seen = new Set<string>();
@@ -701,7 +723,7 @@ export function buildSystemMapModel(data: {
   const edgeFlows = new Map<string, number>();
   const svcLaneFlows = new Map<string, Map<string, number>>();
   for (const f of triggerFlows) {
-    const lane = { id: laneIdOf(f)! };
+    const lane = laneForFlow(f)!;
     const steps = f.steps ?? [];
     let svc = "";
     let bestFreq = Infinity;
@@ -736,17 +758,17 @@ export function buildSystemMapModel(data: {
     let best = "";
     let bestN = -1;
     for (const [l, n] of perLane) if (n > bestN) { best = l; bestN = n; }
-    return ["graphql", "http", "job"].indexOf(best);
+    return laneOrder.indexOf(best);
   };
   const byTraffic = [...svcFlows.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const chosen = new Set<string>();
   // 1) Every lane is guaranteed its top 2 services — a lane with 56 flows must
   //    never render edge-less just because its traffic is spread thin.
-  for (const laneId of ["graphql", "http", "job"]) {
+  for (const laneId of laneOrder) {
     let taken = 0;
     for (const [svc] of byTraffic) {
       if (taken >= 2) break;
-      if (laneRank(svc) === ["graphql", "http", "job"].indexOf(laneId) && !chosen.has(svc)) {
+      if (laneRank(svc) === laneOrder.indexOf(laneId) && !chosen.has(svc)) {
         chosen.add(svc);
         taken++;
       }
@@ -796,7 +818,6 @@ export function buildSystemMapModel(data: {
     riskBySvc.set(svc, e);
   }
 
-  const laneOrder = ["graphql", "http", "job", "entry"];
   // Conservation: edges drawn per lane must sum to the lane's stated count.
   // Everything below the cut aggregates into one dashed "+N more services"
   // node per lane — 51 job flows must never silently vanish.
@@ -831,7 +852,7 @@ export function buildSystemMapModel(data: {
   return {
     lanes: laneOrder
       .filter((id) => laneFlows.has(id))
-      .map((id) => ({ id, label: id === "graphql" ? "GraphQL" : id === "http" ? "HTTP" : id === "job" ? "Jobs" : "Entry points", flows: laneFlows.get(id) ?? 0 })),
+      .map((id) => ({ id, label: laneMeta.get(id)?.label ?? id, flows: laneFlows.get(id) ?? 0 })),
     services: [
       ...top.map(([label, flows]) => ({
         id: label,
