@@ -436,8 +436,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   const testFileStems: Array<{ relPath: string; stem: string; dir: string }> = [];
   // TS/JS test+code files fed to the import-graph resolver (Gate 1).
   const resolveFiles: Array<{ abs: string; rel: string; role: "test" | "source" }> = [];
-  // Go files for same-package confirm pairing (resolveFiles is TS/JS-only by design).
-  const goFilesForConfirm: Array<{ abs: string; rel: string }> = [];
   // Emitted CodeSymbol names per file — the call graph resolves callers/callees
   // ONLY to symbols that actually became nodes (the "known symbol" invariant).
   const symbolsByFile = new Map<string, Set<string>>();
@@ -637,9 +635,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
 
     if ((role === "test" || role === "code") && (language === "typescript" || language === "javascript")) {
       resolveFiles.push({ abs: file.absPath, rel: file.relPath, role: role === "test" ? "test" : "source" });
-    }
-    if ((role === "test" || role === "code") && language === "go") {
-      goFilesForConfirm.push({ abs: file.absPath, rel: file.relPath });
     }
 
     if (role === "test") {
@@ -1952,28 +1947,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       if (seenPair.has(key)) continue;
       seenPair.add(key);
       candidates.push({ testRel, testAbs, implRel, implAbs });
-    }
-    // Go candidate pairs: the resolver's import-derived MAY_RELATE_TO can never
-    // pair Go tests (same-package tests import nothing). Go's own encapsulation
-    // semantics define the candidate set instead: a _test.go and the non-test
-    // .go files of its directory-package. Bounded, deterministic, no lexical
-    // guessing — confirmation still requires a call-syntax symbol reference.
-    const goImplsByDir = new Map<string, { rel: string; abs: string }[]>();
-    for (const f of goFilesForConfirm) {
-      if (f.rel.endsWith("_test.go") || !eligibleSymbolsByFile.has(f.rel)) continue;
-      const dir = f.rel.slice(0, f.rel.lastIndexOf("/"));
-      if (!goImplsByDir.has(dir)) goImplsByDir.set(dir, []);
-      goImplsByDir.get(dir)!.push({ rel: f.rel, abs: f.abs });
-    }
-    for (const f of goFilesForConfirm) {
-      if (!f.rel.endsWith("_test.go")) continue;
-      const dir = f.rel.slice(0, f.rel.lastIndexOf("/"));
-      for (const impl of goImplsByDir.get(dir) ?? []) {
-        const key = `${f.rel}|${impl.rel}`;
-        if (seenPair.has(key)) continue;
-        seenPair.add(key);
-        candidates.push({ testRel: f.rel, testAbs: f.abs, implRel: impl.rel, implAbs: impl.abs });
-      }
     }
     const confirmBudget = Math.max(1, Number(process.env.ORANGEPRO_MAX_CONFIRM_FILES) || 1500);
     const riskSymbolLimit = Math.max(1, Number(process.env.ORANGEPRO_CONFIRM_RISK_SYMBOLS) || DEFAULT_CONFIRM_RISK_SYMBOLS);
