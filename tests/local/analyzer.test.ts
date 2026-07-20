@@ -374,7 +374,7 @@ describe("analyzeRepo", () => {
     expect(byId.get("sym:src/lib/resend.ts#getResendClient")?.properties.denominator_reason_code).toBe("not_entry_point_adjacent");
   });
 
-  it("excludes infrastructure behavior-surface noise while retaining business service methods", () => {
+  it("uses semantic infrastructure signals without excluding product package layouts", () => {
     mkdirSync(join(dir, "src", "services"), { recursive: true });
     mkdirSync(join(dir, "src", "models"), { recursive: true });
     mkdirSync(join(dir, "src", "tools"), { recursive: true });
@@ -468,18 +468,7 @@ describe("analyzeRepo", () => {
       "sym:src/services/order-module-service.ts#OrderModuleService.__joinerConfig",
       "sym:src/services/order-module-service.ts#OrderModuleService.loadModules",
       "sym:src/models/address.ts#createAddressModel",
-      "sym:src/tools/package.ts#getPackageManager",
-      "sym:packages/admin/dashboard/src/layout.tsx#RootLayout",
-      "sym:packages/core/js-sdk/src/client.ts#listProducts",
-      "sym:packages/core/framework/src/http/router.ts#ApiLoader.load",
-      "sym:packages/modules/workflow-engine-redis/src/services/workflow-orchestrator.ts#WorkflowOrchestratorService.run",
-      "sym:packages/modules/link-modules/src/services/link-module-service.ts#LinkModuleService.create",
-      "sym:www/packages/docs-ui/src/search.tsx#SearchProvider",
-      "sym:www/apps/api-reference/app/layout.tsx#RootLayout",
-      "sym:www/apps/api-reference/providers/search.tsx#SearchProvider",
-      "sym:packages/design-system/toolbox/src/figma.ts#Figma",
-      "sym:packages/admin/admin-vite-plugin/src/routes/helpers.ts#generateRoutes",
-      "sym:packages/medusa/src/commands/db/migrate.ts#runMigrationScripts"
+      "sym:src/tools/package.ts#getPackageManager"
     ]) {
       expect(byId.get(id)?.denominator_eligible).toBe(false);
       expect(byId.get(id)?.properties.denominator_reason_code).toBe("infra_behavior_surface");
@@ -493,7 +482,17 @@ describe("analyzeRepo", () => {
       "sym:src/services/payment-module-service.ts#PaymentModuleService.capturePayment",
       "sym:src/services/payment-provider-service.ts#PaymentProviderService.capturePayment",
       "sym:src/services/payment-provider-service.ts#PaymentProviderService.refundPayment",
-      "sym:src/services/tax-provider-service.ts#TaxProviderService.getTaxLines"
+      "sym:src/services/tax-provider-service.ts#TaxProviderService.getTaxLines",
+      "sym:packages/admin/dashboard/src/layout.tsx#RootLayout",
+      "sym:packages/core/js-sdk/src/client.ts#listProducts",
+      "sym:packages/core/framework/src/http/router.ts#ApiLoader.load",
+      "sym:packages/modules/workflow-engine-redis/src/services/workflow-orchestrator.ts#WorkflowOrchestratorService.run",
+      "sym:packages/modules/link-modules/src/services/link-module-service.ts#LinkModuleService.create",
+      "sym:www/packages/docs-ui/src/search.tsx#SearchProvider",
+      "sym:www/apps/api-reference/app/layout.tsx#RootLayout",
+      "sym:www/apps/api-reference/providers/search.tsx#SearchProvider",
+      "sym:packages/admin/admin-vite-plugin/src/routes/helpers.ts#generateRoutes",
+      "sym:packages/medusa/src/commands/db/migrate.ts#runMigrationScripts"
     ]) {
       expect(byId.get(id)?.denominator_eligible).toBe(true);
     }
@@ -696,7 +695,7 @@ describe("analyzeRepo", () => {
     expect(fragment.edges.filter((edge) => edge.relationship_type === "IMPLEMENTED_IN" && edge.from_external_id === endpoint?.external_id)).toEqual([]);
   });
 
-  it("does not discover endpoint metadata in excluded tooling package roles", () => {
+  it("discovers endpoint metadata regardless of package role names", () => {
     mkdirSync(join(dir, "packages", "admin", "admin-bundler", "src", "commands"), { recursive: true });
     mkdirSync(join(dir, "packages", "medusa", "src", "commands"), { recursive: true });
     writeFileSync(
@@ -718,8 +717,8 @@ describe("analyzeRepo", () => {
 
     const fragment = analyzeRepo(dir);
 
-    expect(fragment.nodes.filter((n) => n.kind === "Endpoint")).toEqual([]);
-    expect(fragment.analysis?.behavior_contracts).toBeUndefined();
+    expect(fragment.nodes.filter((n) => n.kind === "Endpoint").map((n) => n.title).sort()).toEqual(["GET /", "GET /health"]);
+    expect(fragment.analysis?.behavior_contracts).toMatchObject({ total: 2, by_framework: { express: 2 } });
   });
 
   it("links file-route endpoint contracts to exported HTTP handler symbols", () => {
