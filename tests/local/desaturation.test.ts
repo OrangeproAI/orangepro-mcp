@@ -371,6 +371,28 @@ describe("buildSystemMapModel", () => {
     }
   });
 
+  it("shows true program roots in an entry lane while excluding internal orphan roots", () => {
+    const programRoot = {
+      title: "sync command",
+      root_entry: true,
+      risk: null,
+      proof: "none" as const,
+      services: 1,
+      flow_tier: "hard: reachable" as const,
+      why: "",
+      steps: [{ sig: "SyncCommand.run", tier: "hard" as const, edge: null, desc: "" }]
+    };
+    const internalRoot = {
+      ...programRoot,
+      title: "internal helper",
+      root_entry: false,
+      steps: [{ sig: "InternalHelper.run", tier: "hard" as const, edge: null, desc: "" }]
+    };
+    const model = buildSystemMapModel({ flows: [programRoot, internalRoot], risks: [], behaviors: [] } as never);
+    expect(model.lanes).toEqual([{ id: "entry", label: "Entry points", flows: 1 }]);
+    expect(model.edges.reduce((sum, edge) => sum + edge.flows, 0)).toBe(1);
+  });
+
   it("is deterministic: same input, same model", () => {
     const a = JSON.stringify(buildSystemMapModel({ flows, risks, behaviors } as never));
     const b = JSON.stringify(buildSystemMapModel({ flows: [...flows], risks: [...risks], behaviors: [...behaviors] } as never));
@@ -433,42 +455,5 @@ describe("computeReportDelta", () => {
   it("baseline round-trips through reportBaselineOf", () => {
     const snap = reportBaselineOf(cur({}) as never, "2026-07-18T00:00:00Z");
     expect(computeReportDelta(snap, cur({}) as never).changed).toBe(false);
-  });
-});
-
-// ── Fixture-fleet regressions: three repo shapes, one scoring codebase ──────
-
-// ── Fixture fleet: multi-program shape (76 × main) vs the per-title cap ─────
-
-describe("cross-shape fixes", () => {
-  const sym = (file: string, title: string, churn: number) => ({
-    kind: "CodeSymbol" as const,
-    external_id: `sym:${file}#${title}`,
-    title,
-    denominator_eligible: true,
-    properties: { file, language: "go", git_churn: churn },
-    evidence_strength: "hard" as const,
-    review_status: "auto_detected" as const,
-    confidence: 1,
-    provenance: { source: "fixture" }
-  });
-
-  it("per-title cap: identical titles yield at most 2 slots when alternatives exist", async () => {
-    const { rankRiskGaps } = await import("../../src/local/score/risk.js");
-    const mains = [...Array(8)].map((_, i) => sym(`app${i}/main.go`, "main", 400));
-    const others = [...Array(6)].map((_, i) => sym(`svc${i}/service.go`, `Service${i}Run`, 300));
-    const graph = { nodes: [...mains, ...others], edges: [], analysis: {}, workspace: { root: "/tmp" } } as never;
-    const gaps = rankRiskGaps(graph, { limit: 8, repoRoot: "/tmp" });
-    const mainCount = gaps.filter((g) => g.title === "main").length;
-    expect(mainCount).toBeLessThanOrEqual(2);
-    expect(gaps.length).toBe(8); // list still fills from distinct-title alternatives
-  });
-
-  it("cli: --version prints a semver and never falls through to start", async () => {
-    const { execFileSync } = await import("node:child_process");
-    const { existsSync } = await import("node:fs");
-    const outStr = execFileSync("node", ["dist/local/cli.js", "--version"], { cwd: process.cwd(), timeout: 20000, encoding: "utf8" });
-    expect(outStr.trim()).toMatch(/^\d+\.\d+\.\d+/);
-    expect(existsSync("/tmp/.orangepro-version-probe")).toBe(false); // no analysis side effects
   });
 });

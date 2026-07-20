@@ -678,7 +678,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     if ((role === "test" || role === "code") && (language === "typescript" || language === "javascript")) {
       resolveFiles.push({ abs: file.absPath, rel: file.relPath, role: role === "test" ? "test" : "source" });
     }
-
     if (role === "test") {
       testFiles++;
       testFileStems.push({ relPath: file.relPath, stem: moduleStem(file.relPath), dir: dirOf(file.relPath) });
