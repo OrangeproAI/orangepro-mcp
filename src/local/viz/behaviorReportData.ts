@@ -2,7 +2,7 @@ import path from "node:path";
 import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
 import type { Ledger } from "../ledger.js";
 import { buildRtm, type RtmRow } from "../rtm.js";
-import { rankRiskGaps, type RiskGap } from "../score/risk.js";
+import { isEntryPoint, rankRiskGaps, type RiskGap } from "../score/risk.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 
 export interface BehaviorReportData {
@@ -70,6 +70,8 @@ export interface BehaviorReportData {
 export interface BehaviorReportFlow {
   title: string;
   trigger: { verb: string; path: string } | null;
+  /** Root symbol is a true entry point per the graph (route/main/CLI). */
+  root_entry?: boolean;
   risk: "critical" | "high" | "medium" | null;
   proof: "proven" | "none";
   services: number;
@@ -422,7 +424,9 @@ function flows(graph: LocalGraph, rows: RtmRow[], risks: RiskGap[]): BehaviorRep
   const proven = new Set(rows.filter((r) => r.evidence_tier === "proven").map((r) => r.behavior_id));
   const riskById = new Map(risks.map((r) => [r.id, r]));
   return (graph.analysis?.flows?.flows ?? []).map((flow) => {
-    const trigger = endpointTrigger(nodesById.get(flow.entry_point.external_id));
+    const rootNode = nodesById.get(flow.entry_point.external_id);
+    const trigger = endpointTrigger(rootNode);
+    const root_entry = rootNode ? isEntryPoint(rootNode) : false;
     const proof: "proven" | "none" = proven.has(flow.entry_point.external_id) || proven.has(flow.hops[0]?.from ?? "") ? "proven" : "none";
     const steps = [
       {
@@ -443,6 +447,7 @@ function flows(graph: LocalGraph, rows: RtmRow[], risks: RiskGap[]): BehaviorRep
     return {
       title: flow.entry_point.title || flow.entry_point.external_id,
       trigger,
+      root_entry,
       risk: risk ? riskBucket(risk.risk_score, maxRiskScore) : null,
       proof,
       services,
@@ -668,7 +673,15 @@ export function buildSystemMapModel(data: {
   // on a full-scale repo. A flow's representative service is its most
   // DISTINCTIVE owner: lowest global frequency, deepest step on ties, with
   // near-ubiquitous owners eligible only when a flow touches nothing else.
-  const triggerFlows = data.flows.filter((f) => f.trigger && LANE_OF[(f.trigger.verb || "").toUpperCase()]);
+  const laneIdOf = (f: (typeof data.flows)[number]): string | null => {
+    const classified = f.trigger && LANE_OF[(f.trigger.verb || "").toUpperCase()]?.id;
+    if (classified) return classified;
+    // Unclassified flows join the map ONLY when their root is a true entry
+    // point (main/CLI/worker programs on repos without route topology).
+    // Internal chains stay off-map — counted in the pruned disclosure.
+    return f.root_entry ? "entry" : null;
+  };
+  const triggerFlows = data.flows.filter((f) => laneIdOf(f) !== null);
   const ownerFreq = new Map<string, number>();
   for (const f of triggerFlows) {
     const seen = new Set<string>();
@@ -688,7 +701,7 @@ export function buildSystemMapModel(data: {
   const edgeFlows = new Map<string, number>();
   const svcLaneFlows = new Map<string, Map<string, number>>();
   for (const f of triggerFlows) {
-    const lane = LANE_OF[(f.trigger!.verb || "").toUpperCase()];
+    const lane = { id: laneIdOf(f)! };
     const steps = f.steps ?? [];
     let svc = "";
     let bestFreq = Infinity;
@@ -783,7 +796,7 @@ export function buildSystemMapModel(data: {
     riskBySvc.set(svc, e);
   }
 
-  const laneOrder = ["graphql", "http", "job"];
+  const laneOrder = ["graphql", "http", "job", "entry"];
   // Conservation: edges drawn per lane must sum to the lane's stated count.
   // Everything below the cut aggregates into one dashed "+N more services"
   // node per lane — 51 job flows must never silently vanish.
@@ -818,7 +831,7 @@ export function buildSystemMapModel(data: {
   return {
     lanes: laneOrder
       .filter((id) => laneFlows.has(id))
-      .map((id) => ({ id, label: id === "graphql" ? "GraphQL" : id === "http" ? "HTTP" : "Jobs", flows: laneFlows.get(id) ?? 0 })),
+      .map((id) => ({ id, label: id === "graphql" ? "GraphQL" : id === "http" ? "HTTP" : id === "job" ? "Jobs" : "Entry points", flows: laneFlows.get(id) ?? 0 })),
     services: [
       ...top.map(([label, flows]) => ({
         id: label,
@@ -900,6 +913,21 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
   const riskIds = new Set(risks.map((r) => r.id));
   const firstRowForFile = new Map<string, string>();
   for (const r of risks) if (!firstRowForFile.has(r.file)) firstRowForFile.set(r.file, r.id);
+  // Ambiguity-qualified display: identical titles from DIFFERENT files
+  // (multi-program repos: 76 x main) get their top-level dir as a prefix.
+  // Purely display; single-file titles render unchanged everywhere else.
+  const titleFiles = new Map<string, Set<string>>();
+  for (const r of risks) {
+    const t = (r.title || "").split("(")[0].trim();
+    if (!titleFiles.has(t)) titleFiles.set(t, new Set());
+    titleFiles.get(t)!.add(r.file);
+  }
+  const qualify = (risk: RiskGap, path: string): string => {
+    const t = (risk.title || "").split("(")[0].trim();
+    if ((titleFiles.get(t)?.size ?? 0) <= 1) return path;
+    const top = (risk.file || "").split("/").filter(Boolean)[0] ?? "";
+    return top ? `${top}: ${path}` : path;
+  };
   return risks.map((risk, idx) => {
     const methodMatch = risk.title.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(.+)$/i);
     const tags: Array<[label: string, kind: "risk" | "info" | "entry"]> = [];
@@ -912,7 +940,7 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
       ...(() => {
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
         const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
-        const path = methodMatch?.[2] ?? risk.title;
+        const path = qualify(risk, methodMatch?.[2] ?? risk.title);
         const generatedCategories = [...new Set([
           ...generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)),
           // An integration/api/e2e-layer draft targets integration_flow. This

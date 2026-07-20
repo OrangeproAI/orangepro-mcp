@@ -338,3 +338,40 @@ describe("computeReportDelta", () => {
     expect(computeReportDelta(snap, cur({}) as never).changed).toBe(false);
   });
 });
+
+// ── Fixture-fleet regressions: three repo shapes, one scoring codebase ──────
+
+// ── Fixture fleet: multi-program shape (76 × main) vs the per-title cap ─────
+
+describe("cross-shape fixes", () => {
+  const sym = (file: string, title: string, churn: number) => ({
+    kind: "CodeSymbol" as const,
+    external_id: `sym:${file}#${title}`,
+    title,
+    denominator_eligible: true,
+    properties: { file, language: "go", git_churn: churn },
+    evidence_strength: "hard" as const,
+    review_status: "auto_detected" as const,
+    confidence: 1,
+    provenance: { source: "fixture" }
+  });
+
+  it("per-title cap: identical titles yield at most 2 slots when alternatives exist", async () => {
+    const { rankRiskGaps } = await import("../../src/local/score/risk.js");
+    const mains = [...Array(8)].map((_, i) => sym(`app${i}/main.go`, "main", 400));
+    const others = [...Array(6)].map((_, i) => sym(`svc${i}/service.go`, `Service${i}Run`, 300));
+    const graph = { nodes: [...mains, ...others], edges: [], analysis: {}, workspace: { root: "/tmp" } } as never;
+    const gaps = rankRiskGaps(graph, { limit: 8, repoRoot: "/tmp" });
+    const mainCount = gaps.filter((g) => g.title === "main").length;
+    expect(mainCount).toBeLessThanOrEqual(2);
+    expect(gaps.length).toBe(8); // list still fills from distinct-title alternatives
+  });
+
+  it("cli: --version prints a semver and never falls through to start", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { existsSync } = await import("node:fs");
+    const outStr = execFileSync("node", ["dist/local/cli.js", "--version"], { cwd: process.cwd(), timeout: 20000, encoding: "utf8" });
+    expect(outStr.trim()).toMatch(/^\d+\.\d+\.\d+/);
+    expect(existsSync("/tmp/.orangepro-version-probe")).toBe(false); // no analysis side effects
+  });
+});

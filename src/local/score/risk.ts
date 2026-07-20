@@ -130,7 +130,7 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
   return out;
 }
 
-function isEntryPoint(node: GraphNode): boolean {
+export function isEntryPoint(node: GraphNode): boolean {
   const file = symbolFile(node);
   const title = symbolTitle(node);
   if (API_HANDLER_NAME_RE.test(title) && /(^|\/)api(s)?\//i.test(file)) return true;
@@ -487,13 +487,20 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // Portfolio diversity: cap how many gaps a single file contributes to the
   // surfaced list, then backfill with the remaining highest scores if short.
   const maxPerFile = Math.max(1, opts.maxPerFile ?? 3);
+  // Multi-program repos flood identical titles (76 x main) across files;
+  // per-FILE cap cannot see it. Same diversity principle, second axis.
+  const maxPerTitle = 2;
+  const usedPerTitle = new Map<string, number>();
   const perFile = new Map<string, number>();
   const surfaced: RiskGap[] = [];
   const overflow: RiskGap[] = [];
   for (const gap of ranked) {
     const used = perFile.get(gap.file) ?? 0;
-    if (used < maxPerFile) {
+    const titleKey = (gap.title || "").split("(")[0].trim();
+    const usedTitle = usedPerTitle.get(titleKey) ?? 0;
+    if (used < maxPerFile && usedTitle < maxPerTitle) {
       perFile.set(gap.file, used + 1);
+      usedPerTitle.set(titleKey, usedTitle + 1);
       surfaced.push(gap);
     } else {
       overflow.push(gap);
