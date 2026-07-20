@@ -2354,6 +2354,170 @@ export interface ConfirmerOutput {
   capped_downgrades: number;
 }
 
+
+// ─── Cross-shape confirm fallbacks ──────────────────────────────────────────
+// The TS program confirms relative imports. Two ecosystem-semantic fallbacks
+// cover what it structurally cannot, WITHOUT loosening evidence standards:
+// both still require (import resolves to the impl file) AND (the symbol is
+// referenced in the test) — the same bar, reached by different resolution.
+//
+//  1. Workspace/alias resolution (TS monorepos): specifier → file via
+//     tsconfig paths (walking extends) and workspace package names, with
+//     built-path → src mapping (pkg/lib/x → pkg/src/x). General npm/tsc
+//     semantics — not tuned to any one repo.
+//  2. Go same-package: Go's encapsulation unit is the directory-package; a
+//     _test.go beside the impl imports nothing yet calls the symbol
+//     directly. A call-syntax reference from the sibling test IS Go's
+//     strongest static link.
+
+import { readFileSync as _rf, existsSync as _ex, readdirSync as _rd } from "node:fs";
+import { dirname as _dn, join as _jn, resolve as _rs } from "node:path";
+
+const EXT_TRIES = ["", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"];
+const BUILT_DIRS = /\/(lib|dist|build|out)(\/|$)/;
+
+function tryFile(base: string): string | null {
+  for (const e of EXT_TRIES) if (_ex(base + e)) return base + e;
+  return null;
+}
+
+function readJsonSafe(p: string): Record<string, unknown> | null {
+  try { return JSON.parse(_rf(p, "utf8")) as Record<string, unknown>; } catch { return null; }
+}
+
+/** Nearest tsconfig paths/baseUrl for a file, walking extends chains (depth-capped). */
+function tsconfigPathsFor(fileAbs: string, stopDir: string): { baseUrl: string; paths: Record<string, string[]> } | null {
+  let dir = _dn(fileAbs);
+  for (let i = 0; i < 12 && dir.startsWith(stopDir); i++) {
+    const tc = _jn(dir, "tsconfig.json");
+    if (_ex(tc)) {
+      let merged: { baseUrl?: string; paths?: Record<string, string[]> } = {};
+      let cur: string | null = tc;
+      for (let d = 0; d < 6 && cur; d++) {
+        const j = readJsonSafe(cur);
+        if (!j) break;
+        const co = (j.compilerOptions ?? {}) as { baseUrl?: string; paths?: Record<string, string[]> };
+        merged = { baseUrl: merged.baseUrl ?? (co.baseUrl ? _rs(_dn(cur), co.baseUrl) : undefined), paths: { ...co.paths, ...merged.paths } };
+        cur = typeof j.extends === "string" ? (tryFile(_rs(_dn(cur), j.extends as string)) ?? (_ex(_rs(_dn(cur), j.extends + ".json")) ? _rs(_dn(cur), j.extends + ".json") : null)) : null;
+      }
+      return { baseUrl: merged.baseUrl ?? _dn(tc), paths: merged.paths ?? {} };
+    }
+    const parent = _dn(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** Workspace member name → package dir, from the root package.json workspaces globs. */
+function workspacePackages(repoRoot: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const rootPkg = readJsonSafe(_jn(repoRoot, "package.json"));
+  const ws = rootPkg?.workspaces;
+  const globs: string[] = Array.isArray(ws) ? ws as string[] : Array.isArray((ws as { packages?: string[] })?.packages) ? (ws as { packages: string[] }).packages : [];
+  const dirs: string[] = [];
+  for (const g of globs) {
+    if (g.endsWith("/*")) {
+      const base = _jn(repoRoot, g.slice(0, -2));
+      try { for (const d of _rd(base)) dirs.push(_jn(base, d)); } catch { /* absent */ }
+    } else dirs.push(_jn(repoRoot, g));
+  }
+  for (const d of dirs) {
+    const pj = readJsonSafe(_jn(d, "package.json"));
+    const name = pj?.name;
+    if (typeof name === "string") out.set(name, d);
+  }
+  return out;
+}
+
+/** Resolve one import specifier from a test file to an in-repo file, or null. */
+export function resolveSpecifier(spec: string, fromFile: string, repoRoot: string, wsPkgs: Map<string, string>): string | null {
+  if (spec.startsWith(".")) return tryFile(_rs(_dn(fromFile), spec));
+  const tc = tsconfigPathsFor(fromFile, repoRoot);
+  if (tc) {
+    for (const [pat, targets] of Object.entries(tc.paths)) {
+      const star = pat.indexOf("*");
+      const matches = star >= 0 ? spec.startsWith(pat.slice(0, star)) && spec.endsWith(pat.slice(star + 1)) : spec === pat;
+      if (!matches) continue;
+      const wild = star >= 0 ? spec.slice(pat.slice(0, star).length, spec.length - pat.slice(star + 1).length) : "";
+      for (const t of targets) {
+        const hit = tryFile(_rs(tc.baseUrl, t.replace("*", wild)));
+        if (hit) return hit;
+      }
+    }
+    if (!spec.startsWith("@") && !spec.includes(":")) {
+      const viaBase = tryFile(_rs(tc.baseUrl, spec));
+      if (viaBase) return viaBase;
+    }
+  }
+  // workspace package name (longest-prefix match), with built→src subpath mapping
+  for (const [name, dir] of wsPkgs) {
+    if (spec !== name && !spec.startsWith(name + "/")) continue;
+    const sub = spec === name ? "" : spec.slice(name.length + 1);
+    const candidates = sub
+      ? [sub, sub.replace(BUILT_DIRS, "/src/"), "src/" + sub.replace(/^(lib|dist|build|out)\//, "")]
+      : ["src/index", "index"];
+    for (const c of candidates) {
+      const hit = tryFile(_jn(dir, c));
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+const IMPORT_RE = /(?:import|export)[^'"\n]*from\s*['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+/** Fallback confirm: does ANY import of testAbs resolve to implAbs, and is the symbol referenced? */
+export function confirmViaResolvedImport(testAbs: string, implAbs: string, names: string[], repoRoot: string, wsPkgs: Map<string, string>): Map<string, string> {
+  const out = new Map<string, string>();
+  let src = "";
+  try { src = _rf(testAbs, "utf8"); } catch { return out; }
+  let importsImpl = false;
+  let m: RegExpExecArray | null;
+  IMPORT_RE.lastIndex = 0;
+  while ((m = IMPORT_RE.exec(src)) !== null) {
+    const spec = m[1] ?? m[2];
+    if (!spec) continue;
+    const resolved = resolveSpecifier(spec, testAbs, repoRoot, wsPkgs);
+    if (resolved && _rs(resolved) === _rs(implAbs)) { importsImpl = true; break; }
+  }
+  if (!importsImpl) return out;
+  for (const n of names) {
+    if (new RegExp("\\b" + n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b").test(src)) out.set(n, "workspace-resolved import + symbol reference");
+  }
+  return out;
+}
+
+/** Go same-package confirm: sibling _test.go with a call-syntax reference to the symbol. */
+export function confirmGoSamePackage(testAbs: string, implAbs: string, names: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!testAbs.endsWith("_test.go") || !implAbs.endsWith(".go")) return out;
+  if (_dn(testAbs) !== _dn(implAbs)) return out;
+  let src = "";
+  try { src = _rf(testAbs, "utf8"); } catch { return out; }
+  for (const n of names) {
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // direct call `Name(` or passed as workflow/handler reference `(Name)` / `, Name)` / `(Name,`
+    if (new RegExp("\\b" + esc + "\\s*\\(").test(src) || new RegExp("[,(]\\s*" + esc + "\\s*[,)]").test(src)) {
+      out.set(n, "go same-package call reference");
+    }
+  }
+  return out;
+}
+
+function findRepoRoot(anchor: string): string {
+  let dir = _ex(anchor) && !anchor.endsWith(".json") ? _dn(anchor) : _dn(anchor);
+  for (let i = 0; i < 15; i++) {
+    const pj = readJsonSafe(_jn(dir, "package.json"));
+    if (pj && (pj.workspaces || _ex(_jn(dir, ".git")))) return dir;
+    if (_ex(_jn(dir, "go.mod")) || _ex(_jn(dir, ".git"))) return dir;
+    const parent = _dn(dir);
+    if (parent === dir) return dir;
+    dir = parent;
+  }
+  return dir;
+}
+
 /**
  * Run the confirmer over every candidate (test -> impl) pair (the resolver-derived
  * MAY_RELATE_TO links). For each denominator-eligible exported symbol of the impl
@@ -2370,16 +2534,27 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
 
   const absFiles = new Set<string>();
   for (const c of candidates) {
+    if (c.testAbs.endsWith(".go") || c.implAbs.endsWith(".go")) continue; // Go pairs use the same-package fallback, not the TS program
     absFiles.add(c.testAbs);
     absFiles.add(c.implAbs);
   }
   const ctx = buildConfirmProgram([...absFiles], anchorFile);
+  const repoRootForConfirm = findRepoRoot(anchorFile);
+  const wsPkgsForConfirm = workspacePackages(repoRootForConfirm);
 
   const seen = new Set<string>(); // dedup (testRel|symId)
   for (const c of candidates) {
     const names = symbolsByImpl.get(c.implRel);
     if (!names || names.length === 0) continue;
-    const verdicts = confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
+    const isGoPair = c.testAbs.endsWith(".go");
+    const verdicts = isGoPair ? new Map<string, { verdict: string; reason: string }>() : confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
+    // Cross-shape fallbacks for names the TS program could not confirm:
+    const unconfirmed = names.filter((n) => verdicts.get(n)?.verdict !== "confirmed");
+    if (unconfirmed.length > 0) {
+      const goHits = confirmGoSamePackage(c.testAbs, c.implAbs, unconfirmed);
+      const wsHits = goHits.size > 0 ? goHits : confirmViaResolvedImport(c.testAbs, c.implAbs, unconfirmed, repoRootForConfirm, wsPkgsForConfirm);
+      for (const [n, reason] of wsHits) verdicts.set(n, { verdict: "confirmed", reason });
+    }
     for (const [name, v] of verdicts) {
       attempted++;
       if (v.verdict !== "confirmed") continue;
