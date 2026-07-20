@@ -2365,10 +2365,6 @@ export interface ConfirmerOutput {
 //     tsconfig paths (walking extends) and workspace package names, with
 //     built-path → src mapping (pkg/lib/x → pkg/src/x). General npm/tsc
 //     semantics — not tuned to any one repo.
-//  2. Go same-package: Go's encapsulation unit is the directory-package; a
-//     _test.go beside the impl imports nothing yet calls the symbol
-//     directly. A call-syntax reference from the sibling test IS Go's
-//     strongest static link.
 
 import { readFileSync as _rf, existsSync as _ex, readdirSync as _rd } from "node:fs";
 import { dirname as _dn, join as _jn, resolve as _rs } from "node:path";
@@ -2483,27 +2479,16 @@ export function confirmViaResolvedImport(testAbs: string, implAbs: string, names
   }
   if (!importsImpl) return out;
   for (const n of names) {
-    if (new RegExp("\\b" + n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b").test(src)) out.set(n, "workspace-resolved import + symbol reference");
-  }
-  return out;
-}
-
-/** Go same-package confirm: sibling _test.go with a call-syntax reference to the symbol. */
-export function confirmGoSamePackage(testAbs: string, implAbs: string, names: string[]): Map<string, string> {
-  const out = new Map<string, string>();
-  if (!testAbs.endsWith("_test.go") || !implAbs.endsWith(".go")) return out;
-  if (_dn(testAbs) !== _dn(implAbs)) return out;
-  let src = "";
-  try { src = _rf(testAbs, "utf8"); } catch { return out; }
-  for (const n of names) {
     const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // direct call `Name(` or passed as workflow/handler reference `(Name)` / `, Name)` / `(Name,`
-    if (new RegExp("\\b" + esc + "\\s*\\(").test(src) || new RegExp("[,(]\\s*" + esc + "\\s*[,)]").test(src)) {
-      out.set(n, "go same-package call reference");
+    // Call-syntax bar (invoke or construct), matching the associated tier's
+    // imports+calls semantics — bare name mentions do not count.
+    if (new RegExp("\\b" + esc + "\\s*[(<]").test(src) || new RegExp("\\bnew\\s+" + esc + "\\b").test(src)) {
+      out.set(n, "workspace-resolved import + call reference");
     }
   }
   return out;
 }
+
 
 function findRepoRoot(anchor: string): string {
   let dir = _ex(anchor) && !anchor.endsWith(".json") ? _dn(anchor) : _dn(anchor);
@@ -2534,7 +2519,6 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
 
   const absFiles = new Set<string>();
   for (const c of candidates) {
-    if (c.testAbs.endsWith(".go") || c.implAbs.endsWith(".go")) continue; // Go pairs use the same-package fallback, not the TS program
     absFiles.add(c.testAbs);
     absFiles.add(c.implAbs);
   }
@@ -2546,13 +2530,11 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
   for (const c of candidates) {
     const names = symbolsByImpl.get(c.implRel);
     if (!names || names.length === 0) continue;
-    const isGoPair = c.testAbs.endsWith(".go");
-    const verdicts = isGoPair ? new Map<string, { verdict: string; reason: string }>() : confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
+    const verdicts = confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
     // Cross-shape fallbacks for names the TS program could not confirm:
     const unconfirmed = names.filter((n) => verdicts.get(n)?.verdict !== "confirmed");
     if (unconfirmed.length > 0) {
-      const goHits = confirmGoSamePackage(c.testAbs, c.implAbs, unconfirmed);
-      const wsHits = goHits.size > 0 ? goHits : confirmViaResolvedImport(c.testAbs, c.implAbs, unconfirmed, repoRootForConfirm, wsPkgsForConfirm);
+      const wsHits = confirmViaResolvedImport(c.testAbs, c.implAbs, unconfirmed, repoRootForConfirm, wsPkgsForConfirm);
       for (const [n, reason] of wsHits) verdicts.set(n, { verdict: "confirmed", reason });
     }
     for (const [name, v] of verdicts) {
