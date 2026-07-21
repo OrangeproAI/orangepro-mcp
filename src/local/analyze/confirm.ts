@@ -23,6 +23,7 @@
 
 import ts from "typescript";
 import path from "node:path";
+import { readFileSync as fsRead, existsSync as fsExists } from "node:fs";
 import { loadTsConfigFor, resolveImport } from "../resolve/resolver.js";
 import { walkBarrel } from "../resolve/barrelWalker.js";
 import { isSelfAssertingCallee } from "./selfAssert.js";
@@ -51,10 +52,42 @@ const norm = (p: string): string => path.resolve(p);
  * the target repo. JSX is preserved and emit/lib-checks are off — we only read
  * symbols, never compile.
  */
+
+export function repoRootOf(anchor: string): string {
+  let dir = anchor;
+  for (let i = 0; i < 15; i++) {
+    try {
+      const pj = JSON.parse(fsRead(path.join(dir, "package.json"), "utf8")) as { workspaces?: unknown };
+      if (pj && pj.workspaces) return dir;
+    } catch { /* not here; walk up */ }
+    if (fsExists(path.join(dir, "pnpm-workspace.yaml"))) return dir;
+    if (fsExists(path.join(dir, ".git")) || fsExists(path.join(dir, "go.mod"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return dir;
+    dir = parent;
+  }
+  return dir;
+}
+
 export function buildConfirmProgram(absFiles: string[], anchorFile: string): ConfirmProgram {
   const base = loadTsConfigFor(anchorFile).options;
+  // Workspace-aware resolution: synthesize compilerOptions.paths from the
+  // repo's workspaces manifest so the STANDARD compiler resolves
+  // "@scope/pkg" and "@scope/pkg/lib/x" to source. Adds no confirmation
+  // path — only lets the existing assertion-aware bar evaluate tests it
+  // previously could not resolve at all.
+  const wsRoot = repoRootOf(anchorFile);
+  const wsPaths: Record<string, string[]> = {};
+  for (const [name, dir] of workspacePackages(wsRoot)) {
+    wsPaths[name] = [dir + "/src/index", dir + "/index", dir + "/src"];
+    wsPaths[name + "/lib/*"] = [dir + "/src/*"];
+    wsPaths[name + "/dist/*"] = [dir + "/src/*"];
+    wsPaths[name + "/*"] = [dir + "/src/*", dir + "/*"];
+  }
   const options: ts.CompilerOptions = {
     ...base,
+    baseUrl: base.baseUrl ?? wsRoot,
+    paths: { ...wsPaths, ...base.paths },
     noEmit: true,
     allowJs: true,
     checkJs: false,
@@ -2398,11 +2431,20 @@ function tsconfigPathsFor(fileAbs: string, stopDir: string): { baseUrl: string; 
 }
 
 /** Workspace member name → package dir, from the root package.json workspaces globs. */
-function workspacePackages(repoRoot: string): Map<string, string> {
+export function workspacePackages(repoRoot: string): Map<string, string> {
+  const pnpmGlobs: string[] = [];
+  try {
+    const y = fsRead(path.join(repoRoot, "pnpm-workspace.yaml"), "utf8");
+    for (const line of y.split("\n")) {
+      const m = /^\s*-\s*['"]?([^'"#\n]+?)['"]?\s*$/.exec(line);
+      if (m) pnpmGlobs.push(m[1].trim());
+    }
+  } catch { /* not a pnpm workspace */ }
   const out = new Map<string, string>();
   const rootPkg = readJsonSafe(_jn(repoRoot, "package.json"));
   const ws = rootPkg?.workspaces;
-  const globs: string[] = Array.isArray(ws) ? ws as string[] : Array.isArray((ws as { packages?: string[] })?.packages) ? (ws as { packages: string[] }).packages : [];
+  const npmGlobs: string[] = Array.isArray(ws) ? ws as string[] : Array.isArray((ws as { packages?: string[] })?.packages) ? (ws as { packages: string[] }).packages : [];
+  const globs: string[] = [...npmGlobs, ...pnpmGlobs];
   const dirs: string[] = [];
   for (const g of globs) {
     if (g.endsWith("/*")) {

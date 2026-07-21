@@ -71,7 +71,7 @@ function extractionBackend(language: string): string {
   return treeSitterReady(language) ? "ts" : "rx"; // tree-sitter AST vs regex fallback
 }
 import { ResolverCache } from "../resolve/resolverCache.js";
-import { runConfirmer, type ConfirmCandidate } from "./confirm.js";
+import { repoRootOf, resolveSpecifier, workspacePackages, runConfirmer, type ConfirmCandidate } from "./confirm.js";
 
 const DETECTOR = "repo_analyzer";
 // Global ceiling on extracted code symbols. A SINGLE counter shared across the walk,
@@ -1991,6 +1991,36 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       if (seenPair.has(key)) continue;
       seenPair.add(key);
       candidates.push({ testRel, testAbs, implRel, implAbs });
+    }
+    // Import-derived pairing: a test file is a candidate for every in-repo
+    // impl file it imports — an import IS the relationship; resolution
+    // (relative, tsconfig paths, npm/pnpm workspace names) decides
+    // membership. Adds PAIRS only; the assertion-aware confirmer remains
+    // the sole judge.
+    {
+      const pairRoot = repoRootOf(root);
+      const wsPkgs = workspacePackages(pairRoot);
+      const relByAbs = new Map(resolveFiles.map((f) => [f.abs, f.rel]));
+      const IMPORT_SPEC_RE = /(?:import|export)[^'"\n]*from\s*['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
+      for (const tf of resolveFiles) {
+        if (tf.role !== "test") continue;
+        let srcTxt = "";
+        try { srcTxt = readFileSync(tf.abs, "utf8"); } catch { continue; }
+        let m: RegExpExecArray | null;
+        IMPORT_SPEC_RE.lastIndex = 0;
+        while ((m = IMPORT_SPEC_RE.exec(srcTxt)) !== null) {
+          const spec = m[1] ?? m[2];
+          if (!spec) continue;
+          const resolvedAbs = resolveSpecifier(spec, tf.abs, pairRoot, wsPkgs);
+          if (!resolvedAbs) continue;
+          const implRel = relByAbs.get(resolvedAbs);
+          if (!implRel || !eligibleSymbolsByFile.has(implRel)) continue;
+          const key = `${tf.rel}|${implRel}`;
+          if (seenPair.has(key)) continue;
+          seenPair.add(key);
+          candidates.push({ testRel: tf.rel, testAbs: tf.abs, implRel, implAbs: resolvedAbs });
+        }
+      }
     }
     const confirmBudget = Math.max(1, Number(process.env.ORANGEPRO_MAX_CONFIRM_FILES) || 1500);
     const riskSymbolLimit = Math.max(1, Number(process.env.ORANGEPRO_CONFIRM_RISK_SYMBOLS) || DEFAULT_CONFIRM_RISK_SYMBOLS);
