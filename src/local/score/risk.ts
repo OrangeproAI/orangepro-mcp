@@ -487,14 +487,22 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // The default API is the true global ranking because reports call this list
   // "top risks". Callers may explicitly request a diversified portfolio, but
   // that presentation policy must never silently redefine rank.
-  if (opts.maxPerFile === undefined) return ranked.slice(0, limit);
-  const maxPerFile = Math.max(1, opts.maxPerFile);
+  // Diversity caps run by DEFAULT (per-file 3, per-title 2) — #14 made them
+  // opt-in, which regressed multi-program repos to 12/20 main slots.
+  const maxPerFile = Math.max(1, opts.maxPerFile ?? 3);
   const perFile = new Map<string, number>();
+  // Multi-program repos flood identical titles (76 x main) across files; the
+  // per-FILE cap cannot see it. Same diversity principle, second axis.
+  const maxPerTitle = 2;
+  const perTitle = new Map<string, number>();
   const surfaced: RiskGap[] = [];
   const overflow: RiskGap[] = [];
   for (const gap of ranked) {
     const used = perFile.get(gap.file) ?? 0;
-    if (used < maxPerFile) {
+    const tKey = (gap.title || "").split("(")[0].trim();
+    const tUsed = perTitle.get(tKey) ?? 0;
+    if (used < maxPerFile && tUsed < maxPerTitle) {
+      perTitle.set(tKey, tUsed + 1);
       perFile.set(gap.file, used + 1);
       surfaced.push(gap);
     } else {
