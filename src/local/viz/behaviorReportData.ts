@@ -997,7 +997,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   const flowIds = flowSymbolIds(graph);
   const summary = summaryFromRows(rows, flowIds);
   const repoRoot = opts.repoRoot ?? graph.workspace.root;
-  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20 });
+  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20 , maxPerFile: 3 });
   const lists = behaviorLists(rows, flowIds);
   const risks = riskRows(riskGaps, graph);
   const sortedBehaviors = [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b));
