@@ -550,16 +550,22 @@ function fmtRefs(n: number): string {
   return String(Math.round(n));
 }
 
+function displayTitle(title: string, file: string): string {
+  if (title.includes(".")) return title;
+  const pkg = file && file.includes("/") ? file.split("/").slice(-2, -1)[0] : "";
+  return pkg ? `${pkg}.${title}` : title;
+}
+
 /** Deterministic 1–2 line behavior context from graph facts only — no LLM.
  *  Sensitivity label mirrors deriveDataSensitivity's tiers. */
 function riskContext(risk: RiskGap): string {
   const sens =
     (risk.data_sensitivity ?? 1) >= 10 ? "payment/billing-sensitive"
-    : (risk.data_sensitivity ?? 1) >= 9 ? "auth/session-sensitive"
-    : (risk.data_sensitivity ?? 1) >= 7 ? "order/transaction"
-    : (risk.data_sensitivity ?? 1) >= 6 ? "customer/user-data"
-    : (risk.data_sensitivity ?? 1) >= 3 ? "notification/webhook"
-    : "";
+      : (risk.data_sensitivity ?? 1) >= 9 ? "auth/session-sensitive"
+        : (risk.data_sensitivity ?? 1) >= 7 ? "order/transaction"
+          : (risk.data_sensitivity ?? 1) >= 6 ? "customer/user-data"
+            : (risk.data_sensitivity ?? 1) >= 3 ? "notification/webhook"
+              : "";
   const pos = (risk.flow_position ?? 0) >= 5
     ? "an entry point"
     : (risk.flow_position ?? 0) >= 3
@@ -916,13 +922,16 @@ function riskTodo(
     verb !== "BEHAVIOR"
       ? `issues ${verb} ${path}`
       : risk.entry_point
-        ? `invokes ${risk.title} through its entry point`
-        : `calls ${risk.title} directly`;
-  const sens = (risk.data_sensitivity ?? 1) >= 9
-    ? " Include a negative case: invalid or expired credentials must fail closed."
-    : (risk.data_sensitivity ?? 1) >= 7
-      ? " Include a failure case: a rejected transaction must leave no partial state."
-      : "";
+        ? `invokes ${displayTitle(risk.title, risk.file)} through its entry point`
+        : `calls ${displayTitle(risk.title, risk.file)} directly`;
+  const s = risk.data_sensitivity ?? 1;
+  const sens = s >= 10
+    ? " Include a failure case: a rejected transaction must leave no partial state."
+    : s >= 9
+      ? " Include a negative case: invalid or expired credentials must fail closed."
+      : s >= 7
+        ? " Include a failure case: a rejected transaction must leave no partial state."
+        : "";
   if (risk.integration_signal === "candidate") {
     return `A similarly named test exists but nothing links it. Write a test that imports and ${call}, asserting the observable outcome — that upgrades this from unconfirmed candidate to a hard link.${sens}`;
   }
@@ -961,8 +970,7 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
       ...(() => {
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
         const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
-        const path = qualify(risk, methodMatch?.[2] ?? risk.title);
-        const generatedCategories = [...new Set([
+        const path = qualify(risk, methodMatch?.[2] ?? displayTitle(risk.title, risk.file)); const generatedCategories = [...new Set([
           ...generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)),
           // An integration/api/e2e-layer draft targets integration_flow. This
           // remains generation metadata until dynamic proof closes.
@@ -997,7 +1005,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   const flowIds = flowSymbolIds(graph);
   const summary = summaryFromRows(rows, flowIds);
   const repoRoot = opts.repoRoot ?? graph.workspace.root;
-  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20 , maxPerFile: 3 });
+  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20, maxPerFile: 3 });
   const lists = behaviorLists(rows, flowIds);
   const risks = riskRows(riskGaps, graph);
   const sortedBehaviors = [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b));
