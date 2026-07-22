@@ -176,6 +176,28 @@ describe("rankRiskGaps", () => {
     expect(byId.get("sym:src/api/payments.ts#POST")?.integration_signal).toBe("none");
   });
 
+  it("ranking titles come from the symbol, never the process", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/api/orders.ts#handleOrder", "handleOrder", "src/api/orders.ts"),
+      symbol("sym:src/core/save.ts#saveOrder", "saveOrder", "src/core/save.ts"),
+      symbol("sym:src/core/caller.ts#caller", "caller", "src/core/caller.ts")
+    ];
+    g.edges = [
+      edge("sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveOrder", "CALLS"),
+      edge("src/web/page.ts", "src/api/orders.ts", "IMPORTS")
+    ];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+
+    expect(ranked.length).toBeGreaterThan(0);
+    for (const r of ranked) {
+      expect(r.title).not.toBe(process.title);
+      expect(r.title).not.toContain("/bin/node");
+      expect(r.title.length).toBeGreaterThan(0);
+    }
+    expect(ranked.map((r) => r.title)).toContain("handleOrder");
+  });
+
   it("keeps the legacy linear formula available behind an explicit option", () => {
     const g = graph();
     g.nodes = [

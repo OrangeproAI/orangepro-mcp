@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import { LocalGraph, GraphNode } from "../graph/ontology.js";
-import { title } from "node:process";
 
 export interface RiskGap {
   id: string;
@@ -411,7 +410,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
           `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in 180 days${git_churn > 500 ? " (score capped at 500)" : ""}`
         ];
         if (isEntry) reasons.push("near an API/route/handler entry point");
-        return { id: s.external_id, title, file, risk_score: score, incoming_refs, git_churn, entry_point: isEntry, reasons };
+        return { id: s.external_id, title: s.title || s.external_id, file, risk_score: score, incoming_refs, git_churn, entry_point: isEntry, reasons };
       })
       .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
       .slice(0, limit);
