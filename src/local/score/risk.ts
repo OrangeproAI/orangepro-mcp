@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { LocalGraph, GraphNode } from "../graph/ontology.js";
+import { title } from "node:process";
 
 export interface RiskGap {
   id: string;
@@ -171,8 +172,8 @@ function deriveRouteWeight(node: GraphNode): number {
 function deriveDataSensitivity(node: GraphNode): number {
   const text = `${node.external_id} ${symbolFile(node)} ${symbolTitle(node)}`.toLowerCase();
   const tiers: [RegExp, number][] = [
-    [/payment|stripe|capture|refund|charge|billing/, 10],
-    [/auth|token|session|password|credential|jwt|oauth/, 9],
+    [/payment|stripe|refund|charge(?!r)|billing|payout|chargeback/, 10],
+    [/auth(?!or\b)|token(?!iz)|session|password|credential|jwt|oauth/, 9],
     [/order|cart|checkout|invoice|transaction/, 7],
     [/customer|user|account|profile|pii|gdpr/, 6],
     [/notification|email|sms|webhook|push/, 3]
@@ -410,7 +411,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
           `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in 180 days${git_churn > 500 ? " (score capped at 500)" : ""}`
         ];
         if (isEntry) reasons.push("near an API/route/handler entry point");
-        return { id: s.external_id, title: s.title || s.external_id, file, risk_score: score, incoming_refs, git_churn, entry_point: isEntry, reasons };
+        return { id: s.external_id, title, file, risk_score: score, incoming_refs, git_churn, entry_point: isEntry, reasons };
       })
       .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
       .slice(0, limit);
@@ -451,7 +452,9 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const i = Math.round(iExact);
       const d = rawScores[idx].d;
       const detectionTier = detectionFor(s.external_id);
-      const score = Math.round(pExact * iExact * d * 10) / 10;
+      let score = Math.round(pExact * iExact * d * 10) / 10;
+      const disconnected = (incoming.get(s.external_id) ?? 0) === 0 && fan_out === 0;
+      if (disconnected) score = Math.round(score * 0.25 * 10) / 10;
       const reasons = [
         `ORS ${score} ≈ P${p} × I${i} × D${d}`,
         `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"} (method-attributed)`,
@@ -460,6 +463,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       ];
       if (isEntry) reasons.push("near an API/route/handler entry point");
       if (is_new_code) reasons.push("new code (< 30 days)");
+      if (disconnected) reasons.push("no callers and no callees — structurally disconnected, score dampened");
       if (detectionTier === "candidate") reasons.push("lexical candidate test match only — unconfirmed");
       return {
         id: s.external_id,
