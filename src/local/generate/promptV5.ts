@@ -236,6 +236,8 @@ export function buildBatchGenerationSystemPromptV5(): string {
     "- Never mock, stub, or spy on the behavior-under-test itself. The subject must execute for real. Mock only true external I/O boundaries — network calls, the system clock, third-party SDKs, outbound HTTP. If the behavior calls internal services in the same codebase, let them run (or use real test doubles at the I/O edge, never at the subject). A test that mocks the subject proves nothing and will be rejected.",
     "- Each test is complete and runnable (all imports, setup, assertions, cleanup).",
     "- Start each test with: // Concern: <concern> | Technique: <technique>",
+    "- When asserting an exact return value (string, number, constant), copy the expected value VERBATIM from the provided source code. Never invent an expected value.",
+    "- If the exact value is not visible in the provided source, assert structure instead (non-nil, error vs no-error, type, boolean outcome) — never a guessed literal.",
     "- Assert all targets listed in each scenario.",
     "- Do not copy source excerpts verbatim. Use them to understand, then write original code.",
     "- Reuse SUBJECT IMPORTS. Do not invent module paths.",
