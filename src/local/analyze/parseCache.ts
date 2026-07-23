@@ -58,7 +58,11 @@ import { createRequire } from "node:module";
 // Swift protocol methods, and Rust trait signatures while dropping Rust aliases.
 // v16: symbol extraction now carries source line spans for runtime coverage
 // report ingestion; warm v15 entries lack the ranges and cannot be mapped.
-export const PARSER_VERSION = 17; // 17: Go method symbols receiver-qualified (Recv.M + member_of)
+// v17: Go method symbols are receiver-qualified (Recv.M + member_of).
+// v18: TS/JS extracts direct callable CommonJS exports.
+// v19: chained assignments (`exports = module.exports = fn`) also expose the
+// callable subject; warm v18 entries can still omit conventional CJS entries.
+export const PARSER_VERSION = 19;
 
 /** Tool package version, folded into the cache guard so UPGRADES auto-invalidate
  *  the cache — bumping PARSER_VERSION by hand is a discipline; this is a lock.
