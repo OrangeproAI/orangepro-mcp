@@ -194,18 +194,18 @@ describe("renderBehaviorReport", () => {
     expect(html).toContain("medium risk");
   });
 
-  it("renders the four honest tier labels and the dynamic-only Proven sub", () => {
+  it("renders honest coverage labels and the separate priority-gap KPI", () => {
     const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
     const html = renderBehaviorReport(data);
 
-    // v6 KPI vocabulary: five tiles whose one-line subs keep the tiers honest — the
-    // static tier is explicitly "no proof" and only the dynamic tier is called Proven.
-    for (const label of ["Methods found", "Dynamically Proven", "Test signal", "Reachable", "No signal"]) {
+    // Coverage status and the independently ranked worklist must not look like
+    // competing counts for the same thing.
+    for (const label of ["Methods found", "Dynamically Proven", "Test signal", "Candidate", "Reachable · no test signal", "Unreached · no test signal", "Priority gaps"]) {
       expect(html).toContain(`lbl:"${label}"`);
     }
     expect(html).toContain("test breaks if you change it"); // Proven = dynamic-only definition
     expect(html).toContain("hard static test link, no proof"); // static signal can never read as proof
-    expect(html).toContain("called but untested");
+    expect(html).toContain("coverage bucket — not the risk count");
     // The tier-badge vocabulary is wired for the behavior grid (distinct class per tier).
     for (const cls of ["b-proven", "b-signal", "b-reach", "b-nosig"]) {
       expect(html).toContain(cls);
@@ -213,6 +213,17 @@ describe("renderBehaviorReport", () => {
     // Trust guards: static evidence never reads as proven; the assoc tier label is "Test signal".
     expect(html.toLowerCase()).not.toContain("statically proven");
     expect(html).toContain('label:"Test signal"');
+  });
+
+  it("qualifies determinism and renders report-input provenance", () => {
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    const html = renderBehaviorReport(data);
+
+    expect(html).toContain("Repeatable for the same commit, Git history, configuration, and OrangePro version.");
+    expect(html).not.toContain("Identical on every run");
+    expect(html).toContain('id="provenance"');
+    expect(html).toContain("PROVISIONAL RANKING");
+    expect(html).toContain("inputFingerprint");
   });
 
   it("renders the flows section and carries every flow step into the embedded DATA", () => {
@@ -340,7 +351,7 @@ describe("renderBehaviorReport", () => {
     expect(html).toContain("Static test signals stay Statically Linked");
   });
 
-  it("renders the five KPI tier definitions verbatim (v6 one-line subs)", () => {
+  it("renders the KPI definitions verbatim", () => {
     const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
     const html = renderBehaviorReport(data);
 
@@ -348,8 +359,10 @@ describe("renderBehaviorReport", () => {
       "public, with observable outcome",
       "test breaks if you change it",
       "hard static test link, no proof",
-      "called but untested",
-      "nothing touches it"
+      "lexical match only — unconfirmed",
+      "coverage bucket — not the risk count",
+      "no detected flow or test signal",
+      "top-ranked worklist across unproven tiers"
     ]) {
       expect(html).toContain(sub);
     }
@@ -378,6 +391,20 @@ describe("renderBehaviorReport", () => {
     // v6 badges the none+reachable split as its own tier ("Reachable", blue), distinct from No signal.
     expect(html).toContain('label:"Reachable"');
     expect(html).toContain("b-reach");
+  });
+
+  it("separates coverage buckets from the independently ranked priority-gap worklist", () => {
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
+    const html = renderBehaviorReport(data);
+
+    expect(html).toContain("Priority gaps");
+    expect(html).toContain("Reachable · no test signal");
+    expect(html).toContain("Unreached · no test signal");
+    expect(html).toContain("coverage bucket — not the risk count");
+    expect(html).toContain("Priority gaps is a separate ranked worklist");
+    expect(html).toContain("const priorityGapCount=D.risks.length");
+    expect(html).toContain("const outsideProofs=S.provenOutsideDenominator??0");
+    expect(html).toContain("shown outside the static denominator");
   });
 });
 

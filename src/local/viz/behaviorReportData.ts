@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
 import type { Ledger } from "../ledger.js";
 import { buildRtm, type RtmRow } from "../rtm.js";
-import { isEntryPoint, rankRiskGaps, type RiskGap } from "../score/risk.js";
+import { inspectRiskInputHealth, isEntryPoint, rankRiskGaps, type RiskGap } from "../score/risk.js";
+import { ORANGEPRO_VERSION } from "../version.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 
 export interface BehaviorReportData {
@@ -10,13 +12,36 @@ export interface BehaviorReportData {
   scanned: string;
   framework: string;
   analysisKind: "static" | "static+dynamic";
+  provenance: {
+    source: string;
+    gitRoot: string | null;
+    commit: string | null;
+    history: "full" | "shallow" | "partial" | "unavailable";
+    churn: "available" | "unavailable";
+    churnWindow: string;
+    toolVersion: string;
+    inputFingerprint: string;
+    reason?: string;
+  };
   /**
    * Tier counts. `proven`/`associated`/`none` are the classification (unchanged).
    * `reachableUntested`/`noSignal` are a DISPLAY-ONLY split of the `none` bucket
    * (reachableUntested + noSignal === none): a none-tier behavior whose symbol
    * appears in a static flow is "Reachable Untested"; the rest are "No Signal".
    */
-  summary: { total: number; proven: number; associated: number; candidate: number; none: number; reachableUntested: number; noSignal: number };
+  summary: {
+    /** Stable deterministic denominator; excludes display-union proof rows. */
+    total: number;
+    /** All current dynamic proofs, including valid proofs outside the denominator. */
+    proven: number;
+    /** Proof rows displayed in the report but excluded from `total`. */
+    provenOutsideDenominator?: number;
+    associated: number;
+    candidate: number;
+    none: number;
+    reachableUntested: number;
+    noSignal: number;
+  };
   proofGuidance: { state: "proven" | "attempted" | "not_started"; title: string; body: string; action: string };
   pipeline: Array<{ key: string; label: string; pr: string; on: "1" | "partial" | "0" }>;
   scan: {
@@ -230,13 +255,27 @@ function isNoneTier(tier: RtmRow["evidence_tier"]): boolean {
 }
 
 function summaryFromRows(rows: RtmRow[], flowIds: Set<string>): BehaviorReportData["summary"] {
+  // buildRtm intentionally unions valid proof rows that fall outside the static
+  // denominator. They remain visible and count as Dynamically Proven, but must
+  // never increase the "Methods found" denominator.
+  const denominatorRows = rows.filter((r) => r.off_denominator !== true);
   const proven = rows.filter((r) => r.evidence_tier === "proven").length;
-  const associated = rows.filter((r) => r.evidence_tier === "associated" || r.evidence_tier === "runtime").length;
-  const candidate = rows.filter((r) => r.evidence_tier === "candidate").length;
-  const noneRows = rows.filter((r) => isNoneTier(r.evidence_tier));
+  const provenOutsideDenominator = rows.filter((r) => r.off_denominator === true && r.evidence_tier === "proven").length;
+  const associated = denominatorRows.filter((r) => r.evidence_tier === "associated" || r.evidence_tier === "runtime").length;
+  const candidate = denominatorRows.filter((r) => r.evidence_tier === "candidate").length;
+  const noneRows = denominatorRows.filter((r) => isNoneTier(r.evidence_tier));
   // DISPLAY-ONLY split of `none`: a none-tier symbol that shows up in a static flow is "Reachable Untested".
   const reachableUntested = noneRows.filter((r) => flowIds.has(r.behavior_id)).length;
-  return { total: rows.length, proven, associated, candidate, none: noneRows.length, reachableUntested, noSignal: noneRows.length - reachableUntested };
+  return {
+    total: denominatorRows.length,
+    proven,
+    ...(provenOutsideDenominator > 0 ? { provenOutsideDenominator } : {}),
+    associated,
+    candidate,
+    none: noneRows.length,
+    reachableUntested,
+    noSignal: noneRows.length - reachableUntested
+  };
 }
 
 /** Verbatim 0-dynamic-proof explainer copy. Rendered only when summary.proven === 0. */
@@ -543,11 +582,10 @@ function riskGeneratedTests(
   }));
 }
 
-/** Incoming refs are method-attributed and can be fractional (a file-level
- *  reference split across its symbols). Display rounds; sub-1 shows "<1". */
+/** Incoming refs are method-attributed and can be fractional when a file-level
+ * reference is split across its symbols. Preserve that weighting honestly. */
 function fmtRefs(n: number): string {
-  if (n > 0 && n < 1) return "<1";
-  return String(Math.round(n));
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
 function displayTitle(title: string, file: string): string {
@@ -572,9 +610,12 @@ function riskContext(risk: RiskGap): string {
       ? `${5 - (risk.flow_position ?? 0)} call${5 - (risk.flow_position ?? 0) === 1 ? "" : "s"} from the nearest entry point`
       : "deep in the call graph";
   const refs = fmtRefs(risk.incoming_refs);
+  const churn = risk.churn_available !== false
+    ? `${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days`
+    : "Git churn unavailable (provisional static-only ranking)";
   const parts = [
     `Sits at ${pos}${sens ? ` on ${sens} paths` : ""}.`,
-    `${refs} caller${refs === "1" ? "" : "s"}, ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days — and no test proves its behavior.`
+    `${refs} weighted incoming reference${risk.incoming_refs === 1 ? "" : "s"}, ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${churn} — and no test proves its behavior.`
   ];
   return parts.join(" ");
 }
@@ -924,12 +965,11 @@ function riskTodo(
       : risk.entry_point
         ? `invokes ${displayTitle(risk.title, risk.file)} through its entry point`
         : `calls ${displayTitle(risk.title, risk.file)} directly`;
-  const s = risk.data_sensitivity ?? 1;
-  const sens = s >= 10
-    ? " Include a failure case: a rejected transaction must leave no partial state."
-    : s >= 9
+  const sens = (risk.data_sensitivity ?? 1) >= 10
+    ? " Include a failure case: a rejected payment must leave no partial state."
+    : (risk.data_sensitivity ?? 1) >= 9
       ? " Include a negative case: invalid or expired credentials must fail closed."
-      : s >= 7
+      : (risk.data_sensitivity ?? 1) >= 7
         ? " Include a failure case: a rejected transaction must leave no partial state."
         : "";
   if (risk.integration_signal === "candidate") {
@@ -962,15 +1002,17 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
     const methodMatch = risk.title.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(.+)$/i);
     const tags: Array<[label: string, kind: "risk" | "info" | "entry"]> = [];
     const bucket = riskBucket(risk.risk_score, maxRiskScore);
-    if (bucket) tags.push([`${bucket} risk`, "risk"]);
-    tags.push([`${fmtRefs(risk.incoming_refs)} incoming refs`, "info"]);
+    if (risk.churn_available === false) tags.push(["provisional rank", "info"]);
+    else if (bucket) tags.push([`${bucket} risk`, "risk"]);
+    tags.push([`${fmtRefs(risk.incoming_refs)} weighted refs`, "info"]);
     if (risk.entry_point) tags.push(["Entry point", "entry"]);
     return {
       rank: idx + 1,
       ...(() => {
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
         const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
-        const path = qualify(risk, methodMatch?.[2] ?? displayTitle(risk.title, risk.file)); const generatedCategories = [...new Set([
+        const path = qualify(risk, methodMatch?.[2] ?? displayTitle(risk.title, risk.file));
+        const generatedCategories = [...new Set([
           ...generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)),
           // An integration/api/e2e-layer draft targets integration_flow. This
           // remains generation metadata until dynamic proof closes.
@@ -1005,7 +1047,23 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   const flowIds = flowSymbolIds(graph);
   const summary = summaryFromRows(rows, flowIds);
   const repoRoot = opts.repoRoot ?? graph.workspace.root;
-  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20, maxPerFile: 3 });
+  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20, maxPerFile: 3, maxPerTitle: 1 });
+  const riskHealth = inspectRiskInputHealth(repoRoot);
+  const churnAvailable = riskHealth.churnAvailable && riskGaps.every((risk) => risk.churn_available !== false);
+  const provenance: BehaviorReportData["provenance"] = {
+    source: path.basename(repoRoot || graph.workspace.name || "repo"),
+    gitRoot: riskHealth.gitRoot ? path.basename(riskHealth.gitRoot) : null,
+    commit: riskHealth.commit,
+    history: riskHealth.history,
+    churn: churnAvailable ? "available" : "unavailable",
+    churnWindow: riskHealth.churnWindow,
+    toolVersion: ORANGEPRO_VERSION,
+    inputFingerprint: createHash("sha256")
+      .update(JSON.stringify({ root: graph.workspace.root_hash, commit: riskHealth.commit, history: riskHealth.history, churn: churnAvailable, window: riskHealth.churnWindow, version: ORANGEPRO_VERSION }))
+      .digest("hex")
+      .slice(0, 16),
+    reason: churnAvailable ? undefined : (riskHealth.reason ?? "Git churn scan did not complete")
+  };
   const lists = behaviorLists(rows, flowIds);
   const risks = riskRows(riskGaps, graph);
   const sortedBehaviors = [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b));
@@ -1015,6 +1073,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     scanned: (graph.updated_at || graph.created_at || new Date(0).toISOString()).slice(0, 10),
     framework: frameworkLabel(graph),
     analysisKind: summary.proven > 0 ? "static+dynamic" : "static",
+    provenance,
     summary,
     proofGuidance: proofGuidance(ledger, summary, opts.dynamicProof),
     pipeline: pipeline(graph, ledger, summary),

@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
   opAnalyze,
+  opBehaviorCoverageHtml,
   opDynamicProof,
   opExport,
   opInit,
@@ -131,6 +133,29 @@ afterEach(() => {
 });
 
 describe("operations round trip", () => {
+  it("scores report Git inputs from the analyzed source when artifacts live elsewhere", () => {
+    const outputRoot = makeTempDir();
+    const sourceRoot = makeTempDir();
+    writeFileSync(join(sourceRoot, "orders.ts"), "export function placeOrder() { return 'placed'; }\n", "utf8");
+    execFileSync("git", ["init"], { cwd: sourceRoot, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: sourceRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], {
+      cwd: sourceRoot,
+      stdio: "ignore",
+      env: { ...process.env, GIT_AUTHOR_NAME: "OrangePro", GIT_AUTHOR_EMAIL: "opro@example.com", GIT_COMMITTER_NAME: "OrangePro", GIT_COMMITTER_EMAIL: "opro@example.com" }
+    });
+
+    opInit(outputRoot, deps);
+    opAnalyze(outputRoot, { source: sourceRoot, suppressProgress: true }, deps);
+    const result = opBehaviorCoverageHtml(outputRoot, "source-root-report.html", undefined, { persistBaseline: false });
+    const html = readFileSync(result.behavior_coverage_path, "utf8");
+
+    expect(html).toContain(`\"source\":\"${sourceRoot.split("/").pop()}\"`);
+    expect(html).toContain('\"history\":\"full\"');
+    expect(html).toContain('\"churn\":\"available\"');
+    expect(html).not.toContain(`\"source\":\"${outputRoot.split("/").pop()}\"`);
+  });
+
   it("init → analyze → status → score → export produces a valid pack", () => {
     const W = makeTempDir();
     writeFixture(W);

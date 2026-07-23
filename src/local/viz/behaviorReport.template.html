@@ -33,9 +33,11 @@ a{color:var(--blue);text-decoration:none}
 .hdr-name{font-size:15px;font-weight:650;letter-spacing:-.01em}
 .hdr-right{font-size:11.5px;color:var(--muted);display:flex;gap:10px;align-items:center}
 .hdr-tag{background:var(--s2);border:1px solid var(--bd);border-radius:4px;padding:2px 7px;font-family:var(--mono);font-size:10.5px;color:var(--ink2)}
+.provenance{margin:10px 0 0;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:var(--s1);color:var(--muted);font:10.5px/1.45 var(--mono)}
+.provenance.warn{border-color:var(--rbd);background:var(--rbg);color:var(--red)}
 
 /* KPI STRIP */
-.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:16px 0 0}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0 0}
 .kpi{background:var(--s1);border:1px solid var(--bd);border-radius:9px;padding:13px 14px;position:relative;overflow:hidden}
 .kpi::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.4;background:radial-gradient(90px 70px at 100% 0%,var(--kw,transparent),transparent 70%)}
 .kpi-lbl{font-size:10px;color:var(--muted);font-weight:600;letter-spacing:.05em;text-transform:uppercase;position:relative}
@@ -46,6 +48,8 @@ a{color:var(--blue);text-decoration:none}
 .kpi[data-t="signal"]{--kw:var(--abg)} .kpi[data-t="signal"] .kpi-num{color:var(--amber)}
 .kpi[data-t="reach"]{--kw:var(--bbg)} .kpi[data-t="reach"] .kpi-num{color:var(--blue)}
 .kpi[data-t="nosig"]{--kw:var(--rbg)} .kpi[data-t="nosig"] .kpi-num{color:var(--red)}
+.kpi[data-t="priority"]{--kw:var(--obg)} .kpi[data-t="priority"] .kpi-num{color:var(--orange)}
+.metric-scope{margin:9px 2px 0;color:var(--muted);font-size:11.5px;line-height:1.5}
 
 /* TABS */
 nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
@@ -261,12 +265,14 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
     <span id="scan-date">—</span>
   </div>
 </header>
+<div class="provenance" id="provenance"></div>
 
 <section class="kpis" id="kpis"></section>
+<p class="metric-scope" id="metric-scope"></p>
 
 <nav class="tabs" role="tablist">
   <button class="tab" role="tab" aria-selected="true" data-tab="codebase">Your Code</button>
-  <button class="tab" role="tab" aria-selected="false" data-tab="risks">Risks <span class="tc" id="t-risk">—</span></button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="risks">Priority gaps <span class="tc" id="t-risk">—</span></button>
   <button class="tab" role="tab" aria-selected="false" data-tab="flows">Flows <span class="tc" id="t-flow">—</span></button>
   <button class="tab" role="tab" aria-selected="false" data-tab="behaviors">Behaviors <span class="tc" id="t-beh">—</span></button>
 </nav>
@@ -276,7 +282,7 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
   <p class="bridge">We scanned your repo and found <b id="br-methods">—</b> public methods across <b id="br-services">—</b> services, with <b id="br-tests">—</b> test files. Here's what we're working with.</p>
   <div id="delta-banner"></div>
   <div class="card" id="sysmap-card" hidden>
-    <p class="card-lbl">Your system, as the graph sees it — entry lanes flowing into the services they reach. Node size = flow traffic; color = dominant evidence tier; red ring = top-20 risk. Identical on every run.</p>
+    <p class="card-lbl">Your system, as the graph sees it — entry lanes flowing into the services they reach. Node size = flow traffic; color = dominant evidence tier; red ring = top-20 risk. Repeatable for the same commit, Git history, configuration, and OrangePro version.</p>
     <div id="sysmap"></div>
   </div>
   <div class="cols2">
@@ -325,7 +331,7 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 
 <!-- TAB 4: RISKS — actionable -->
 <section class="panel" id="panel-risks" role="tabpanel">
-  <p class="bridge">These are the flows with the highest blast radius and the weakest test coverage, <b>sorted highest risk first</b>. Each one tells you exactly what to do next.</p>
+  <p class="bridge">This is the <b>priority-gap worklist</b>, ranked by blast radius and test weakness. It is separate from the coverage-status cards above: <b>Reachable · no test signal</b> is one strict coverage bucket, not the number of priority gaps.</p>
   <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
   <div class="risk-tools" id="risk-tools"></div>
   <div id="risk-list"></div>
@@ -356,7 +362,7 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
   var when=new Date(d.baselineTs);
   var ago=isNaN(when.getTime())?"last run":when.toLocaleString();
   if(!d.changed){
-    el2.innerHTML='<div class="delta-wrap"><span class="delta-chip dc-none">No changes since last run ('+ago+') — identical graph, identical ranking</span></div>';
+    el2.innerHTML='<div class="delta-wrap"><span class="delta-chip dc-none">No report changes since last run ('+ago+') for the recorded inputs</span></div>';
     return;
   }
   var chips=[];
@@ -471,6 +477,11 @@ const S=D.summary;
 $("#repo-name").textContent=D.repo;
 $("#scan-date").textContent=new Date(D.scanned+"T00:00:00").toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
 $("#framework").textContent=D.framework;
+const P=D.provenance;
+const prov=$("#provenance");
+const provisional=P.churn!=="available";
+prov.classList.toggle("warn",provisional);
+prov.textContent=(provisional?"PROVISIONAL RANKING · ":"VERIFIED INPUTS · ")+"source "+P.source+" · commit "+(P.commit?P.commit.slice(0,12):"unavailable")+" · history "+P.history+" · churn "+P.churn+" ("+P.churnWindow+") · OrangePro "+P.toolVersion+" · input "+P.inputFingerprint+(P.reason?" · "+P.reason:"");
 $("#fw-pill").textContent=D.framework;
 
 // bridge text in codebase tab
@@ -484,18 +495,23 @@ $("#t-flow").textContent=D.flows.length;
 $("#t-risk").textContent=D.risks.length;
 
 // KPIs
+const priorityGapCount=D.risks.length;
 [
   {lbl:"Methods found",num:S.total,sub:"public, with observable outcome",t:"total"},
   {lbl:"Dynamically Proven",num:S.proven,sub:"test breaks if you change it",t:"proven"},
   {lbl:"Test signal",num:S.associated,sub:"hard static test link, no proof",t:"signal"},
   {lbl:"Candidate",num:S.candidate??0,sub:"lexical match only — unconfirmed",t:"cand"},
-  {lbl:"Reachable",num:S.reachableUntested,sub:"called but untested",t:"reach"},
-  {lbl:"No signal",num:S.noSignal,sub:"nothing touches it",t:"nosig"},
+  {lbl:"Reachable · no test signal",num:S.reachableUntested,sub:"coverage bucket — not the risk count",t:"reach"},
+  {lbl:"Unreached · no test signal",num:S.noSignal,sub:"no detected flow or test signal",t:"nosig"},
+  {lbl:"Priority gaps",num:priorityGapCount,sub:"top-ranked worklist across unproven tiers",t:"priority"},
 ].forEach(k=>{
   const d=el("div","kpi",`<div class="kpi-lbl">${k.lbl}</div><div class="kpi-num">${k.num}</div><div class="kpi-sub">${k.sub}</div>`);
   d.dataset.t=k.t;
   $("#kpis").append(d);
 });
+const outsideProofs=S.provenOutsideDenominator??0;
+const coverageAccounted=(S.proven-outsideProofs)+S.associated+(S.candidate??0)+S.reachableUntested+S.noSignal;
+$("#metric-scope").textContent="Coverage status classifies "+coverageAccounted.toLocaleString()+" of "+S.total.toLocaleString()+" mapped behaviors. Priority gaps is a separate ranked worklist of "+priorityGapCount.toLocaleString()+" unproven behaviors; it does not equal the Reachable count."+(outsideProofs?" "+outsideProofs.toLocaleString()+" additional dynamically proven behavior"+(outsideProofs===1?" is":"s are")+" shown outside the static denominator.":"");
 
 // codebase
 D.scan.services.forEach(([nm,ct])=>$("#svc-list").append(el("div","svc",`<span class="nm">${esc(nm)}</span><span class="ct">${ct}</span>`)));
@@ -630,7 +646,7 @@ document.onkeydown=e=>{if(e.key==="Escape"){drill.classList.remove("open");docum
 // flows
 const fl=$("#flow-list");
 D.flows.forEach(f=>{
-  const rBadge=f.risk==="critical"?`<span class="badge b-risk"><span class="d"></span>critical</span>`:`<span class="badge b-signal"><span class="d"></span>high</span>`;
+  const rBadge=f.risk==="critical"?`<span class="badge b-risk"><span class="d"></span>critical</span>`:f.risk==="high"?`<span class="badge b-signal"><span class="d"></span>high</span>`:`<span class="badge b-info"><span class="d"></span>medium risk</span>`;
   const pBadge=f.proof==="proven"?`<span class="badge b-proven"><span class="d"></span>dynamically proven</span>`:f.proof==="assoc"?`<span class="badge b-signal"><span class="d"></span>signal</span>`:`<span class="badge b-nosig"><span class="d"></span>no proof</span>`;
 
   const totalNodes=(f.trigger?1:0)+f.steps.length;
