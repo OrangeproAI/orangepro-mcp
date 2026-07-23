@@ -86,3 +86,28 @@ describe("collectTsJsExports — default-export subjects (Finding 1)", () => {
     expect(names(src).filter((n) => n === "Foo")).toHaveLength(1);
   });
 });
+
+describe("collectTsJsExports — CommonJS callable exports", () => {
+  it("records a local function exported through module.exports", () => {
+    expect(extractSymbols("function app(req, res) { return res.end(); }\nmodule.exports = app;\n", "javascript").map((s) => s.name)).toEqual(["app"]);
+  });
+
+  it("records named CommonJS function exports", () => {
+    const symbols = extractSymbols("const load = () => 1;\nexports.load = load;\nmodule.exports.save = function save() { return 2; };\n", "javascript");
+    expect(symbols.map((s) => s.name).sort()).toEqual(["load", "save"]);
+  });
+
+  it("records callable subjects in chained exports assignments", () => {
+    const symbols = extractSymbols("function createApplication() { return {}; }\nexports = module.exports = createApplication;\n", "javascript");
+    expect(symbols.map((s) => s.name)).toEqual(["createApplication"]);
+  });
+
+  it("does not turn re-export shims or configuration objects into behavior", () => {
+    expect(extractSymbols("module.exports = require('./impl');\n", "javascript")).toEqual([]);
+    expect(extractSymbols("module.exports = { port: 3000, debug: true };\n", "javascript")).toEqual([]);
+  });
+
+  it("ignores CommonJS-looking text in comments and strings", () => {
+    expect(extractSymbols("// module.exports = fake\nconst text = 'exports.run = run';\n", "javascript")).toEqual([]);
+  });
+});

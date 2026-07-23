@@ -340,13 +340,14 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
     // pass, since the subject const may be declared before OR after them.
     // Local declarations eligible to be a default-export behavior subject:
     // functions/classes always; consts only when component-like (isComponentLikeConst).
-    const localDecls = new Map<string, { kind: ExtractedSymbol["symbol_kind"]; eligible: boolean; lines?: Pick<ExtractedSymbol, "start_line" | "end_line"> }>();
+    const localDecls = new Map<string, { kind: ExtractedSymbol["symbol_kind"]; eligible: boolean; callable: boolean; lines?: Pick<ExtractedSymbol, "start_line" | "end_line"> }>();
     const classNodes = new Map<string, ts.ClassDeclaration>(); // for default-subject member extraction
     const defaultExprs: ts.Expression[] = [];
+    const commonJsAssignments: Array<{ exportName: string | null; expression: ts.Expression }> = [];
     for (const stmt of sf.statements) {
       if (ts.isFunctionDeclaration(stmt) && stmt.name) {
         const lines = nodeLines(sf, stmt);
-        localDecls.set(stmt.name.text, { kind: "function", eligible: true, lines });
+        localDecls.set(stmt.name.text, { kind: "function", eligible: true, callable: true, lines });
         if (hasExportModifier(stmt)) record(stmt.name.text, "function", false, undefined, lines);
       } else if (ts.isClassDeclaration(stmt) && stmt.name) {
         // A `declare class` is an ambient TYPE shape with no runtime implementation
@@ -354,7 +355,7 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
         // behavior, and it must not become a default-export subject).
         if (ts.canHaveModifiers(stmt) && ts.getModifiers(stmt)?.some((mod) => mod.kind === ts.SyntaxKind.DeclareKeyword)) continue;
         const lines = nodeLines(sf, stmt);
-        localDecls.set(stmt.name.text, { kind: "class", eligible: true, lines });
+        localDecls.set(stmt.name.text, { kind: "class", eligible: true, callable: true, lines });
         classNodes.set(stmt.name.text, stmt);
         if (hasExportModifier(stmt)) {
           record(stmt.name.text, "class", false, undefined, lines);
@@ -367,13 +368,31 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
           const init = decl.initializer ? unwrapInitializer(decl.initializer) : undefined;
           const callable = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init));
           const lines = nodeLines(sf, decl);
-          localDecls.set(decl.name.text, { kind: "const", eligible: isComponentLikeConst(decl.name.text, init), lines });
+          localDecls.set(decl.name.text, { kind: "const", eligible: isComponentLikeConst(decl.name.text, init), callable, lines });
           if (exported) record(decl.name.text, "const", callable, undefined, lines); // regular exports keep the strict callable rule
         }
       } else if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
         // `export default <expr>` — NOT `export = …` (CommonJS). Re-export barrels
         // (`export { default } from './x'`) are ExportDeclarations, never collected.
         defaultExprs.push(stmt.expression);
+      } else if (ts.isExpressionStatement(stmt) && ts.isBinaryExpression(stmt.expression) && stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        let assignment: ts.BinaryExpression | undefined = stmt.expression;
+        while (assignment) {
+          const left = assignment.left;
+          if (ts.isPropertyAccessExpression(left)) {
+            const directDefault = ts.isIdentifier(left.expression) && left.expression.text === "module" && left.name.text === "exports";
+            const namedOnExports = ts.isIdentifier(left.expression) && left.expression.text === "exports";
+            const namedOnModule = ts.isPropertyAccessExpression(left.expression)
+              && ts.isIdentifier(left.expression.expression)
+              && left.expression.expression.text === "module"
+              && left.expression.name.text === "exports";
+            if (directDefault) commonJsAssignments.push({ exportName: null, expression: assignment.right });
+            else if (namedOnExports || namedOnModule) commonJsAssignments.push({ exportName: left.name.text, expression: assignment.right });
+          }
+          assignment = ts.isBinaryExpression(assignment.right) && assignment.right.operatorToken.kind === ts.SyntaxKind.EqualsToken
+            ? assignment.right
+            : undefined;
+        }
       }
     }
     // A default export is the file's primary behavior. Record its LOCAL subject
@@ -389,6 +408,26 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
       if (d.kind === "class") {
         const node = classNodes.get(name);
         if (node) recordClassMethods(sf, node, name); // default-exported class → its methods
+      }
+    }
+    // CommonJS public surface, judged by the same AST-backed callable bar as ESM:
+    // module.exports = localFn, exports.name = localFn, or an inline function.
+    // Re-export shims and config/object assignments remain excluded.
+    for (const assignment of commonJsAssignments) {
+      const expr = unwrapInitializer(assignment.expression);
+      if (ts.isIdentifier(expr)) {
+        const d = localDecls.get(expr.text);
+        if (!d || !d.callable) continue;
+        record(expr.text, d.kind, d.kind === "const", undefined, d.lines);
+        if (d.kind === "class") {
+          const node = classNodes.get(expr.text);
+          if (node) recordClassMethods(sf, node, expr.text);
+        }
+      } else if (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr)) {
+        const name = assignment.exportName ?? (ts.isFunctionExpression(expr) && expr.name ? expr.name.text : undefined);
+        if (name) record(name, "function", false, undefined, nodeLines(sf, expr));
+      } else if (ts.isClassExpression(expr) && expr.name) {
+        record(expr.name.text, "class", false, undefined, nodeLines(sf, expr));
       }
     }
   }
@@ -441,7 +480,7 @@ export function extractSymbolsWithMeta(content: string, language?: string): Symb
     // TS/JS from the AST — comment/string-safe. Cheap gate: any "export"
     // followed by whitespace (matches the old `export\s+`, so `export\tfunction`
     // / `export\nclass` are NOT skipped).
-    if (/export\s/.test(content)) {
+    if (/export\s|module\s*\.\s*exports|exports\s*\./.test(content)) {
       for (const [name, sym] of collectTsJsExports(content)) consider(name, sym.kind, sym.callable, sym.member_of, sym);
     }
   } else if (family !== "none") {

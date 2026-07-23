@@ -230,4 +230,22 @@ describe("product roles are not excluded by another repository's package layout"
     expect(internalHelper).toBeDefined();
     expect(internalHelper!.denominator_eligible).toBe(false);
   });
+
+  it("follows explicit CommonJS public-entry re-exports without widening sibling helpers", () => {
+    const root = repo({
+      "package.json": JSON.stringify({ name: "commonjs-lib", main: "index.js" }),
+      "index.js": "module.exports = require('./lib/public');\n",
+      "lib/public.js": "function makeWidget() { return {}; }\nmodule.exports = makeWidget;\n",
+      "lib/internal.js": "function hiddenHelper() { return 1; }\nmodule.exports = hiddenHelper;\n"
+    });
+    const frag = analyzeRepo(root);
+
+    const publicApi = sym(frag, "sym:lib/public.js#makeWidget");
+    const internalHelper = sym(frag, "sym:lib/internal.js#hiddenHelper");
+    expect(publicApi).toBeDefined();
+    expect(publicApi!.denominator_eligible).toBe(true);
+    expect((publicApi!.properties as Record<string, unknown>).behavior_surface).toBe("public_api_entry");
+    expect(internalHelper).toBeDefined();
+    expect(internalHelper!.denominator_eligible).toBe(false);
+  });
 });

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { CandidateEdge, GraphEdge, GraphNode, LocalGraph, LOCAL_GRAPH_SCHEMA_VERSION, ManifestFileEntry, Provenance, SourceScope } from "../graph/ontology.js";
 import { makeCandidateEdge, makeEdge, makeNode, makeProofEdges, makeTestCaseNode } from "../graph/factories.js";
 import { hashString } from "../util/hash.js";
@@ -231,6 +232,64 @@ function packagePublicEntryPaths(root: string, relPaths: string[]): Set<string> 
 
     for (const conventional of ["index", "src/index"]) {
       for (const extension of extensions) addCandidate(packageDir, `${conventional}${extension}`);
+    }
+  }
+
+  // Public package entries are often zero-logic barrels. Follow only explicit,
+  // relative AST re-exports so the callable implementation remains public
+  // without widening every internal helper into the denominator. Handles both
+  // ESM barrels and the conventional CommonJS `module.exports = require(...)`.
+  const queued = [...entries];
+  const visited = new Set<string>();
+  const addRelativeTarget = (fromFile: string, rawTarget: string): void => {
+    if (!rawTarget.startsWith(".")) return;
+    const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromFile), rawTarget));
+    if (base === ".." || base.startsWith("../")) return;
+    const candidates = new Set<string>([base]);
+    const withoutExt = base.replace(RUNTIME_SOURCE_EXT_RE, "");
+    for (const extension of extensions) {
+      candidates.add(`${withoutExt}${extension}`);
+      candidates.add(`${withoutExt}/index${extension}`);
+    }
+    for (const candidate of candidates) {
+      if (normalizedPaths.has(candidate) && !entries.has(candidate)) {
+        entries.add(candidate);
+        queued.push(candidate);
+      }
+    }
+  };
+  while (queued.length) {
+    const entry = queued.shift();
+    if (!entry || visited.has(entry)) continue;
+    visited.add(entry);
+    try {
+      const source = ts.createSourceFile(entry, readFileSync(path.join(root, entry), "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
+      for (const statement of source.statements) {
+        if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+          addRelativeTarget(entry, statement.moduleSpecifier.text);
+          continue;
+        }
+        if (!ts.isExpressionStatement(statement)) continue;
+        let assignment = ts.isBinaryExpression(statement.expression) && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          ? statement.expression
+          : undefined;
+        while (assignment) {
+          const left = assignment.left;
+          const isModuleExports = ts.isPropertyAccessExpression(left)
+            && ts.isIdentifier(left.expression)
+            && left.expression.text === "module"
+            && left.name.text === "exports";
+          if (isModuleExports && ts.isCallExpression(assignment.right) && ts.isIdentifier(assignment.right.expression) && assignment.right.expression.text === "require") {
+            const [arg] = assignment.right.arguments;
+            if (arg && ts.isStringLiteral(arg)) addRelativeTarget(entry, arg.text);
+          }
+          assignment = ts.isBinaryExpression(assignment.right) && assignment.right.operatorToken.kind === ts.SyntaxKind.EqualsToken
+            ? assignment.right
+            : undefined;
+        }
+      }
+    } catch {
+      // An unreadable barrel cannot widen the public surface; keep the manifest entry only.
     }
   }
   return entries;
