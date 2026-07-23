@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
-import { rankRiskGaps } from "../../src/local/score/risk.js";
+import { inspectRiskInputHealth, rankRiskGaps } from "../../src/local/score/risk.js";
 
 const dirs: string[] = [];
 
@@ -213,6 +213,8 @@ describe("rankRiskGaps", () => {
     const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "", legacy: true });
 
     expect(ranked.map((r) => r.id)).toEqual(["sym:src/api/users.ts#handleUser", "sym:src/core/save.ts#saveUser", "sym:src/core/caller.ts#caller"]);
+    expect(ranked.map((r) => r.title)).toEqual(["handleUser", "saveUser", "caller"]);
+    expect(ranked.every((r) => r.title !== process.title && !r.title.includes("/bin/node"))).toBe(true);
     expect(ranked[0].risk_score).toBeGreaterThan(ranked[1].risk_score);
     expect(ranked[0].probability).toBeUndefined();
     expect(ranked[0].reasons.join(" ")).not.toContain("ORS");
@@ -244,5 +246,64 @@ describe("rankRiskGaps", () => {
     const [gap] = rankRiskGaps(g, { limit: 1 });
     expect(gap.git_churn).toBeGreaterThan(0);
     expect(gap.reasons.join(" ")).toContain("git churn");
+    expect(gap.churn_available).toBe(true);
+
+    const health = inspectRiskInputHealth(root);
+    expect(health.history).toBe("full");
+    expect(health.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(health.commitDate).toBeTruthy();
+    expect(health.churnWindow).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    execFileSync("git", ["config", "remote.origin.promisor", "true"], { cwd: root, stdio: "ignore" });
+    const partial = inspectRiskInputHealth(root);
+    expect(partial.history).toBe("partial");
+    expect(partial.churnAvailable).toBe(false);
+    expect(partial.reason).toContain("partial-clone");
+  });
+});
+
+describe("risk report trust safeguards", () => {
+  it("does not infer payment sensitivity from CapturePanic", () => {
+    const g = graph("/definitely/not/a/git/repo");
+    g.nodes = [symbol("sym:internal/common/panic.go#CapturePanic", "CapturePanic", "internal/common/panic.go")];
+
+    const [gap] = rankRiskGaps(g, { limit: 1 });
+    expect(gap.data_sensitivity).toBe(1);
+    expect(gap.churn_available).toBe(false);
+    expect(gap.reasons.join(" ")).toContain("provisional static-only ranking");
+    expect(gap.reasons.join(" ")).toContain("structurally disconnected, score dampened");
+  });
+
+  it("keeps capture payment operations payment-sensitive", () => {
+    const g = graph("/definitely/not/a/git/repo");
+    g.nodes = [symbol("sym:src/payments/capture.ts#capturePayment", "capturePayment", "src/payments/capture.ts")];
+
+    const [gap] = rankRiskGaps(g, { limit: 1 });
+    expect(gap.data_sensitivity).toBe(10);
+  });
+
+  it("uses whole semantic tokens for sensitivity without author/tokenizer false positives", () => {
+    const g = graph("/definitely/not/a/git/repo");
+    g.nodes = [
+      symbol("sym:src/text.ts#tokenizeAuthor", "tokenizeAuthor", "src/text.ts"),
+      symbol("sym:src/payments.ts#requestPayout", "requestPayout", "src/payments.ts")
+    ];
+
+    const gaps = rankRiskGaps(g, { limit: 2 });
+    expect(gaps.find((gap) => gap.title === "tokenizeAuthor")?.data_sensitivity).toBe(1);
+    expect(gaps.find((gap) => gap.title === "requestPayout")?.data_sensitivity).toBe(10);
+  });
+
+  it("can enforce one portfolio slot per normalized title", () => {
+    const g = graph("/definitely/not/a/git/repo");
+    g.nodes = [
+      symbol("sym:src/a.ts#Invoke", "Invoke", "src/a.ts"),
+      symbol("sym:src/b.ts#Invoke", "Invoke", "src/b.ts"),
+      symbol("sym:src/c.ts#Execute", "Execute", "src/c.ts")
+    ];
+
+    const gaps = rankRiskGaps(g, { limit: 3, maxPerFile: 3, maxPerTitle: 1 });
+    expect(gaps.map((gap) => gap.title)).toEqual(expect.arrayContaining(["Invoke", "Execute"]));
+    expect(gaps.filter((gap) => gap.title === "Invoke")).toHaveLength(1);
   });
 });

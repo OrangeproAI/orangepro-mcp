@@ -8,6 +8,8 @@ export interface RiskGap {
   risk_score: number;
   incoming_refs: number;
   git_churn: number;
+  /** False means Git history was unavailable/incomplete; zero is not a measured value. */
+  churn_available?: boolean;
   entry_point: boolean;
   reasons: string[];
   /** OrangePro Risk Score decomposition (P × I × D). */
@@ -24,10 +26,23 @@ export interface RiskGap {
   integration_signal?: "associated" | "candidate" | "none";
 }
 
+export interface RiskInputHealth {
+  sourceRoot: string | null;
+  gitRoot: string | null;
+  commit: string | null;
+  commitDate: string | null;
+  history: "full" | "shallow" | "partial" | "unavailable";
+  churnWindow: string;
+  churnAvailable: boolean;
+  reason?: string;
+}
+
 export interface RiskGapOptions {
   limit?: number;
   /** Optional max gaps per file for an explicitly diversified portfolio. Omit for the true global ranking. */
   maxPerFile?: number;
+  /** Optional max gaps sharing the same normalized title. Only used with maxPerFile. */
+  maxPerTitle?: number;
   repoRoot?: string;
   churnWindow?: string;
   /** Use the legacy linear formula (incoming_refs × 0.4 + git_churn × 0.4 + entry-point bonus).
@@ -63,9 +78,46 @@ function confirmedBehaviorIds(graph: LocalGraph): Set<string> {
 
 const GIT_CHURN_BATCH = 200;
 
-function gitChurn(root: string | undefined, files: string[], window: string): Map<string, number> {
+export function inspectRiskInputHealth(root: string | undefined, churnWindow?: string): RiskInputHealth {
+  const unavailableWindow = churnWindow ?? "180 days before HEAD";
+  if (!root) return { sourceRoot: null, gitRoot: null, commit: null, commitDate: null, history: "unavailable", churnWindow: unavailableWindow, churnAvailable: false, reason: "source root unavailable" };
+  try {
+    const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
+    const commitDate = execFileSync("git", ["show", "-s", "--format=%cI", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
+    const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim() === "true";
+    let partial = false;
+    try {
+      partial = execFileSync("git", ["config", "--get-regexp", "^remote\\..*\\.promisor$"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 })
+        .split(/\r?\n/)
+        .some((line) => /\btrue$/i.test(line.trim()));
+    } catch {
+      // A normal full clone has no promisor-remote configuration.
+    }
+    const commitMs = Date.parse(commitDate);
+    const resolvedWindow = churnWindow ?? (Number.isFinite(commitMs) ? new Date(commitMs - 180 * 24 * 60 * 60 * 1000).toISOString() : unavailableWindow);
+    return {
+      sourceRoot: root,
+      gitRoot,
+      commit,
+      commitDate,
+      history: shallow ? "shallow" : partial ? "partial" : "full",
+      churnWindow: resolvedWindow,
+      churnAvailable: !shallow && !partial,
+      reason: shallow
+        ? "shallow Git history cannot support a complete churn window"
+        : partial
+          ? "partial-clone Git objects cannot guarantee a complete offline churn window"
+          : undefined
+    };
+  } catch {
+    return { sourceRoot: root, gitRoot: null, commit: null, commitDate: null, history: "unavailable", churnWindow: unavailableWindow, churnAvailable: false, reason: "Git history could not be read from the analyzed source root" };
+  }
+}
+
+function gitChurn(root: string | undefined, files: string[], window: string): { values: Map<string, number>; complete: boolean } {
   const out = new Map<string, number>();
-  if (!root || files.length === 0) return out;
+  if (!root || files.length === 0) return { values: out, complete: Boolean(root) };
   for (let i = 0; i < files.length; i += GIT_CHURN_BATCH) {
     const batch = files.slice(i, i + GIT_CHURN_BATCH);
     try {
@@ -84,10 +136,10 @@ function gitChurn(root: string | undefined, files: string[], window: string): Ma
         out.set(m[3], (out.get(m[3]) ?? 0) + adds + dels);
       }
     } catch {
-      continue;
+      return { values: new Map(), complete: false };
     }
   }
-  return out;
+  return { values: out, complete: true };
 }
 
 function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<string, number> {
@@ -169,17 +221,22 @@ function deriveRouteWeight(node: GraphNode): number {
 }
 
 function deriveDataSensitivity(node: GraphNode): number {
-  const text = `${node.external_id} ${symbolFile(node)} ${symbolTitle(node)}`.toLowerCase();
-  const tiers: [RegExp, number][] = [
-    [/payment|stripe|refund|charge(?!r)|billing|payout|chargeback/, 10],
-    [/auth(?!or\b)|token(?!iz)|session|password|credential|jwt|oauth/, 9],
-    [/order|cart|checkout|invoice|transaction/, 7],
-    [/customer|user|account|profile|pii|gdpr/, 6],
-    [/notification|email|sms|webhook|push/, 3]
-  ];
-  for (const [re, weight] of tiers) {
-    if (re.test(text)) return weight;
-  }
+  const raw = `${node.external_id} ${symbolFile(node)} ${symbolTitle(node)}`;
+  const tokens = new Set(
+    raw
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+  );
+  const has = (...values: string[]): boolean => values.some((value) => tokens.has(value));
+  // `capture` alone is not a payment signal (for example CapturePanic). It is
+  // payment-sensitive only when the same symbol/path also contains payment context.
+  if (has("payment", "stripe", "refund", "charge", "billing", "payout", "chargeback") || (has("capture") && has("payment", "stripe", "transaction"))) return 10;
+  if (has("auth", "token", "session", "password", "credential", "jwt", "oauth")) return 9;
+  if (has("order", "cart", "checkout", "invoice", "transaction")) return 7;
+  if (has("customer", "user", "account", "profile", "pii", "gdpr")) return 6;
+  if (has("notification", "email", "sms", "webhook", "push")) return 3;
   return 1;
 }
 
@@ -342,9 +399,16 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     else symbolsByFile.set(file, [s]);
   }
   const files = [...new Set(symbols.map(symbolFile))];
-  const churn = gitChurn(opts.repoRoot ?? graph.workspace.root, files, opts.churnWindow ?? "180 days ago");
-  const firstCommitTs = gitFirstCommitBatch(opts.repoRoot ?? graph.workspace.root, files);
-  const nowSec = Math.floor(Date.now() / 1000);
+  const repoRoot = opts.repoRoot ?? graph.workspace.root;
+  const inputHealth = inspectRiskInputHealth(repoRoot, opts.churnWindow);
+  const churnWindow = inputHealth.churnWindow;
+  const churnResult = inputHealth.churnAvailable ? gitChurn(repoRoot, files, churnWindow) : { values: new Map<string, number>(), complete: false };
+  const churn = churnResult.values;
+  const churnAvailable = inputHealth.churnAvailable && churnResult.complete;
+  const firstCommitTs = churnAvailable ? gitFirstCommitBatch(repoRoot, files) : new Map<string, number>();
+  const commitMs = Date.parse(inputHealth.commitDate ?? "");
+  const graphMs = Date.parse(graph.updated_at || graph.created_at || "");
+  const nowSec = Math.floor((Number.isFinite(commitMs) ? commitMs : Number.isFinite(graphMs) ? graphMs : 0) / 1000);
 
   // Method-level attribution. CALLS edges are already symbol-granular and count
   // at full weight. IMPORTS edges are file-granular: previously every symbol in
@@ -407,10 +471,12 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
         const score = Math.round((incoming_refs * 0.4 + churnForScore * 0.4 + (isEntry ? 20 : 0)) * 10) / 10;
         const reasons = [
           `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"}`,
-          `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in 180 days${git_churn > 500 ? " (score capped at 500)" : ""}`
+          churnAvailable
+            ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in 180 days${git_churn > 500 ? " (score capped at 500)" : ""}`
+            : "Git churn unavailable — provisional static-only ranking"
         ];
         if (isEntry) reasons.push("near an API/route/handler entry point");
-        return { id: s.external_id, title: s.title || s.external_id, file, risk_score: score, incoming_refs, git_churn, entry_point: isEntry, reasons };
+        return { id: s.external_id, title: s.title || s.external_id, file, risk_score: score, incoming_refs, git_churn, churn_available: churnAvailable, entry_point: isEntry, reasons };
       })
       .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
       .slice(0, limit);
@@ -452,13 +518,15 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const d = rawScores[idx].d;
       const detectionTier = detectionFor(s.external_id);
       let score = Math.round(pExact * iExact * d * 10) / 10;
-      const disconnected = (incoming.get(s.external_id) ?? 0) === 0 && fan_out === 0;
+      const disconnected = incoming_refs === 0 && fan_out === 0;
       if (disconnected) score = Math.round(score * 0.25 * 10) / 10;
       const reasons = [
         `ORS ${score} ≈ P${p} × I${i} × D${d}`,
         `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"} (method-attributed)`,
-        `${git_churn} git churn line${git_churn === 1 ? "" : "s"} attributed to this symbol in 180 days`,
-        `route weight ${route_weight}, data sensitivity ${data_sensitivity}, fan-out ${fan_out}`
+        churnAvailable
+          ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} attributed to this symbol in 180 days`
+          : "Git churn unavailable — provisional static-only ranking",
+        `route weight ${route_weight}, data sensitivity ${data_sensitivity}, flow position ${flow_position}, complexity ${complexity_proxy}, fan-out ${fan_out}`
       ];
       if (isEntry) reasons.push("near an API/route/handler entry point");
       if (is_new_code) reasons.push("new code (< 30 days)");
@@ -471,6 +539,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
         risk_score: score,
         incoming_refs,
         git_churn,
+        churn_available: churnAvailable,
         entry_point: isEntry,
         reasons,
         probability: p,
@@ -495,7 +564,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const perFile = new Map<string, number>();
   // Multi-program repos flood identical titles (76 x main) across files; the
   // per-FILE cap cannot see it. Same diversity principle, second axis.
-  const maxPerTitle = 2;
+  const maxPerTitle = Math.max(1, opts.maxPerTitle ?? 2);
   const perTitle = new Map<string, number>();
   const surfaced: RiskGap[] = [];
   const overflow: RiskGap[] = [];
@@ -512,7 +581,19 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     }
     if (surfaced.length >= limit) break;
   }
-  if (surfaced.length < limit) surfaced.push(...overflow.slice(0, limit - surfaced.length));
+  // A report-level title cap is a hard product constraint: relaxing it during
+  // backfill recreates duplicate Invoke/Config cards. We may relax only the
+  // per-file cap to fill remaining slots with distinct behavior titles.
+  if (surfaced.length < limit) {
+    for (const gap of overflow) {
+      const tKey = (gap.title || "").split("(")[0].trim();
+      const tUsed = perTitle.get(tKey) ?? 0;
+      if (tUsed >= maxPerTitle) continue;
+      perTitle.set(tKey, tUsed + 1);
+      surfaced.push(gap);
+      if (surfaced.length >= limit) break;
+    }
+  }
   // Guarantee: the surfaced list is ALWAYS highest-risk-first, even when the
   // per-file diversity backfill re-admits overflow items (which otherwise land
   // appended after lower-scored rows).
