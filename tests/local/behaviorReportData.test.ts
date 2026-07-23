@@ -256,6 +256,51 @@ describe("buildBehaviorReportData", () => {
     ]);
   });
 
+  it("does not let off-denominator proofs increase the behavior total", () => {
+    const g = graph();
+    const offDenominator = makeNode({
+      kind: "CodeSymbol",
+      external_id: "sym:src/orders.controller.ts#InternalFormatter.format",
+      title: "InternalFormatter.format",
+      properties: { file: "src/orders.controller.ts", symbol_kind: "method" },
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance: { ...provenance, source_ref: "src/orders.controller.ts" },
+      behavior_source: "code_export",
+      denominator_eligible: false
+    });
+    g.nodes.push(offDenominator);
+
+    const data = buildBehaviorReportData(
+      g,
+      dynamicLedger(offDenominator.external_id, g),
+      { repoRoot: "/tmp/medusa" }
+    );
+
+    expect(data.summary).toMatchObject({
+      total: 2,
+      proven: 1,
+      provenOutsideDenominator: 1,
+      associated: 1,
+      candidate: 1,
+      none: 0
+    });
+    expect(
+      data.summary.proven -
+        (data.summary.provenOutsideDenominator ?? 0) +
+        data.summary.associated +
+        data.summary.candidate +
+        data.summary.none
+    ).toBe(data.summary.total);
+    expect(data.behaviors).toContainEqual(
+      expect.objectContaining({
+        sig: "InternalFormatter.format",
+        tier: "proven"
+      })
+    );
+  });
+
   it("does not mark the dynamic-proof pipeline partial for static-only unproven records", () => {
     const data = buildBehaviorReportData(
       graph(),

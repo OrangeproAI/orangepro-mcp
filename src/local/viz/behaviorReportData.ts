@@ -29,7 +29,19 @@ export interface BehaviorReportData {
    * (reachableUntested + noSignal === none): a none-tier behavior whose symbol
    * appears in a static flow is "Reachable Untested"; the rest are "No Signal".
    */
-  summary: { total: number; proven: number; associated: number; candidate: number; none: number; reachableUntested: number; noSignal: number };
+  summary: {
+    /** Stable deterministic denominator; excludes display-union proof rows. */
+    total: number;
+    /** All current dynamic proofs, including valid proofs outside the denominator. */
+    proven: number;
+    /** Proof rows displayed in the report but excluded from `total`. */
+    provenOutsideDenominator?: number;
+    associated: number;
+    candidate: number;
+    none: number;
+    reachableUntested: number;
+    noSignal: number;
+  };
   proofGuidance: { state: "proven" | "attempted" | "not_started"; title: string; body: string; action: string };
   pipeline: Array<{ key: string; label: string; pr: string; on: "1" | "partial" | "0" }>;
   scan: {
@@ -243,13 +255,27 @@ function isNoneTier(tier: RtmRow["evidence_tier"]): boolean {
 }
 
 function summaryFromRows(rows: RtmRow[], flowIds: Set<string>): BehaviorReportData["summary"] {
+  // buildRtm intentionally unions valid proof rows that fall outside the static
+  // denominator. They remain visible and count as Dynamically Proven, but must
+  // never increase the "Methods found" denominator.
+  const denominatorRows = rows.filter((r) => r.off_denominator !== true);
   const proven = rows.filter((r) => r.evidence_tier === "proven").length;
-  const associated = rows.filter((r) => r.evidence_tier === "associated" || r.evidence_tier === "runtime").length;
-  const candidate = rows.filter((r) => r.evidence_tier === "candidate").length;
-  const noneRows = rows.filter((r) => isNoneTier(r.evidence_tier));
+  const provenOutsideDenominator = rows.filter((r) => r.off_denominator === true && r.evidence_tier === "proven").length;
+  const associated = denominatorRows.filter((r) => r.evidence_tier === "associated" || r.evidence_tier === "runtime").length;
+  const candidate = denominatorRows.filter((r) => r.evidence_tier === "candidate").length;
+  const noneRows = denominatorRows.filter((r) => isNoneTier(r.evidence_tier));
   // DISPLAY-ONLY split of `none`: a none-tier symbol that shows up in a static flow is "Reachable Untested".
   const reachableUntested = noneRows.filter((r) => flowIds.has(r.behavior_id)).length;
-  return { total: rows.length, proven, associated, candidate, none: noneRows.length, reachableUntested, noSignal: noneRows.length - reachableUntested };
+  return {
+    total: denominatorRows.length,
+    proven,
+    ...(provenOutsideDenominator > 0 ? { provenOutsideDenominator } : {}),
+    associated,
+    candidate,
+    none: noneRows.length,
+    reachableUntested,
+    noSignal: noneRows.length - reachableUntested
+  };
 }
 
 /** Verbatim 0-dynamic-proof explainer copy. Rendered only when summary.proven === 0. */
