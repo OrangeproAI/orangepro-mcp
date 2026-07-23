@@ -456,3 +456,48 @@ describe("buildBehaviorReportData — Reachable Untested is a display split of t
     expect(data.behaviors.every((b) => b.tier === "none" && b.reachable)).toBe(true);
   });
 });
+
+describe("buildBehaviorReportData — report trust metadata", () => {
+  it("marks rankings provisional when Git history is unavailable", () => {
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+
+    expect(data.provenance).toMatchObject({ history: "unavailable", churn: "unavailable" });
+    expect(data.provenance.inputFingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(data.risks.every((risk) => risk.tags.some(([label]) => label === "provisional rank"))).toBe(true);
+    expect(data.risks.every((risk) => !risk.tags.some(([label]) => /^(critical|high|medium) risk$/.test(label)))).toBe(true);
+  });
+
+  it("does not invent payment or credential advice for CapturePanic", () => {
+    const g = graph();
+    g.nodes = [codeSymbol("sym:internal/common/panic.go#CapturePanic", "CapturePanic", "internal/common/panic.go")];
+    g.edges = [];
+    g.candidate_edges = [];
+
+    const data = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    expect(data.risks[0]?.todo).not.toMatch(/payment|credential/i);
+  });
+
+  it("labels fractional import attribution as weighted references", () => {
+    const g = graph();
+    g.nodes = [
+      codeSymbol("sym:src/shared.ts#alpha", "alpha", "src/shared.ts"),
+      codeSymbol("sym:src/shared.ts#beta", "beta", "src/shared.ts")
+    ];
+    g.edges = [
+      makeEdge({
+        from_external_id: "src/consumer.ts",
+        to_external_id: "src/shared.ts",
+        relationship_type: "IMPORTS",
+        evidence_strength: "hard",
+        review_status: "auto_detected",
+        confidence: 1,
+        provenance
+      })
+    ];
+    g.candidate_edges = [];
+
+    const data = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    expect(data.risks.some((risk) => (risk.context ?? "").includes("0.5 weighted incoming references"))).toBe(true);
+    expect(data.risks.every((risk) => !(risk.context ?? "").includes("callers"))).toBe(true);
+  });
+});

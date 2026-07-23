@@ -2560,7 +2560,10 @@ export function opBehaviorCoverageHtml(
   // proof-attempts sidecar ONLY when it anchors to the current graph+commit
   // (stale evidence is dropped — fail closed; display copy only, no tier math).
   const dyn = dynamicProof ?? sidecarDynamicProof(root, graph);
-  const data = buildBehaviorReportData(graph, loadLedger(root), { repoRoot: root, dynamicProof: dyn });
+  // Artifacts may be written from a different working directory when callers
+  // use `opro start <source>`. Risk scoring must follow the analyzed source
+  // root recorded in the graph, never the artifact/output root.
+  const data = buildBehaviorReportData(graph, loadLedger(root), { repoRoot: graph.workspace.root, dynamicProof: dyn });
   // Delta-since-last-run: best-effort read of the previous snapshot; a missing
   // or unreadable baseline means first run (banner hidden). Display-only —
   // the delta never touches tiers, ranks, or counts.
