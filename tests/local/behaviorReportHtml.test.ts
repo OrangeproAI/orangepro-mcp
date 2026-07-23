@@ -403,6 +403,8 @@ describe("renderBehaviorReport", () => {
     expect(html).toContain("coverage bucket — not the risk count");
     expect(html).toContain("Priority gaps is a separate ranked worklist");
     expect(html).toContain("const priorityGapCount=D.risks.length");
+    expect(html).toContain("const outsideProofs=S.provenOutsideDenominator??0");
+    expect(html).toContain("shown outside the static denominator");
   });
 });
 

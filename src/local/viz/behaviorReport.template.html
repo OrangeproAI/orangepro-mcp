@@ -509,8 +509,9 @@ const priorityGapCount=D.risks.length;
   d.dataset.t=k.t;
   $("#kpis").append(d);
 });
-const coverageAccounted=S.proven+S.associated+(S.candidate??0)+S.reachableUntested+S.noSignal;
-$("#metric-scope").textContent="Coverage status classifies "+coverageAccounted.toLocaleString()+" of "+S.total.toLocaleString()+" mapped behaviors. Priority gaps is a separate ranked worklist of "+priorityGapCount.toLocaleString()+" unproven behaviors; it does not equal the Reachable count.";
+const outsideProofs=S.provenOutsideDenominator??0;
+const coverageAccounted=(S.proven-outsideProofs)+S.associated+(S.candidate??0)+S.reachableUntested+S.noSignal;
+$("#metric-scope").textContent="Coverage status classifies "+coverageAccounted.toLocaleString()+" of "+S.total.toLocaleString()+" mapped behaviors. Priority gaps is a separate ranked worklist of "+priorityGapCount.toLocaleString()+" unproven behaviors; it does not equal the Reachable count."+(outsideProofs?" "+outsideProofs.toLocaleString()+" additional dynamically proven behavior"+(outsideProofs===1?" is":"s are")+" shown outside the static denominator.":"");
 
 // codebase
 D.scan.services.forEach(([nm,ct])=>$("#svc-list").append(el("div","svc",`<span class="nm">${esc(nm)}</span><span class="ct">${ct}</span>`)));
