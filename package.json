@@ -1,6 +1,6 @@
 {
   "name": "@orangepro/orangepro-mcp",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "private": false,
   "description": "OrangePro (`opro`) — a local-first, BYOK CLI + MCP server that builds an evidence graph from a local checkout, ingests runtime coverage, and generates grounded tests. Metadata-only exports; no source upload; generated tests stay local.",
   "license": "MIT",
