@@ -762,11 +762,11 @@ function renderRisks(){
       hiddenGeneratedFlows
         ? \`<div class="paywall-num">\${hiddenGeneratedFlows} more flows with tests</div>
            <div class="paywall-txt">OrangePro accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>
-           <a class="paywall-btn" href="https://app.orangepro.ai" target="_blank">View all on OrangePro Platform &rarr;</a>\`
+           <a class="paywall-btn" href="https://platform.orangepro.ai" target="_blank">View all on OrangePro Platform &rarr;</a>\`
         : remainingRiskFlows
           ? \`<div class="paywall-num">\${remainingRiskFlows} high-risk flows left</div>
              <div class="paywall-txt">The local MCP accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
-             <a class="paywall-btn" href="https://app.orangepro.ai" target="_blank">Generate remaining tests on Platform &rarr;</a>\`
+             <a class="paywall-btn" href="https://platform.orangepro.ai" target="_blank">Generate remaining tests on Platform &rarr;</a>\`
           : \`<div class="paywall-num">All generated tests are shown</div>
              <div class="paywall-txt">OrangePro generated tests for every high-risk flow in this report, and every generated test is visible here.</div>\`));
   }
