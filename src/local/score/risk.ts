@@ -73,6 +73,15 @@ function confirmedBehaviorIds(graph: LocalGraph): Set<string> {
     if (nodeKinds.get(e.from_external_id) === "CodeSymbol" || nodeKinds.get(e.from_external_id) === "Requirement") ids.add(e.from_external_id);
     if (nodeKinds.get(e.to_external_id) === "CodeSymbol" || nodeKinds.get(e.to_external_id) === "Requirement") ids.add(e.to_external_id);
   }
+  // A container type whose every method child is confirmed has no distinct
+  // untested surface left — suppress it from the gap ranking rather than
+  // listing it as an unlinked candidate above its own proven methods.
+  const symbolIds = graph.nodes.filter((n) => n.kind === "CodeSymbol").map((n) => n.external_id);
+  for (const id of symbolIds) {
+    if (ids.has(id)) continue;
+    const children = symbolIds.filter((s) => s.startsWith(id + "."));
+    if (children.length > 0 && children.every((c) => ids.has(c))) ids.add(id);
+  }
   return ids;
 }
 
