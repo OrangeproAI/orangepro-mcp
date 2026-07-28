@@ -26,8 +26,15 @@ import {
   GraphEdge,
   CandidateEdge
 } from "../../src/local/graph/ontology.js";
+import { spawnSync } from "node:child_process";
 
 const CLOCK = () => "2026-06-07T00:00:00Z";
+
+function hasGo(): boolean {
+  const r = spawnSync(process.env.OPRO_GO_BIN || "go", ["version"], { encoding: "utf8" });
+  return r.status === 0 && /go version/.test(r.stdout ?? "");
+}
+const GO = hasGo();
 
 function provenance(sourceRef: string) {
   return { source_scope_id: "scope-1", source_ref: sourceRef, detector: "test-fixture" };
@@ -544,7 +551,7 @@ describe("generateTests — well-grounded behavior", () => {
     expect(result.run?.generated_test_ids).toContain(test.id);
   });
 
-  it("chooses Go format for a behavior grounded in Go code, even without a JS framework", async () => {
+  it.skipIf(!GO)("chooses Go format for a behavior grounded in Go code, even without a JS framework", async () => {
     const behavior = makeNode({
       kind: "UserFlow",
       external_id: "flow:go-active-help",
@@ -593,7 +600,7 @@ describe("generateTests — well-grounded behavior", () => {
     expect(test.runnable).toBe(true);
   });
 
-  it("adds missing Go testing import before marking a model body runnable", async () => {
+  it.skipIf(!GO)("adds missing Go testing import before marking a model body runnable", async () => {
     const behavior = makeNode({
       kind: "UserFlow",
       external_id: "flow:go-active-help",
@@ -653,7 +660,7 @@ describe("generateTests — well-grounded behavior", () => {
     expect(test.runnable).toBe(true);
   });
 
-  it("rewrites model-supplied wrong Go package names to the target package", async () => {
+  it.skipIf(!GO)("rewrites model-supplied wrong Go package names to the target package", async () => {
     const behavior = makeNode({
       kind: "UserFlow",
       external_id: "flow:mux-middleware",

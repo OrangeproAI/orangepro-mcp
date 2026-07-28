@@ -572,7 +572,7 @@ function riskGeneratedTests(
     // the assertion line stays pure metadata (framework, same-file, disclosure).
     assertion: [
       sameFile ? "same-file target" : "",
-      t.framework_hint,
+      t.framework_hint || (gap.file.endsWith(".go") ? "go" : ""),
       t.weak_evidence_used ? "weak evidence disclosed" : ""
     ]
       .filter(Boolean)
@@ -1020,7 +1020,7 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
         ].filter((c): c is string => Boolean(c)))];
         return {
           generatedTests,
-          applicableCategories: riskApplicableConcerns(risk, verb),
+          applicableCategories: [...new Set([...riskApplicableConcerns(risk, verb), ...generatedCategories])],
           generatedCategories,
           verb,
           path,
