@@ -12,6 +12,7 @@ import { GENERATED_DIR } from "./runHints.js";
 import { behaviorNodes, findNode, nodesByKind, priorityRank } from "../graph/factories.js";
 import { structurallyUnconfirmable } from "../graph/confirmable.js";
 import { shortHash } from "../util/hash.js";
+import { targetFingerprint } from "../ledger.js";
 import { reportProgress } from "../util/progress.js";
 import { redactSecrets, redactSecretsPreservingLineCount } from "../util/redact.js";
 import { Clock, systemClock } from "../util/time.js";
@@ -2040,6 +2041,27 @@ function planGroundedBuckets(
   return plan;
 }
 
+/**
+ * Previously generated drafts that may be reused verbatim for `behavior`: the
+ * newest run's RUNNABLE, non-stale drafts recorded against the target's CURRENT
+ * fingerprint. A missing fingerprint (unanalyzed file, unparseable id) pins
+ * nothing — the conservative direction is to regenerate, never to serve a draft
+ * whose target we cannot prove is unchanged.
+ */
+function pinnedDraftsFor(graph: LocalGraph, behavior: GraphNode, fingerprint: string | undefined): GeneratedTest[] {
+  if (!fingerprint || behavior.kind !== "CodeSymbol") return [];
+  const matches = (graph.generated_tests ?? []).filter(
+    (t) =>
+      t.target_symbol_external_id === behavior.external_id &&
+      t.target_fingerprint === fingerprint &&
+      t.runnable !== false &&
+      t.stale !== true
+  );
+  if (matches.length === 0) return [];
+  const latestRunId = matches[matches.length - 1].run_id;
+  return matches.filter((t) => t.run_id === latestRunId);
+}
+
 /** One A/B target: the behavior plus its gathered context + grounding metadata. */
 export interface CompareTarget {
   behavior: GraphNode;
@@ -2085,7 +2107,7 @@ export async function generateTests(
   const { targets, warnings } = selectTargets(graph, opts);
   const framework = pickFramework(graph, opts, targets, fileReader);
   const runSelection = targetsForFramework(graph, targets, framework);
-  const runTargets = runSelection.targets;
+  let runTargets = runSelection.targets;
   warnings.push(...runSelection.warnings);
   const systemPrompt = opts.systemPrompt ?? buildSystemPrompt();
   const promptVersion = inputMode === "graph_grounded" && opts.prompt_version === "v5" ? PROMPT_VERSION_V5 : PROMPT_VERSION;
@@ -2096,6 +2118,28 @@ export async function generateTests(
 
   const generated: GeneratedTest[] = [];
   const missing: MissingEvidenceItem[] = [];
+
+  // Pin: a target whose code is byte-identical to what a previously RUNNABLE draft
+  // was written against gets that draft back verbatim — no model call, no new
+  // persisted record, no drift in what the agent is told to run. Regeneration
+  // resumes the moment the target's fingerprint changes.
+  const fingerprintOf = (behavior: GraphNode): string | undefined =>
+    behavior.kind === "CodeSymbol" ? targetFingerprint(graph, behavior.external_id) : undefined;
+  if (opts.pin_unchanged && inputMode === "graph_grounded") {
+    const remaining: GraphNode[] = [];
+    for (const behavior of runTargets) {
+      const pinned = pinnedDraftsFor(graph, behavior, fingerprintOf(behavior));
+      if (pinned.length === 0 || generated.length >= limit) {
+        remaining.push(behavior);
+        continue;
+      }
+      generated.push(...pinned.slice(0, limit - generated.length).map((t) => ({ ...t, pinned: true })));
+      warnings.push(
+        `Reused ${pinned.length} pinned draft(s) for "${behavior.title || behavior.external_id}" — the target is unchanged since they were generated (no model call).`
+      );
+    }
+    runTargets = remaining;
+  }
 
   if (inputMode === "raw_prompt") {
     // Internal baseline only: broad sampling, one raw test per target (no buckets).
@@ -2451,6 +2495,7 @@ export async function generateTests(
             grounding: { entity_ids: gc.entityIds, source_refs: [], weak_relationships_used: [] },
             weak_evidence_used: false,
             target_symbol_external_id: behavior.external_id,
+            ...(fingerprintOf(behavior) ? { target_fingerprint: fingerprintOf(behavior) } : {}),
             runnable: false,
             unresolved_reason: reason
           });
@@ -2472,7 +2517,9 @@ export async function generateTests(
             import_provenance
           },
           weak_evidence_used: gc.weakUsed.length > 0,
-          ...(behavior.kind === "CodeSymbol" ? { target_symbol_external_id: behavior.external_id } : {}),
+          ...(behavior.kind === "CodeSymbol"
+            ? { target_symbol_external_id: behavior.external_id, ...(fingerprintOf(behavior) ? { target_fingerprint: fingerprintOf(behavior) } : {}) }
+            : {}),
           runnable: true
         });
       }
@@ -2649,7 +2696,12 @@ export async function generateTests(
           import_provenance
         },
         weak_evidence_used: item.weakUsed.length > 0,
-        ...(item.behavior.kind === "CodeSymbol" ? { target_symbol_external_id: item.behavior.external_id } : {}),
+        ...(item.behavior.kind === "CodeSymbol"
+          ? {
+              target_symbol_external_id: item.behavior.external_id,
+              ...(fingerprintOf(item.behavior) ? { target_fingerprint: fingerprintOf(item.behavior) } : {})
+            }
+          : {}),
         runnable,
         ...(unresolved_reason ? { unresolved_reason } : {})
       });
@@ -2660,7 +2712,11 @@ export async function generateTests(
     warnings.push("No behavior anchors available to target. Add requirements/templates or analyze a path with tests.");
   }
 
-  const run: GenerationRun | null = generated.length
+  // A pinned draft belongs to the run that FIRST produced it: it must not be
+  // re-listed under this run_id (nor re-persisted), or every pin-only generation
+  // would duplicate the same draft in the graph.
+  const freshTests = generated.filter((t) => !t.pinned);
+  const run: GenerationRun | null = freshTests.length
     ? {
         run_id,
         model_provider: provider.providerName,
@@ -2668,7 +2724,7 @@ export async function generateTests(
         input_mode: inputMode,
         prompt_version: promptVersion,
         created_at,
-        generated_test_ids: generated.map((t) => t.id)
+        generated_test_ids: freshTests.map((t) => t.id)
       }
     : null;
 

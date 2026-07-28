@@ -2305,17 +2305,29 @@ export async function opGenerate(
 
   const result = await generateTests(
     graph,
-    { target_ids: opts.target_ids, framework: opts.framework, limit: opts.limit, input_mode: opts.input_mode, prompt_version: opts.prompt_version },
+    {
+      target_ids: opts.target_ids,
+      framework: opts.framework,
+      limit: opts.limit,
+      input_mode: opts.input_mode,
+      prompt_version: opts.prompt_version,
+      // Persisting lane: a runnable draft for an unchanged target is reused as-is
+      // rather than re-bought from the model on every run.
+      pin_unchanged: opts.pin_unchanged ?? true
+    },
     provider,
     reader,
     deps.clock
   );
 
-  if (result.run && result.generated_tests.length) {
+  // Pinned drafts are already IN graph.generated_tests — appending them again
+  // would duplicate a draft on every generation of an unchanged target.
+  const freshTests = result.generated_tests.filter((t) => !t.pinned);
+  if (result.run && freshTests.length) {
     const next: LocalGraph = {
       ...graph,
       generation_runs: [...graph.generation_runs, result.run],
-      generated_tests: [...graph.generated_tests, ...result.generated_tests],
+      generated_tests: [...graph.generated_tests, ...freshTests],
       updated_at: deps.clock()
     };
     saveGraph(paths.graphPath, next);
