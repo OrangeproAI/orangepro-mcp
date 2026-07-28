@@ -97,7 +97,7 @@ import {
   type LedgerRecord,
   type LedgerStats
 } from "./ledger.js";
-import { buildRtm, renderRtmCsv, renderRtmMarkdown, type RtmFormat, type RtmResult } from "./rtm.js";
+import { buildRtm, provenSymbolIds, renderRtmCsv, renderRtmMarkdown, type RtmFormat, type RtmResult } from "./rtm.js";
 import {
   buildProofDoctor,
   distillProofAttempts,
@@ -1275,7 +1275,10 @@ export function opProofDoctor(root: string): ProofDoctorResult {
 export function opGaps(root: string, opts: { limit?: number; min_priority?: string } = {}): GapsResult {
   const graph = loadGraph(workspacePaths(root).graphPath);
   const gaps = findGaps(graph, opts);
-  const topRiskGaps = rankRiskGaps(graph, { limit: opts.limit ?? 10, repoRoot: root }).map((gap) => ({
+  // Ledger proofs are invisible to the graph's hard edges; pass them so a type
+  // whose every method is Dynamically Proven is suppressed instead of ranked.
+  const provenIds = provenSymbolIds(graph, loadLedger(root));
+  const topRiskGaps = rankRiskGaps(graph, { limit: opts.limit ?? 10, repoRoot: root, provenIds }).map((gap) => ({
     external_id: gap.id,
     title: gap.title,
     file: gap.file,
@@ -2096,7 +2099,11 @@ export async function opStart(
       const generatedTargets = new Set(
         (graphForGeneration.generated_tests ?? []).map((t) => t.target_symbol_external_id).filter((id): id is string => Boolean(id))
       );
-      const targetIds = rankRiskGaps(graphForGeneration, { repoRoot: root, limit: START_GENERATE_RISK_LIMIT })
+      const targetIds = rankRiskGaps(graphForGeneration, {
+        repoRoot: root,
+        limit: START_GENERATE_RISK_LIMIT,
+        provenIds: provenSymbolIds(graphForGeneration, loadLedger(root))
+      })
         .map((gap) => gap.id)
         .filter((id) => !generatedTargets.has(id));
       if (targetIds.length) {

@@ -32,12 +32,12 @@ function graph(root = ""): LocalGraph {
   };
 }
 
-function symbol(id: string, title: string, file: string, eligible = true): LocalGraph["nodes"][number] {
+function symbol(id: string, title: string, file: string, eligible = true, memberOf?: string): LocalGraph["nodes"][number] {
   return makeNode({
     kind: "CodeSymbol",
     external_id: id,
     title,
-    properties: { file },
+    properties: { file, ...(memberOf ? { member_of: memberOf } : {}) },
     evidence_strength: "hard",
     review_status: "auto_detected",
     confidence: 1,
@@ -202,11 +202,11 @@ describe("rankRiskGaps", () => {
     const g = graph();
     g.nodes = [
       symbol("sym:src/core/err.ts#staleErr", "staleErr", "src/core/err.ts"),
-      symbol("sym:src/core/err.ts#staleErr.Error", "staleErr.Error", "src/core/err.ts"),
-      symbol("sym:src/core/err.ts#staleErr.IsTerminal", "staleErr.IsTerminal", "src/core/err.ts"),
+      symbol("sym:src/core/err.ts#staleErr.Error", "staleErr.Error", "src/core/err.ts", true, "staleErr"),
+      symbol("sym:src/core/err.ts#staleErr.IsTerminal", "staleErr.IsTerminal", "src/core/err.ts", true, "staleErr"),
       symbol("sym:src/core/other.ts#half", "half", "src/core/other.ts"),
-      symbol("sym:src/core/other.ts#half.Done", "half.Done", "src/core/other.ts"),
-      symbol("sym:src/core/other.ts#half.Open", "half.Open", "src/core/other.ts"),
+      symbol("sym:src/core/other.ts#half.Done", "half.Done", "src/core/other.ts", true, "half"),
+      symbol("sym:src/core/other.ts#half.Open", "half.Open", "src/core/other.ts", true, "half"),
       testCase("test:err.test.ts"),
       testCase("test:half.test.ts")
     ];
@@ -220,6 +220,37 @@ describe("rankRiskGaps", () => {
     expect(ids).not.toContain("sym:src/core/err.ts#staleErr");
     expect(ids).toContain("sym:src/core/other.ts#half");
     expect(ids).toContain("sym:src/core/other.ts#half.Open");
+  });
+
+  // Regression (Temporal, consts.staleStateError at rank #10): both methods were
+  // Dynamically Proven, but proof lives in the ledger — not in a TESTED_BY edge —
+  // and the proven methods sit outside the static denominator, so the hard-edge-only
+  // container check never fired and the container outranked its own proven methods.
+  it("suppresses a container whose every member_of child is proven only in the ledger", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/core/consts.ts#staleStateError", "staleStateError", "src/core/consts.ts"),
+      symbol("sym:src/core/consts.ts#staleStateError.Error", "staleStateError.Error", "src/core/consts.ts", true, "staleStateError"),
+      symbol("sym:src/core/consts.ts#staleStateError.Is", "staleStateError.Is", "src/core/consts.ts", true, "staleStateError"),
+      symbol("sym:src/core/partial.ts#partialError", "partialError", "src/core/partial.ts"),
+      symbol("sym:src/core/partial.ts#partialError.Error", "partialError.Error", "src/core/partial.ts", true, "partialError"),
+      symbol("sym:src/core/partial.ts#partialError.Is", "partialError.Is", "src/core/partial.ts", true, "partialError")
+    ];
+    // Zero TESTED_BY/COVERS edges anywhere: the ledger is the only proof source.
+    g.edges = [];
+    const provenIds = new Set([
+      "sym:src/core/consts.ts#staleStateError.Error",
+      "sym:src/core/consts.ts#staleStateError.Is",
+      "sym:src/core/partial.ts#partialError.Error"
+    ]);
+
+    const ids = rankRiskGaps(g, { limit: 10, repoRoot: "", provenIds }).map((r) => r.id);
+    expect(ids).not.toContain("sym:src/core/consts.ts#staleStateError");
+    // Only one of two children proven — the container still has untested surface.
+    expect(ids).toContain("sym:src/core/partial.ts#partialError");
+    expect(ids).toContain("sym:src/core/partial.ts#partialError.Is");
+    // Without the ledger set the old hard-edge-only check cannot see the proofs.
+    expect(rankRiskGaps(g, { limit: 10, repoRoot: "" }).map((r) => r.id)).toContain("sym:src/core/consts.ts#staleStateError");
   });
 
   it("keeps the legacy linear formula available behind an explicit option", () => {

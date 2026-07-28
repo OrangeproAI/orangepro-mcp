@@ -48,6 +48,15 @@ export interface RiskGapOptions {
   /** Use the legacy linear formula (incoming_refs × 0.4 + git_churn × 0.4 + entry-point bonus).
    *  Defaults to false (ORS). Kept for one release so callers can diff. */
   legacy?: boolean;
+  /**
+   * CodeSymbol ids carrying a CURRENT valid dynamic-proof ledger cert (see
+   * `provenSymbolIds` in rtm.ts). Proof lives in the ledger, not in the graph's
+   * hard TESTED_BY/COVERS edges, and a proven method is frequently OUTSIDE the
+   * static denominator — so without this set, container suppression cannot see
+   * that every child of a type is already proven and the container outranks its
+   * own proven methods.
+   */
+  provenIds?: Set<string>;
 }
 
 const ENTRY_PATH_RE = /(^|\/)(routes?|controllers?|handlers?|jobs?|workers?|processors?|queues?|consumers?|subscribers?|listeners?|server|cmd)\//i;
@@ -64,7 +73,33 @@ function symbolTitle(n: GraphNode): string {
   return n.title ?? n.external_id.split("#")[1] ?? n.external_id;
 }
 
-function confirmedBehaviorIds(graph: LocalGraph): Set<string> {
+/**
+ * Structural container → member children, read from the analyzer's own
+ * `properties.member_of` (the same signal src/local/reprove/scoped.ts uses).
+ * Id-prefix matching cannot do this job: `sym:f.ts#a.b` is a child of
+ * `sym:f.ts#a` only by string luck, and a dotted symbol name with no container
+ * node would be mis-parented. A container is resolved inside the child's OWN
+ * file: a same-named symbol elsewhere is a different thing, and mis-parenting
+ * here would suppress a genuine gap.
+ */
+function containerChildren(graph: LocalGraph): Map<string, string[]> {
+  const symbols = graph.nodes.filter((n) => n.kind === "CodeSymbol");
+  const idByFileTitle = new Map<string, string>();
+  for (const n of symbols) idByFileTitle.set(`${symbolFile(n)}#${symbolTitle(n)}`, n.external_id);
+  const out = new Map<string, string[]>();
+  for (const n of symbols) {
+    const memberOf = n.properties.member_of;
+    if (typeof memberOf !== "string" || memberOf === "") continue;
+    const containerId = idByFileTitle.get(`${symbolFile(n)}#${memberOf}`);
+    if (!containerId || containerId === n.external_id) continue;
+    const list = out.get(containerId);
+    if (list) list.push(n.external_id);
+    else out.set(containerId, [n.external_id]);
+  }
+  return out;
+}
+
+function confirmedBehaviorIds(graph: LocalGraph, provenIds?: Set<string>): Set<string> {
   const ids = new Set<string>();
   const nodeKinds = new Map(graph.nodes.map((n) => [n.external_id, n.kind]));
   for (const e of graph.edges) {
@@ -76,11 +111,15 @@ function confirmedBehaviorIds(graph: LocalGraph): Set<string> {
   // A container type whose every method child is confirmed has no distinct
   // untested surface left — suppress it from the gap ranking rather than
   // listing it as an unlinked candidate above its own proven methods.
-  const symbolIds = graph.nodes.filter((n) => n.kind === "CodeSymbol").map((n) => n.external_id);
-  for (const id of symbolIds) {
-    if (ids.has(id)) continue;
-    const children = symbolIds.filter((s) => s.startsWith(id + "."));
-    if (children.length > 0 && children.every((c) => ids.has(c))) ids.add(id);
+  // "Confirmed" here means a hard static link OR a current ledger proof: the
+  // proof lane leaves no graph edge and usually sits outside the denominator,
+  // so a hard-edge-only check never fires for a dynamically proven type.
+  const eligible = new Set(
+    graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true).map((n) => n.external_id)
+  );
+  for (const [containerId, children] of containerChildren(graph)) {
+    if (ids.has(containerId) || !eligible.has(containerId)) continue;
+    if (children.every((c) => ids.has(c) || provenIds?.has(c) === true)) ids.add(containerId);
   }
   return ids;
 }
@@ -397,7 +436,7 @@ function candidateSignalIds(graph: LocalGraph, candidateIds: Set<string>): Set<s
 
 export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): RiskGap[] {
   const limit = opts.limit ?? 20;
-  const confirmed = confirmedBehaviorIds(graph);
+  const confirmed = confirmedBehaviorIds(graph, opts.provenIds);
   const symbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && !confirmed.has(n.external_id));
   const symbolIds = new Set(symbols.map((s) => s.external_id));
   const symbolsByFile = new Map<string, GraphNode[]>();
