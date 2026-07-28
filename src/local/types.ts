@@ -157,6 +157,12 @@ export interface GenerateOptions {
   prompt_version?: "v2" | "v5";
   /** Override the shared system prompt (used by the A/B compare view). */
   systemPrompt?: string;
+  /**
+   * Reuse a previously runnable draft when the target's code fingerprint is
+   * unchanged, instead of paying for a fresh generation. Opt-in: the A/B compare
+   * view must always call the model for BOTH arms, so it leaves this off.
+   */
+  pin_unchanged?: boolean;
 }
 
 // ── Explain ──────────────────────────────────────────────────────────

@@ -249,6 +249,16 @@ export interface GeneratedTest {
   unresolved_reason?: string;
   /** Invalidated when underlying evidence changed. */
   stale?: boolean;
+  /**
+   * Code-identity fingerprint of the target this draft was generated against
+   * (`targetFingerprint` in ledger.ts — the same concept the proof ledger pins
+   * against). A runnable draft whose target still hashes to this value is reused
+   * verbatim on the next generation instead of being re-drafted; any source edit
+   * changes the fingerprint and re-opens the target for generation.
+   */
+  target_fingerprint?: string;
+  /** True when this draft was REUSED from a previous run (no model call, nothing new persisted). */
+  pinned?: boolean;
 }
 
 export interface GenerationRun {
