@@ -119,6 +119,21 @@ export function buildRtm(
   return { summary: summarizeRows(baseRows, unionRows), rows, ...(opts.scope ? { scope: opts.scope } : {}) };
 }
 
+/**
+ * CodeSymbol ids the RTM would call Dynamically Proven — the SAME selection
+ * buildRtm uses (`selectLedgerBySymbol(...).proven`), so proof judgment has one
+ * definition. Consumers outside the RTM (risk ranking's container suppression)
+ * need it because a proof leaves no graph edge and its target frequently sits
+ * outside the deterministic denominator.
+ */
+export function provenSymbolIds(graph: LocalGraph, ledger: Ledger): Set<string> {
+  const out = new Set<string>();
+  for (const [symbol, selected] of selectLedgerBySymbol(ledger, graph)) {
+    if (selected.proven) out.add(symbol);
+  }
+  return out;
+}
+
 function inScope(node: GraphNode, targetSet: Set<string> | null, fileSet: Set<string> | null): boolean {
   if (!targetSet && !fileSet) return true;
   if (targetSet?.has(node.external_id)) return true;
