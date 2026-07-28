@@ -198,6 +198,30 @@ describe("rankRiskGaps", () => {
     expect(ranked.map((r) => r.title)).toContain("handleOrder");
   });
 
+  it("suppresses a container type when all its method children are confirmed", () => {
+    const g = graph();
+    g.nodes = [
+      symbol("sym:src/core/err.ts#staleErr", "staleErr", "src/core/err.ts"),
+      symbol("sym:src/core/err.ts#staleErr.Error", "staleErr.Error", "src/core/err.ts"),
+      symbol("sym:src/core/err.ts#staleErr.IsTerminal", "staleErr.IsTerminal", "src/core/err.ts"),
+      symbol("sym:src/core/other.ts#half", "half", "src/core/other.ts"),
+      symbol("sym:src/core/other.ts#half.Done", "half.Done", "src/core/other.ts"),
+      symbol("sym:src/core/other.ts#half.Open", "half.Open", "src/core/other.ts"),
+      testCase("test:err.test.ts"),
+      testCase("test:half.test.ts")
+    ];
+    g.edges = [
+      edge("sym:src/core/err.ts#staleErr.Error", "test:err.test.ts", "TESTED_BY"),
+      edge("sym:src/core/err.ts#staleErr.IsTerminal", "test:err.test.ts", "TESTED_BY"),
+      edge("sym:src/core/other.ts#half.Done", "test:half.test.ts", "TESTED_BY")
+    ];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const ids = ranked.map((r) => r.id);
+    expect(ids).not.toContain("sym:src/core/err.ts#staleErr");
+    expect(ids).toContain("sym:src/core/other.ts#half");
+    expect(ids).toContain("sym:src/core/other.ts#half.Open");
+  });
+
   it("keeps the legacy linear formula available behind an explicit option", () => {
     const g = graph();
     g.nodes = [
