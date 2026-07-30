@@ -1,0 +1,22 @@
+{
+  "$schema": "https://glama.ai/mcp/servers/schema/glama.json",
+  "name": "orangepro-mcp",
+  "display_name": "OrangePro MCP",
+  "description": "Find behavioral test gaps, generate grounded integration tests, and prove them via mutation kill. Local-first MCP server powered by a knowledge graph.",
+  "categories": ["Testing & QA Tools", "Code Analysis", "Developer Tools"],
+  "author": {
+    "name": "OrangeproAI",
+    "url": "https://orangepro.ai"
+  },
+  "repository": "https://github.com/OrangeproAI/orangepro-mcp",
+  "license": "MIT",
+  "runtime": "node",
+  "transport": "stdio",
+  "features": [
+    "test-gap-analysis",
+    "integration-test-generation",
+    "mutation-testing",
+    "knowledge-graph",
+    "behavior-coverage"
+  ]
+}
