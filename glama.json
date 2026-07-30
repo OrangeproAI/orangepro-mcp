@@ -1,5 +1,8 @@
 {
   "$schema": "https://glama.ai/mcp/servers/schema/glama.json",
+  "maintainers": [
+    "aamirsiddiqui"
+  ],
   "name": "orangepro-mcp",
   "display_name": "OrangePro MCP",
   "description": "Find behavioral test gaps, generate grounded integration tests, and prove them via mutation kill. Local-first MCP server powered by a knowledge graph.",
