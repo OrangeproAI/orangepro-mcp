@@ -1,7 +1,7 @@
 {
   "$schema": "https://glama.ai/mcp/servers/schema/glama.json",
   "maintainers": [
-    "aamirsiddiqui"
+    "mas213"
   ],
   "name": "orangepro-mcp",
   "display_name": "OrangePro MCP",
