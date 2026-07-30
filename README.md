@@ -1,4 +1,8 @@
-# OrangePro
+# OrangePro MCP
+
+[![npm version](https://badge.fury.io/js/@orangepro%2Fmcp-server.svg )](https://www.npmjs.com/package/@orangepro/mcp-server )
+[![MIT License](https://img.shields.io/badge/license-MIT-green.svg )](LICENSE)
+[![orangepro-mcp MCP server](https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp/badges/score.svg )](https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp )
 
 **Find the behaviors your tests miss. Generate grounded tests that actually run.**
 
