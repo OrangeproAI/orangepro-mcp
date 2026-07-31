@@ -10,7 +10,7 @@
 `opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. It runs as a CLI and a local stdio MCP server.
 
 Once you run the mcp server against a repo, you can get behavior-coverage/html
-**[→ Live example: Twenty CRM behavior coverage report](https://orangeproai.github.io/orangepro-mcp/crm-twenty-behavior-coverage.html)**
+**[→ Live example: Twenty CRM behavior coverage report](https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html)**
 
 <img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
 
