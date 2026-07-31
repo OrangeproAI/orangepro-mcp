@@ -17,8 +17,7 @@ Once you run the mcp server against a repo, you can get behavior-coverage/html
 ---
 Install the target repository's dependencies first, then run OrangePro from that repository:
 
-```
-bash
+```bash
 cd /path/to/your/repo
 npm install # or pnpm install / bun install / the repository's package manager
 
