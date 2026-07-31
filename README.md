@@ -14,6 +14,13 @@ Once you run the mcp server against a repo, you can get behavior-coverage/html
 
 <img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
 
+*Fig 1: System map — entry lanes (GraphQL, HTTP, Jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
+
+<img width="818" height="1284" alt="Screenshot 2026-07-30 at 4 38 35 PM" src="https://github.com/user-attachments/assets/1c41475d-be2a-4c6d-ace6-c6546573bf97" />
+
+
+*Fig 2: Priority gaps — top 20 unproven behaviors ranked by blast radius, with generated test drafts and applicable testing categories.*
+
 ---
 Install the target repository's dependencies first, then run OrangePro from that repository:
 
