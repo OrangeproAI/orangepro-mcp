@@ -9,6 +9,12 @@
 
 `opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. It runs as a CLI and a local stdio MCP server.
 
+Once you run the mcp server against a repo, you can get behavior-coverage/html
+**[→ Live example: Twenty CRM behavior coverage report](https://orangeproai.github.io/orangepro-mcp/behavior-coverage.html )**
+
+<img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
+
+---
 Install the target repository's dependencies first, then run OrangePro from that repository:
 
 ```bash
@@ -40,7 +46,6 @@ orangepro_generated/         ← contained generated tests; existing source file
 The report opens on a **system map** of your repo — entry lanes (GraphQL/HTTP/Jobs) flowing into the services they reach, sized by traffic, colored by evidence tier, risk-ringed — identical on every run. Each completed rerun shows a **delta banner** against the previous completed run. The report discloses when bounded path enumeration prunes additional branch expansions. Every behavior gets a plain-English description; every top risk gets a deterministic context line and a state-aware next step.
 
 Run `opro export` when you want a machine-readable evidence pack.
-<img width="895" height="960" alt="Screenshot 2026-07-08 at 1 18 01 AM" src="https://github.com/user-attachments/assets/73b8a812-2eab-43a1-8aed-4289545e630b" />
 
 ---
 
