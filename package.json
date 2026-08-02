@@ -100,6 +100,7 @@
     "smoke:generate-prove": "npm run build && node scripts/smoke-generate-prove-e2e.mjs",
     "smoke:generate-prove-v5": "npm run build && node scripts/smoke-generate-prove-v5.mjs",
     "smoke:db-sqljs": "npm run build && node scripts/smoke-db-sqljs-prove.mjs",
+    "release": "node --input-type=module scripts/release.js",
     "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
