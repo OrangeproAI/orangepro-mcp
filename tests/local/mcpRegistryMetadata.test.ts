@@ -26,7 +26,8 @@ describe("MCP Registry metadata", () => {
     expect(launcherPackage.mcpName).toBe(server.name);
     expect(ORANGEPRO_VERSION).toBe(rootPackage.version);
     const [, repositoryOwner] = new URL(server.repository.url).pathname.split("/");
-    expect(server.name.split("/")[0]).toBe(`io.github.${repositoryOwner}`);
+    const namePrefix = server.name.split("/")[0];
+    expect(["io.github.OrangeproAI", "ai.orangepro"]).toContain(namePrefix);
   });
 
   it("describes a schema-safe package launch", () => {
