@@ -4,6 +4,7 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg )](LICENSE)
 [![npm downloads](https://img.shields.io/npm/dw/@orangepro/mcp-server.svg )](https://www.npmjs.com/package/@orangepro/mcp-server )
 [![orangepro-mcp MCP server](https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp/badges/score.svg )](https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp )
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-ai.orangepro%2Fmcp-orange.svg )](https://registry.modelcontextprotocol.io/?q=orangepro )
 
 **Find the behaviors your tests miss. Generate grounded tests that actually run.**
 
