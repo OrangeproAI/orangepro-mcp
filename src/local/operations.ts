@@ -413,7 +413,7 @@ function moduleRootBound(sourceRoot: string, workspaceRoot: string): string {
 function goModuleRoot(sourceRoot: string, targetRel: string, workspaceRoot: string): string {
   let dir = dirname(resolve(sourceRoot, targetRel));
   const stop = moduleRootBound(sourceRoot, workspaceRoot);
-  for (;;) {
+  for (; ;) {
     if (existsSync(join(dir, "go.mod"))) return dir;
     if (dir === stop) break;
     const parent = dirname(dir);
@@ -434,7 +434,7 @@ function goModuleRoot(sourceRoot: string, targetRel: string, workspaceRoot: stri
 function javaModuleRoot(sourceRoot: string, targetRel: string, workspaceRoot: string): string {
   let dir = dirname(resolve(sourceRoot, targetRel));
   const stop = moduleRootBound(sourceRoot, workspaceRoot);
-  for (;;) {
+  for (; ;) {
     if (existsSync(join(dir, "pom.xml")) || existsSync(join(dir, "build.gradle")) || existsSync(join(dir, "build.gradle.kts"))) {
       return dir;
     }
@@ -500,8 +500,8 @@ export interface GoDynamicProofJson {
   func?: string;
   baseline?: { exitCode?: number; timedOut?: boolean; failureSummary?: string | null };
   mutant?:
-    | { exitCode?: number; timedOut?: boolean; trustedAssertion?: boolean; failureSummary?: string | null }
-    | { skipped: true; reason?: string | null };
+  | { exitCode?: number; timedOut?: boolean; trustedAssertion?: boolean; failureSummary?: string | null }
+  | { skipped: true; reason?: string | null };
   medianProofMs?: number | null;
 }
 
@@ -538,13 +538,13 @@ function mapGoOracle(go: GoDynamicProofJson): DynamicProofOracleSummary {
     // false-close on an absent exit code. skipped/absent/false ⇒ false ⇒ non-close.
     mutant: runMutant
       ? {
-          exitCode: runMutant.exitCode,
-          timedOut: runMutant.timedOut,
-          assertionFailure:
-            runMutant.trustedAssertion === true &&
-            typeof runMutant.exitCode === "number" &&
-            runMutant.exitCode !== 0
-        }
+        exitCode: runMutant.exitCode,
+        timedOut: runMutant.timedOut,
+        assertionFailure:
+          runMutant.trustedAssertion === true &&
+          typeof runMutant.exitCode === "number" &&
+          runMutant.exitCode !== 0
+      }
       : { assertionFailure: false },
     medianProofMs: go.medianProofMs
   };
@@ -567,8 +567,8 @@ export interface JavaDynamicProofJson {
   method?: string;
   baseline?: { exitCode?: number; timedOut?: boolean; compileFailed?: boolean; targetTestPassed?: boolean; failureSummary?: string | null };
   mutant?:
-    | { exitCode?: number; timedOut?: boolean; compileFailed?: boolean; targetTestFailed?: boolean; isAssertion?: boolean; failureType?: string | null; failureSummary?: string | null }
-    | { skipped: true; reason?: string | null };
+  | { exitCode?: number; timedOut?: boolean; compileFailed?: boolean; targetTestFailed?: boolean; isAssertion?: boolean; failureType?: string | null; failureSummary?: string | null }
+  | { skipped: true; reason?: string | null };
   medianProofMs?: number | null;
 }
 
@@ -613,14 +613,14 @@ function mapJavaOracle(java: JavaDynamicProofJson): DynamicProofOracleSummary {
     // code. skipped/survived/compile-fail/non-assertion/absent ⇒ false ⇒ non-close.
     mutant: runMutant
       ? {
-          exitCode: runMutant.exitCode,
-          timedOut: runMutant.timedOut,
-          assertionFailure:
-            runMutant.targetTestFailed === true &&
-            runMutant.isAssertion === true &&
-            typeof runMutant.exitCode === "number" &&
-            runMutant.exitCode !== 0
-        }
+        exitCode: runMutant.exitCode,
+        timedOut: runMutant.timedOut,
+        assertionFailure:
+          runMutant.targetTestFailed === true &&
+          runMutant.isAssertion === true &&
+          typeof runMutant.exitCode === "number" &&
+          runMutant.exitCode !== 0
+      }
       : { assertionFailure: false },
     medianProofMs: java.medianProofMs
   };
@@ -1405,7 +1405,7 @@ function pythonModuleRoot(sourceRoot: string, targetRel: string, testRel: string
   const stop = resolve(sourceRoot);
   let dir = dirname(resolve(sourceRoot, targetRel));
   let found: string | null = null;
-  for (;;) {
+  for (; ;) {
     if (existsSync(join(dir, "pyproject.toml")) || existsSync(join(dir, "setup.py")) || existsSync(join(dir, "setup.cfg"))) {
       found = dir;
       break;
@@ -1653,14 +1653,14 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
       method: oracle.method,
       baseline: oracle.baseline
         ? {
-            exitCode: oracle.baseline.exitCode,
-            timedOut: oracle.baseline.timedOut,
-            // Surface the oracle's already-redacted, single-line baseline failure summary so
-            // autoProve can classify WHY a baseline was red (R-1). Transient return-only field:
-            // it is NOT written to the ledger cert (the record carries only the dynamic_proof
-            // certificate), so raw stderr never lands in the ledger or the report.
-            failureSummary: oracle.baseline.failureSummary ?? null
-          }
+          exitCode: oracle.baseline.exitCode,
+          timedOut: oracle.baseline.timedOut,
+          // Surface the oracle's already-redacted, single-line baseline failure summary so
+          // autoProve can classify WHY a baseline was red (R-1). Transient return-only field:
+          // it is NOT written to the ledger cert (the record carries only the dynamic_proof
+          // certificate), so raw stderr never lands in the ledger or the report.
+          failureSummary: oracle.baseline.failureSummary ?? null
+        }
         : undefined,
       mutant: oracle.mutant
         ? { exitCode: oracle.mutant.exitCode, timedOut: oracle.mutant.timedOut, assertionFailure: oracle.mutant.assertionFailure }
@@ -2336,7 +2336,7 @@ export async function opGenerate(
     // the only command that can surface them. Display-only refresh; a render
     // failure must never fail generate.
     try {
-      opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`);
+      opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, undefined, { persistBaseline: false });
     } catch {
       /* best-effort report refresh */
     }
@@ -2421,11 +2421,11 @@ export async function opCompare(
   const judged =
     provider.providerName !== "deterministic" && haveTests
       ? await judgeComparison(
-          provider,
-          buildJudgeContext(graph, grounded.generated_tests),
-          baseline.generated_tests.map((t) => t.body).join("\n\n"),
-          grounded.generated_tests.map((t) => t.body).join("\n\n")
-        )
+        provider,
+        buildJudgeContext(graph, grounded.generated_tests),
+        baseline.generated_tests.map((t) => t.body).join("\n\n"),
+        grounded.generated_tests.map((t) => t.body).join("\n\n")
+      )
       : null;
   let scores: { baseline: CompareDimensions; grounded: CompareDimensions };
   let scoring_method: "llm_judge" | "heuristic";
