@@ -247,6 +247,29 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .paywall-btn{display:inline-flex;align-items:center;gap:6px;background:var(--orange);color:#1a0a02;font-size:12px;font-weight:700;padding:7px 14px;border-radius:6px;text-decoration:none;transition:opacity .12s}
 .paywall-btn:hover{opacity:.85}
 
+
+/* === OPTION A: MODE TOGGLE === */
+.mode-toggle{appearance:none;background:var(--s2);border:1px solid var(--bd);color:var(--muted);font:600 11px var(--sans);padding:5px 10px;border-radius:5px;cursor:pointer;transition:color .12s,border-color .12s}
+.mode-toggle:hover{color:var(--ink);border-color:var(--bd2)}
+body[data-mode="simple"] .expert-only{display:none!important}
+body[data-mode="simple"] .kpis{grid-template-columns:repeat(3,1fr)}
+body[data-mode="simple"] .gen-test .gen-test-body{display:block}
+body[data-mode="simple"] .gen-test .gen-test-toggle{display:none}
+body[data-mode="simple"] .risk-card{border-left:3px solid var(--orange)}
+body[data-mode="simple"] .risk-ctx{color:var(--ink2);font-size:13px}
+body[data-mode="simple"] .todo{font-size:12.5px;font-weight:600;color:var(--ink);background:var(--obg);border-color:var(--obd)}
+body[data-mode="simple"] .risk-tags{display:none}
+body[data-mode="simple"] .cat-strip{display:none}
+body[data-mode="simple"] .risk-tools{display:none}
+body[data-mode="simple"] .metric-scope{display:none}
+.copy-btn{appearance:none;background:var(--s3);border:1px solid var(--bd2);color:var(--muted);font:600 10px var(--mono);padding:3px 8px;border-radius:4px;cursor:pointer;flex-shrink:0;margin-left:auto}
+.copy-btn:hover{color:var(--green);border-color:var(--gbd)}
+.copy-btn.copied{color:var(--green);border-color:var(--gbd)}
+body[data-mode="expert"] .simple-only{display:none!important}
+.simple-intro{background:linear-gradient(135deg,rgba(240,136,62,.06),rgba(240,136,62,.02));border:1px solid var(--obd);border-radius:9px;padding:14px 16px;margin-bottom:14px}
+.simple-intro h2{font-size:15px;font-weight:700;color:var(--ink);margin:0 0 4px}
+.simple-intro p{font-size:12.5px;color:var(--muted);margin:0;line-height:1.5}
+
 @media(max-width:800px){
   .kpis{grid-template-columns:repeat(3,1fr)}
   .cols2,.beh-layout{grid-template-columns:1fr}
@@ -265,6 +288,7 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
     <span class="hdr-name" id="repo-name">—</span>
   </div>
   <div class="hdr-right">
+    <button class="mode-toggle" id="mode-toggle" type="button">Expert view →</button>
     <span class="hdr-tag" id="framework">—</span>
     <span id="scan-date">—</span>
   </div>
@@ -274,7 +298,12 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 <section class="kpis" id="kpis"></section>
 <p class="metric-scope" id="metric-scope"></p>
 
-<nav class="tabs" role="tablist">
+<nav class="tabs simple-only" role="tablist">
+  <button class="tab" role="tab" aria-selected="true" data-tab="risks">Fix These <span class="tc" id="t-risk-s"></span></button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="codebase">Your Code</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="flows">Deep Dive</button>
+</nav>
+<nav class="tabs expert-only" role="tablist">
   <button class="tab" role="tab" aria-selected="true" data-tab="codebase">Your Code</button>
   <button class="tab" role="tab" aria-selected="false" data-tab="risks">Priority gaps <span class="tc" id="t-risk">—</span></button>
   <button class="tab" role="tab" aria-selected="false" data-tab="flows">Flows <span class="tc" id="t-flow">—</span></button>
@@ -335,7 +364,11 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 
 <!-- TAB 4: RISKS — actionable -->
 <section class="panel" id="panel-risks" role="tabpanel">
-  <p class="bridge">This is the <b>priority-gap worklist</b>, ranked by blast radius and test weakness. It is separate from the coverage-status cards above: <b>Reachable · no test signal</b> is one strict coverage bucket, not the number of priority gaps.</p>
+  <div class="simple-intro simple-only">
+    <h2>Your highest-risk blind spots</h2>
+    <p>These methods have the most structural exposure (high fan-in, recent churn, entry points) and no test proves they work. Each card includes a generated test you can copy into your repo.</p>
+  </div>
+  <p class="bridge expert-only">This is the <b>priority-gap worklist</b>, ranked by blast radius and test weakness. It is separate from the coverage-status cards above: <b>Reachable · no test signal</b> is one strict coverage bucket, not the number of priority gaps.</p>
   <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
   <div class="risk-tools" id="risk-tools"></div>
   <div id="risk-list"></div>
@@ -476,6 +509,25 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
 const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
 const S=D.summary;
+// === OPTION A: VIEW MODE ===
+const params=new URLSearchParams(location.search);
+let viewMode=params.get("mode")||localStorage.getItem("opro-view")||"simple";
+document.body.dataset.mode=viewMode;
+function activateTab(tabId){
+  document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected",String(t.dataset.tab===tabId)));
+  document.querySelectorAll(".panel").forEach(p=>p.classList.toggle("active",p.id==="panel-"+tabId));
+}
+function setMode(m){
+  viewMode=m;localStorage.setItem("opro-view",m);document.body.dataset.mode=m;
+  document.getElementById("mode-toggle").textContent=m==="simple"?"Expert view \\u2192":"\\u2190 Simple view";
+  renderKpisForMode();
+  activateTab(m==="simple"?"risks":"codebase");
+  if(typeof renderRisks==="function")renderRisks();
+}
+document.getElementById("mode-toggle").onclick=()=>setMode(viewMode==="simple"?"expert":"simple");
+document.getElementById("mode-toggle").textContent=viewMode==="simple"?"Expert view \\u2192":"\\u2190 Simple view";
+
+
 
 // header
 $("#repo-name").textContent=D.repo;
@@ -497,22 +549,41 @@ $("#br-tests").textContent=D.scan.tests.total;
 $("#t-beh").textContent=D.behaviors.length;
 $("#t-flow").textContent=D.flows.length;
 $("#t-risk").textContent=D.risks.length;
+if($("#t-risk-s"))$("#t-risk-s").textContent=D.risks.length;
 
-// KPIs
+// KPIs — mode-aware
 const priorityGapCount=D.risks.length;
-[
-  {lbl:"Methods found",num:S.total,sub:"public, with observable outcome",t:"total"},
-  {lbl:"Dynamically Proven",num:S.proven,sub:"test breaks if you change it",t:"proven"},
-  {lbl:"Test signal",num:S.associated,sub:"hard static test link, no proof",t:"signal"},
-  {lbl:"Candidate",num:S.candidate??0,sub:"lexical match only — unconfirmed",t:"cand"},
-  {lbl:"Reachable · no test signal",num:S.reachableUntested,sub:"coverage bucket — not the risk count",t:"reach"},
-  {lbl:"Unreached · no test signal",num:S.noSignal,sub:"no detected flow or test signal",t:"nosig"},
-  {lbl:"Priority gaps",num:priorityGapCount,sub:"top-ranked worklist across unproven tiers",t:"priority"},
-].forEach(k=>{
-  const d=el("div","kpi",\`<div class="kpi-lbl">\${k.lbl}</div><div class="kpi-num">\${k.num}</div><div class="kpi-sub">\${k.sub}</div>\`);
-  d.dataset.t=k.t;
-  $("#kpis").append(d);
-});
+function renderExpertKpis(){
+  [
+    {lbl:"Methods found",num:S.total,sub:"public, with observable outcome",t:"total"},
+    {lbl:"Dynamically Proven",num:S.proven,sub:"test breaks if you change it",t:"proven"},
+    {lbl:"Test signal",num:S.associated,sub:"hard static test link, no proof",t:"signal"},
+    {lbl:"Candidate",num:S.candidate??0,sub:"lexical match only — unconfirmed",t:"cand"},
+    {lbl:"Reachable · no test signal",num:S.reachableUntested,sub:"coverage bucket — not the risk count",t:"reach"},
+    {lbl:"Unreached · no test signal",num:S.noSignal,sub:"no detected flow or test signal",t:"nosig"},
+    {lbl:"Priority gaps",num:priorityGapCount,sub:"top-ranked worklist across unproven tiers",t:"priority"},
+  ].forEach(k=>{
+    const d=el("div","kpi",\`<div class="kpi-lbl">\${k.lbl}</div><div class="kpi-num">\${k.num}</div><div class="kpi-sub">\${k.sub}</div>\`);
+    d.dataset.t=k.t;
+    $("#kpis").append(d);
+  });
+}
+function renderSimpleKpis(){
+  const pct=S.total>0?Math.round(((S.proven+S.associated)/S.total)*100):0;
+  [{lbl:"Blind spots found",num:priorityGapCount,sub:"highest-risk untested methods",t:"priority"},
+   {lbl:"Methods mapped",num:S.total.toLocaleString(),sub:"public methods in your codebase",t:"total"},
+   {lbl:"Have test evidence",num:pct+"%",sub:(S.proven+S.associated)+" of "+S.total+" verified or linked",t:"proven"}
+  ].forEach(k=>{
+    const d=el("div","kpi",\`<div class="kpi-lbl">\${k.lbl}</div><div class="kpi-num">\${k.num}</div><div class="kpi-sub">\${k.sub}</div>\`);
+    d.dataset.t=k.t;
+    $("#kpis").append(d);
+  });
+}
+function renderKpisForMode(){
+  $("#kpis").innerHTML="";
+  if(viewMode==="simple") renderSimpleKpis(); else renderExpertKpis();
+}
+renderKpisForMode();
 const outsideProofs=S.provenOutsideDenominator??0;
 const coverageAccounted=(S.proven-outsideProofs)+S.associated+(S.candidate??0)+S.reachableUntested+S.noSignal;
 $("#metric-scope").textContent="Coverage status classifies "+coverageAccounted.toLocaleString()+" of "+S.total.toLocaleString()+" mapped behaviors. Priority gaps is a separate ranked worklist of "+priorityGapCount.toLocaleString()+" unproven behaviors; it does not equal the Reachable count."+(outsideProofs?" "+outsideProofs.toLocaleString()+" additional dynamically proven behavior"+(outsideProofs===1?" is":"s are")+" shown outside the static denominator.":"");
@@ -742,7 +813,7 @@ function riskCardHtml(r){
       const cBadge=t.concern?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(t.concern.replace('_',' '))}</span>\`:'';
       const iBadge=t.runnable===false?\`<span class="badge b-cand" style="margin-left:6px;font-size:9px">Manual test</span>\`:'';
       const bBadge=t.bucket?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(String(t.bucket).replace(/_/g,' '))}</span>\`:'';
-      testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}\${bBadge}\${iBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
+      testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}\${bBadge}\${iBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><button class="copy-btn" onclick="event.stopPropagation();navigator.clipboard.writeText(this.closest('.gen-test').querySelector('.gen-test-body').textContent).then(()=>{this.textContent='Copied!';this.classList.add('copied');setTimeout(()=>{this.textContent='Copy';this.classList.remove('copied')},1500)})">Copy</button><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
     });
     testsHtml+=\`</div>\`;
   }
@@ -788,10 +859,9 @@ document.addEventListener('click',e=>{
 
 // tabs
 const tabs=[...document.querySelectorAll(".tab")];
-tabs.forEach(t=>t.onclick=()=>{
-  tabs.forEach(x=>x.setAttribute("aria-selected",String(x===t)));
-  document.querySelectorAll(".panel").forEach(p=>p.classList.toggle("active",p.id==="panel-"+t.dataset.tab));
-});
+tabs.forEach(t=>t.onclick=()=>activateTab(t.dataset.tab));
+// Set initial tab based on mode
+activateTab(viewMode==="simple"?"risks":"codebase");
 })();
 </script>
 </body>
