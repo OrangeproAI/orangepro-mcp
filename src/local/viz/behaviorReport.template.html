@@ -190,6 +190,8 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .delta-chip.dc-up{border-color:var(--green);color:var(--green)}
 .delta-chip.dc-risk{border-color:var(--red);color:var(--red)}
 .delta-chip.dc-none{color:var(--muted)}
+.delta-chip.dc-click{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;transition:opacity .15s}
+.delta-chip.dc-click:hover{opacity:.7}
 .delta-hero{margin:14px 0 0;border-radius:9px;padding:14px 18px;font-size:13px;line-height:1.5}
 .delta-hero.dh-alert{background:var(--rbg);border:1px solid var(--rbd);color:var(--ink)}
 .delta-hero.dh-clear{background:var(--gbg);border:1px solid var(--gbd);color:var(--ink2)}
@@ -202,6 +204,12 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .delta-hero .dh-dropped{color:var(--green)}
 .delta-hero .dh-dropped::before{content:"\2713 ";}
 .delta-hero .dh-stat{display:inline-flex;gap:12px;margin-top:8px;font-size:12px;font-weight:600;color:var(--muted)}
+.delta-hero .dh-link{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;transition:color .15s}
+.delta-hero .dh-link:hover{color:var(--orange)}
+.delta-hero .dh-stat .dh-stat-link{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;transition:color .15s}
+.delta-hero .dh-stat .dh-stat-link:hover{color:var(--orange)}
+.risk-card.highlight-pulse{animation:riskPulse .6s ease 2}
+@keyframes riskPulse{0%,100%{box-shadow:none}50%{box-shadow:0 0 0 3px var(--orange)}}
 .beh-empty{grid-column:1/-1;padding:22px;border:1px dashed var(--bd2);border-radius:10px;color:var(--muted);font-size:12.5px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
 .beh-empty p{margin:0}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
@@ -418,18 +426,37 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
     return;
   }
   var chips=[];
-  function chip(txt,cls){chips.push('<span class="delta-chip '+(cls||'')+'">'+txt+'</span>');}
+  function chip(txt,cls,dataAttr){chips.push('<span class="delta-chip '+(cls||'')+(dataAttr?' dc-click':'')+'"'+(dataAttr?' '+dataAttr:'')+'>'+txt+'</span>');}
   chip('Since '+ago+':','dc-none');
   if(d.totalDelta)chip((d.totalDelta>0?'+':'')+d.totalDelta+' behaviors');
-  if(d.provenDelta)chip((d.provenDelta>0?'+':'')+d.provenDelta+' proven',d.provenDelta>0?'dc-up':'dc-risk');
-  if(d.associatedDelta)chip((d.associatedDelta>0?'+':'')+d.associatedDelta+' test signal');
+  if(d.provenDelta)chip((d.provenDelta>0?'+':'')+d.provenDelta+' proven',d.provenDelta>0?'dc-up':'dc-risk','data-action="proven"');
+  if(d.associatedDelta)chip((d.associatedDelta>0?'+':'')+d.associatedDelta+' test signal','','data-action="signal"');
   if(d.generatedDelta)chip((d.generatedDelta>0?'+':'')+d.generatedDelta+' generated tests',d.generatedDelta>0?'dc-up':'');
-  d.newRisks.slice(0,3).forEach(function(p){chip('new in top-20: '+p.slice(0,40),'dc-risk');});
+  d.newRisks.slice(0,3).forEach(function(p){chip('new in top-20: '+p.slice(0,40),'dc-risk','data-path="'+p.replace(/"/g,'&quot;')+'"');});
   if(d.newRisks.length>3)chip('+'+(d.newRisks.length-3)+' more new risks','dc-risk');
   d.droppedRisks.slice(0,2).forEach(function(p){chip('left top-20: '+p.slice(0,40),'dc-up');});
   el2.innerHTML='<div class="delta-wrap">'+chips.join('')+'</div>';
+  el2.addEventListener('click',function(e){
+    var c=e.target.closest('[data-path]');
+    if(c){scrollToRisk(c.getAttribute('data-path'));return;}
+    var a=e.target.closest('[data-action]');
+    if(a){
+      var act=a.getAttribute('data-action');
+      var t=D.risks.find(function(r){return r.tags&&r.tags.some(function(tg){return act==='proven'?(tg[0]==='Proven'||tg[0]==='Dynamically Proven'):(tg[0]==='Has tests'||tg[0]==='Test signal');});});
+      if(t)scrollToRisk(t.path);
+    }
+  });
 })();
-// ── Delta Hero: prominent simple-mode section ──
+// ── Delta Hero: prominent simple-mode section (clickable) ──
+function scrollToRisk(path){
+  var id='risk-'+path.replace(/[^a-zA-Z0-9]/g,'-');
+  var tab=document.querySelector('[data-tab="risks"]');
+  if(tab)tab.click();
+  setTimeout(function(){
+    var el=document.getElementById(id);
+    if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('highlight-pulse');setTimeout(function(){el.classList.remove('highlight-pulse')},2400);}
+  },150);
+}
 (function(){
   var hero=document.getElementById("delta-hero");
   var d=D.delta;
@@ -447,7 +474,7 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
     headline=d.newRisks.length+' new blind spot'+(d.newRisks.length>1?'s':'')+' since last scan';
     hero.className="delta-hero simple-only dh-alert";
     parts.push('<ul class="dh-list">');
-    d.newRisks.forEach(function(r){parts.push('<li class="dh-new">'+r.slice(0,60)+'</li>');});
+    d.newRisks.forEach(function(r){parts.push('<li class="dh-new dh-link" data-path="'+r.replace(/"/g,'&quot;')+'">' +r.slice(0,60)+'</li>');});
     parts.push('</ul>');
   } else {
     headline="Your codebase changed since last scan";
@@ -455,15 +482,21 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
   }
   if(d.droppedRisks.length>0){
     parts.push('<ul class="dh-list">');
-    d.droppedRisks.forEach(function(r){parts.push('<li class="dh-dropped">Resolved: '+r.slice(0,60)+'</li>');});
+    d.droppedRisks.forEach(function(r){parts.push('<li class="dh-dropped">\u2713 Resolved: '+r.slice(0,60)+'</li>');});
     parts.push('</ul>');
   }
   var stats=[];
   if(d.totalDelta)stats.push((d.totalDelta>0?'+':'')+d.totalDelta+' behaviors');
-  if(d.provenDelta)stats.push((d.provenDelta>0?'+':'')+d.provenDelta+' proven');
+  if(d.provenDelta)stats.push('<span class="dh-stat-link" data-action="proven">'+((d.provenDelta>0?'+':'')+d.provenDelta+' proven')+'</span>');
   if(d.generatedDelta)stats.push((d.generatedDelta>0?'+':'')+d.generatedDelta+' tests generated');
   if(stats.length)parts.push('<div class="dh-stat">'+stats.join(' \u00B7 ')+'</div>');
   hero.innerHTML='<h3>'+headline+'</h3>'+parts.join('');
+  hero.addEventListener('click',function(e){
+    var li=e.target.closest('[data-path]');
+    if(li){scrollToRisk(li.getAttribute('data-path'));return;}
+    var stat=e.target.closest('[data-action="proven"]');
+    if(stat){var pr=D.risks.find(function(r){return r.tags&&r.tags.some(function(t){return t[0]==='Proven'||t[0]==='Dynamically Proven'});});if(pr)scrollToRisk(pr.path);}
+  });
 })();
 // ── System map: deterministic hero drawn from D.mapModel ──
 (function(){
@@ -876,7 +909,7 @@ function riskCardHtml(r){
 }
 function renderRisks(){
   riskList.innerHTML="";
-  D.risks.filter(riskMatchesFilter).forEach(r=>riskList.append(el("div","risk-card",riskCardHtml(r))));
+  D.risks.filter(riskMatchesFilter).forEach(r=>{const card=el("div","risk-card",riskCardHtml(r));card.setAttribute("data-path",r.path);card.id="risk-"+r.path.replace(/[^a-zA-Z0-9]/g,"-");riskList.append(card);});
   if(activeRiskFilter==="all"&&D.generatedTotal){
     const hiddenGeneratedFlows=Math.max(0,generatedRiskCount-D.risks.filter(riskMatchesFilter).length);
     const remainingRiskFlows=Math.max(0,D.risks.length-generatedRiskCount);
