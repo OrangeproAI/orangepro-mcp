@@ -194,6 +194,18 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .delta-chip.dc-up{border-color:var(--green);color:var(--green)}
 .delta-chip.dc-risk{border-color:var(--red);color:var(--red)}
 .delta-chip.dc-none{color:var(--muted)}
+.delta-hero{margin:14px 0 0;border-radius:9px;padding:14px 18px;font-size:13px;line-height:1.5}
+.delta-hero.dh-alert{background:var(--rbg);border:1px solid var(--rbd);color:var(--ink)}
+.delta-hero.dh-clear{background:var(--gbg);border:1px solid var(--gbd);color:var(--ink2)}
+.delta-hero.dh-info{background:var(--s1);border:1px solid var(--bd);color:var(--ink2)}
+.delta-hero h3{font-size:15px;font-weight:700;margin:0 0 6px}
+.delta-hero .dh-list{margin:6px 0 0;padding-left:16px;font-family:var(--mono);font-size:12px;list-style:none}
+.delta-hero .dh-list li{padding:2px 0}
+.delta-hero .dh-new{color:var(--red)}
+.delta-hero .dh-new::before{content:"\\25B2 ";font-size:9px}
+.delta-hero .dh-dropped{color:var(--green)}
+.delta-hero .dh-dropped::before{content:"\\2713 ";}
+.delta-hero .dh-stat{display:inline-flex;gap:12px;margin-top:8px;font-size:12px;font-weight:600;color:var(--muted)}
 .beh-empty{grid-column:1/-1;padding:22px;border:1px dashed var(--bd2);border-radius:10px;color:var(--muted);font-size:12.5px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
 .beh-empty p{margin:0}
 .risk-ep{font-family:var(--mono);font-size:13px;margin:0 0 6px}
@@ -302,6 +314,8 @@ body[data-mode="expert"] .simple-only{display:none!important}
 
 <section class="kpis" id="kpis"></section>
 <p class="metric-scope" id="metric-scope"></p>
+
+<div class="delta-hero simple-only" id="delta-hero"></div>
 
 <nav class="tabs simple-only" role="tablist">
   <button class="tab" role="tab" aria-selected="true" data-tab="risks">Fix These <span class="tc" id="t-risk-s"></span></button>
@@ -418,6 +432,42 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
   if(d.newRisks.length>3)chip('+'+(d.newRisks.length-3)+' more new risks','dc-risk');
   d.droppedRisks.slice(0,2).forEach(function(p){chip('left top-20: '+p.slice(0,40),'dc-up');});
   el2.innerHTML='<div class="delta-wrap">'+chips.join('')+'</div>';
+})();
+// ── Delta Hero: prominent simple-mode section ──
+(function(){
+  var hero=document.getElementById("delta-hero");
+  var d=D.delta;
+  if(!hero||d===undefined||d===null)return;
+  if(!d.changed){
+    var when=new Date(d.baselineTs);
+    var ago=isNaN(when.getTime())?"last run":when.toLocaleDateString();
+    hero.className="delta-hero simple-only dh-clear";
+    hero.innerHTML='<h3>\\u2713 No new blind spots since '+ago+'</h3><p>Your risk profile is unchanged.</p>';
+    return;
+  }
+  var parts=[];
+  var headline="";
+  if(d.newRisks.length>0){
+    headline=d.newRisks.length+' new blind spot'+(d.newRisks.length>1?'s':'')+' since last scan';
+    hero.className="delta-hero simple-only dh-alert";
+    parts.push('<ul class="dh-list">');
+    d.newRisks.forEach(function(r){parts.push('<li class="dh-new">'+r.slice(0,60)+'</li>');});
+    parts.push('</ul>');
+  } else {
+    headline="Your codebase changed since last scan";
+    hero.className="delta-hero simple-only dh-info";
+  }
+  if(d.droppedRisks.length>0){
+    parts.push('<ul class="dh-list">');
+    d.droppedRisks.forEach(function(r){parts.push('<li class="dh-dropped">Resolved: '+r.slice(0,60)+'</li>');});
+    parts.push('</ul>');
+  }
+  var stats=[];
+  if(d.totalDelta)stats.push((d.totalDelta>0?'+':'')+d.totalDelta+' behaviors');
+  if(d.provenDelta)stats.push((d.provenDelta>0?'+':'')+d.provenDelta+' proven');
+  if(d.generatedDelta)stats.push((d.generatedDelta>0?'+':'')+d.generatedDelta+' tests generated');
+  if(stats.length)parts.push('<div class="dh-stat">'+stats.join(' \\u00B7 ')+'</div>');
+  hero.innerHTML='<h3>'+headline+'</h3>'+parts.join('');
 })();
 // ── System map: deterministic hero drawn from D.mapModel ──
 (function(){
