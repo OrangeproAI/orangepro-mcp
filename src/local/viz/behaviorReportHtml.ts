@@ -446,6 +446,11 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
     var a=e.target.closest('[data-action]');
     if(a){
       var act=a.getAttribute('data-action');
+      if(act==='signal'){
+        var btab=document.querySelector('[data-tab="behaviors"]');
+        if(btab)btab.click();
+        return;
+      }
       var t=D.risks.find(function(r){return r.tags&&r.tags.some(function(tg){return act==='proven'?(tg[0]==='Proven'||tg[0]==='Dynamically Proven'):(tg[0]==='Has tests'||tg[0]==='Test signal');});});
       if(t)scrollToRisk(t.path);
     }
@@ -453,9 +458,12 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
 })();
 // ── Delta Hero: prominent simple-mode section (clickable) ──
 function scrollToRisk(path){
+  if(!path)return;
   var id='risk-'+path.replace(/[^a-zA-Z0-9]/g,'-');
   var tab=document.querySelector('[data-tab="risks"]');
   if(tab)tab.click();
+  // Reset filter to "all" so the target card is visible
+  if(typeof activeRiskFilter!=='undefined'){activeRiskFilter='all';renderRiskFilters();renderRisks();}
   setTimeout(function(){
     var el=document.getElementById(id);
     if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('highlight-pulse');setTimeout(function(){el.classList.remove('highlight-pulse')},2400);}
