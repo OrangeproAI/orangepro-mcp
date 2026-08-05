@@ -371,7 +371,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
 <section class="panel" id="panel-risks" role="tabpanel">
   <div class="simple-intro simple-only">
     <h2>Your highest-risk blind spots</h2>
-    <p>These methods have the most structural exposure (high fan-in, recent churn, entry points) and no test proves they work. Each card includes a generated test you can copy into your repo.</p>
+    <p>These are your highest-risk integration points — where multiple flows converge, where recent changes landed, and where no test proves they hold. Each card includes a generated test you can copy into your repo.</p>
   </div>
   <p class="bridge expert-only">This is the <b>priority-gap worklist</b>, ranked by blast radius and test weakness. It is separate from the coverage-status cards above: <b>Reachable · no test signal</b> is one strict coverage bucket, not the number of priority gaps.</p>
   <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
