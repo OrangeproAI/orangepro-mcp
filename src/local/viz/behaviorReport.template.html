@@ -244,9 +244,11 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .paywall-btn:hover{opacity:.85}
 
 
-/* === OPTION A: MODE TOGGLE === */
-.mode-toggle{appearance:none;background:var(--s2);border:1px solid var(--bd);color:var(--muted);font:600 11px var(--sans);padding:5px 10px;border-radius:5px;cursor:pointer;transition:color .12s,border-color .12s}
-.mode-toggle:hover{color:var(--ink);border-color:var(--bd2)}
+/* === OPTION A: MODE TOGGLE (SEGMENTED PILL) === */
+.mode-switch{display:inline-flex;align-items:center;background:var(--s2);border-radius:7px;padding:3px;gap:2px;border:1px solid var(--bd)}
+.mode-btn{padding:5px 14px;font:650 11px var(--sans);border-radius:5px;cursor:pointer;border:none;background:transparent;color:var(--muted);transition:all .15s;letter-spacing:.01em}
+.mode-btn:hover{color:var(--ink)}
+.mode-btn.active{background:var(--orange);color:#1a0a02;box-shadow:0 1px 3px rgba(240,136,62,.25)}
 body[data-mode="simple"] .expert-only{display:none!important}
 body[data-mode="simple"] .kpis{grid-template-columns:repeat(3,1fr)}
 body[data-mode="simple"] .gen-test .gen-test-body{display:block}
@@ -284,7 +286,10 @@ body[data-mode="expert"] .simple-only{display:none!important}
     <span class="hdr-name" id="repo-name">—</span>
   </div>
   <div class="hdr-right">
-    <button class="mode-toggle" id="mode-toggle" type="button">Expert view →</button>
+    <div class="mode-switch" id="mode-switch">
+      <button class="mode-btn active" data-mode="simple">Simple</button>
+      <button class="mode-btn" data-mode="expert">Expert</button>
+    </div>
     <span class="hdr-tag" id="framework">—</span>
     <span id="scan-date">—</span>
   </div>
@@ -515,13 +520,13 @@ function activateTab(tabId){
 }
 function setMode(m){
   viewMode=m;localStorage.setItem("opro-view",m);document.body.dataset.mode=m;
-  document.getElementById("mode-toggle").textContent=m==="simple"?"Expert view \u2192":"\u2190 Simple view";
+  document.querySelectorAll(".mode-btn").forEach(b=>{b.classList.toggle("active",b.dataset.mode===m)});
   renderKpisForMode();
   activateTab(m==="simple"?"risks":"codebase");
   if(typeof renderRisks==="function")renderRisks();
 }
-document.getElementById("mode-toggle").onclick=()=>setMode(viewMode==="simple"?"expert":"simple");
-document.getElementById("mode-toggle").textContent=viewMode==="simple"?"Expert view \u2192":"\u2190 Simple view";
+document.querySelectorAll(".mode-btn").forEach(b=>{b.onclick=()=>setMode(b.dataset.mode)});
+document.querySelectorAll(".mode-btn").forEach(b=>{b.classList.toggle("active",b.dataset.mode===viewMode)});
 
 
 
