@@ -264,6 +264,18 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .paywall-btn:hover{opacity:.85}
 
 
+/* PLATFORM CTA: STICKY FOOTER */
+.platform-footer{position:fixed;bottom:0;left:0;right:0;background:linear-gradient(135deg,#1a0a02 0%,#2a1508 100%);border-top:1px solid var(--obd);padding:8px 20px;display:flex;align-items:center;justify-content:center;gap:12px;z-index:999;font-size:12px}
+.platform-footer-text{color:var(--muted);font-size:12px}
+.platform-footer-text b{color:var(--orange);font-weight:700}
+.platform-footer-btn{display:inline-flex;align-items:center;gap:5px;background:var(--orange);color:#1a0a02;font-size:11px;font-weight:700;padding:5px 12px;border-radius:5px;text-decoration:none;transition:opacity .12s;white-space:nowrap}
+.platform-footer-btn:hover{opacity:.85}
+/* PLATFORM CTA: TOP BANNER (inside risk panel) */
+.platform-top-banner{background:linear-gradient(135deg,rgba(240,136,62,.06),rgba(240,136,62,.02));border:1px solid var(--obd);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.platform-top-banner-text{font-size:12px;color:var(--muted)}
+.platform-top-banner-text b{color:var(--ink)}
+/* Add bottom padding to body so sticky footer doesn't overlap content */
+body{padding-bottom:48px}
 /* === OPTION A: MODE TOGGLE (SEGMENTED PILL) === */
 .mode-switch{display:inline-flex;align-items:center;background:var(--s2);border-radius:7px;padding:3px;gap:2px;border:1px solid var(--bd)}
 .mode-btn{padding:5px 14px;font:650 11px var(--sans);border-radius:5px;cursor:pointer;border:none;background:transparent;color:var(--muted);transition:all .15s;letter-spacing:.01em}
@@ -852,6 +864,12 @@ if(cf&&cf.flows.length){
   });
 }
 
+// Platform CTA: after flows
+const flowCta=el("div","paywall",
+  `<div class="paywall-num">\${D.flows.length} flows mapped locally</div>
+   <div class="paywall-txt">Track flow regressions across commits, correlate with production incidents, and set merge gates on OrangePro Platform.</div>
+   <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>`);
+fl.after(flowCta);
 // risks + generated test samples
 const riskList=$("#risk-list"),riskTools=$("#risk-tools");
 if(D.viewMeta){
@@ -859,6 +877,11 @@ if(D.viewMeta){
   if(rm&&rm.scored>rm.shown)$("#risk-cap-note").textContent="Showing the top "+rm.shown+" of "+rm.scored.toLocaleString()+" scored behaviors — every behavior is scored; only the highest-risk are surfaced here. Full ranking: opro gaps --limit N, or .orangepro/graph.json.";
   if(fm&&fm.shown>0&&fm.prunedByCaps>0)$("#flow-cap-note").textContent="Showing "+fm.shown.toLocaleString()+" flows, endpoint-anchored first. "+fm.prunedByCaps.toLocaleString()+" additional branch expansions were pruned by depth/branch/global rendering caps — pruning affects display only, not scoring.";
 }
+// Platform CTA: top banner in risk panel
+const riskTopBanner=el("div","platform-top-banner",
+  `<span class="platform-top-banner-text">Local scan shows <b>\${D.risks.length}</b> priority gaps. Full ranked list, incident correlation, and CI merge gate on Platform.</span>
+   <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>`);
+riskList.before(riskTopBanner);
 const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
 let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){
@@ -918,18 +941,18 @@ function riskCardHtml(r){
 function renderRisks(){
   riskList.innerHTML="";
   D.risks.filter(riskMatchesFilter).forEach(r=>{const card=el("div","risk-card",riskCardHtml(r));card.setAttribute("data-path",r.path);card.id="risk-"+r.path.replace(/[^a-zA-Z0-9]/g,"-");riskList.append(card);});
-  if(activeRiskFilter==="all"&&D.generatedTotal){
+  if(D.generatedTotal){
     const hiddenGeneratedFlows=Math.max(0,generatedRiskCount-D.risks.filter(riskMatchesFilter).length);
     const remainingRiskFlows=Math.max(0,D.risks.length-generatedRiskCount);
     riskList.append(el("div","paywall",
       hiddenGeneratedFlows
         ? `<div class="paywall-num">${hiddenGeneratedFlows} more flows with tests</div>
            <div class="paywall-txt">OrangePro accepted ${D.generatedTotal} runnable generated test${D.generatedTotal===1?"":"s"} across ${generatedRiskCount} high-risk flow${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>
-           <a class="paywall-btn" href="https://platform.orangepro.ai/" target="_blank">View all on OrangePro Platform &rarr;</a>`
+           <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">View all on OrangePro Platform &rarr;</a>`
         : remainingRiskFlows
           ? `<div class="paywall-num">${remainingRiskFlows} high-risk flows left</div>
              <div class="paywall-txt">The local MCP accepted ${D.generatedTotal} runnable generated test${D.generatedTotal===1?"":"s"} across ${generatedRiskCount} high-risk flow${generatedRiskCount===1?"":"s"}. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
-             <a class="paywall-btn" href="https://platform.orangepro.ai/" target="_blank">Generate remaining tests on Platform &rarr;</a>`
+             <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">Generate remaining tests on Platform &rarr;</a>`
           : `<div class="paywall-num">All generated tests are shown</div>
              <div class="paywall-txt">OrangePro generated tests for every high-risk flow in this report, and every generated test is visible here.</div>`));
   }
@@ -954,7 +977,18 @@ const tabs=[...document.querySelectorAll(".tab")];
 tabs.forEach(t=>t.onclick=()=>activateTab(t.dataset.tab));
 // Set initial tab based on mode
 activateTab(viewMode==="simple"?"risks":"codebase");
+// Update platform footer with real numbers
+const pf=document.getElementById("platform-cta-footer");
+if(pf&&D.viewMeta&&D.viewMeta.risks){
+  const rm=D.viewMeta.risks;
+  pf.querySelector(".platform-footer-text").innerHTML=
+    `Showing top <b>\${rm.shown}</b> of <b>\${rm.scored.toLocaleString()}</b> scored behaviors. Full risk ranking + incident correlation + CI gate on Platform.`;
+}
 })();
 </script>
+<div class="platform-footer" id="platform-cta-footer">
+  <span class="platform-footer-text">Showing top <b>20</b> blind spots. Full risk ranking + incident correlation + CI gate on Platform.</span>
+  <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>
+</div>
 </body>
 </html>
