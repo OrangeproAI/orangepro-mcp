@@ -4,7 +4,8 @@ compatibility_date = "2025-08-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-ORANGEPRO_API_BASE_URL = "https://api.orangepro.ai/api/v1"
+ORANGEPRO_API_BASE_URL = "https://opro-api-prod-candidate.onrender.com"
+
 
 # Secrets (set via: wrangler secret put ORANGEPRO_API_KEY)
 # ORANGEPRO_API_KEY    — optional default key (users can override per-request)
