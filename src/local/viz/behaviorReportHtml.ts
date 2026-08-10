@@ -870,7 +870,7 @@ if(cf&&cf.flows.length){
 
 // Platform CTA: after flows
 const flowCta=el("div","paywall",
-  \`<div class="paywall-num">\\\${D.flows.length} flows mapped locally</div>
+  \`<div class="paywall-num">\${D.flows.length} flows mapped locally</div>
    <div class="paywall-txt">Track flow regressions across commits, correlate with production incidents, and set merge gates on OrangePro Platform.</div>
    <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
 fl.after(flowCta);
@@ -883,7 +883,7 @@ if(D.viewMeta){
 }
 // Platform CTA: top banner in risk panel
 const riskTopBanner=el("div","platform-top-banner",
-  \`<span class="platform-top-banner-text">Local scan shows <b>\\\${D.risks.length}</b> priority gaps. Full ranked list, incident correlation, and CI merge gate on Platform.</span>
+  \`<span class="platform-top-banner-text">Local scan shows <b>\${D.risks.length}</b> priority gaps. Full ranked list, incident correlation, and CI merge gate on Platform.</span>
    <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
 riskList.before(riskTopBanner);
 const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
@@ -986,7 +986,7 @@ const pf=document.getElementById("platform-cta-footer");
 if(pf&&D.viewMeta&&D.viewMeta.risks){
   const rm=D.viewMeta.risks;
   pf.querySelector(".platform-footer-text").innerHTML=
-    \`Showing top <b>\\\${rm.shown}</b> of <b>\\\${rm.scored.toLocaleString()}</b> scored behaviors. Full risk ranking + incident correlation + CI gate on Platform.\`;
+    \`Showing top <b>\${rm.shown}</b> of <b>\${rm.scored.toLocaleString()}</b> scored behaviors. Full risk ranking + incident correlation + CI gate on Platform.\`;
 }
 })();
 </script>
