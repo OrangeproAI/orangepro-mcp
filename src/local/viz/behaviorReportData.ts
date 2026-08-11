@@ -1035,11 +1035,17 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
 }
 
 function frameworkLabel(graph: LocalGraph): string {
-  const frameworks = graph.nodes
+  const allFrameworks = graph.nodes
     .filter((n) => n.kind === "Framework")
     .map((n) => n.title || n.external_id.replace(/^framework:/, ""))
     .sort();
-  return frameworks.length ? frameworks.slice(0, 4).join(", ") : "Unknown framework";
+  if (allFrameworks.length) return allFrameworks.slice(0, 4).join(", ");
+  // Fallback: check for runtime framework nodes
+  const runtimeNodes = graph.nodes
+    .filter((n) => n.kind === "Package" && /react.native|expo|next|angular|vue|express/i.test(n.title || n.external_id))
+    .map((n) => n.title || n.external_id)
+    .sort();
+  return runtimeNodes.length ? runtimeNodes.slice(0, 3).join(", ") : "Unknown framework";
 }
 
 export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts: BehaviorReportDataOptions = {}): BehaviorReportData {
