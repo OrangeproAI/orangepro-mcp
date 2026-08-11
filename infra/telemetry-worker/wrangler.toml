@@ -1,0 +1,13 @@
+name = "orangepro-telemetry"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# Route: telemetry.orangepro.ai
+routes = [
+  { pattern = "telemetry.orangepro.ai", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "orangepro-telemetry"
+database_id = "f8307cdb-009b-4447-805c-ad291cff94f3"  
