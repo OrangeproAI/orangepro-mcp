@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pingTelemetry } from "./telemetry.js";
 import {
   AnalysisMeta,
   CandidateFlowMeta,
@@ -2003,6 +2004,18 @@ export async function opStart(
     deps
   );
   const warnings = [...analyze.warnings];
+  let dominantLang = "unknown";
+  try {
+    const g = loadGraph(root);
+    const lc: Record<string, number> = {};
+    for (const n of g.nodes) {
+      const lang = n.kind === "File" && typeof n.properties.language === "string" ? n.properties.language : null;
+      if (lang) lc[lang] = (lc[lang] ?? 0) + 1;
+    }
+    const top = Object.entries(lc).sort((a, b) => b[1] - a[1]);
+    if (top.length > 0) dominantLang = top[0][0];
+  } catch { /* telemetry is best-effort */ }
+  pingTelemetry({ fileCount: scope.files, language: dominantLang });
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
   const staticSnapshot = writeStartStaticSnapshot(root, opts.baseRef, warnings);
 
