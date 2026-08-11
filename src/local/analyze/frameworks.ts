@@ -30,8 +30,26 @@ const TEST_FRAMEWORK_DEPS: Record<string, { layer: TestLayer }> = {
   pytest: { layer: "unit" },
   unittest: { layer: "unit" },
   rspec: { layer: "unit" },
-  junit: { layer: "unit" }
+  junit: { layer: "unit" },
+  detox: { layer: "e2e" },
+  "@testing-library/react-native": { layer: "component" }
 };
+
+const RUNTIME_HINTS: Record<string, string> = {
+  "react-native": "React Native",
+  "expo": "Expo",
+  "next": "Next.js",
+  "nuxt": "Nuxt",
+  "express": "Express",
+  "fastify": "Fastify",
+  "@angular/core": "Angular",
+  "vue": "Vue",
+  "svelte": "Svelte",
+  "django": "Django",
+  "flask": "Flask",
+  "spring-boot": "Spring Boot",
+};
+
 
 const CONFIG_FRAMEWORK_HINTS: Array<{ match: RegExp; name: string; layer: TestLayer }> = [
   { match: /^vitest\.config\.[tj]s$/, name: "vitest", layer: "unit" },
@@ -77,6 +95,13 @@ export function detectFromPackageJson(
     const hit = TEST_FRAMEWORK_DEPS[dep];
     if (hit) {
       frameworks.push({ name: dep.replace(/^@playwright\/test$/, "playwright"), category: "test", test_layer: hit.layer, evidence_ref: relPath });
+    }
+  }
+  // Runtime framework detection (for display when no test framework found)
+  for (const dep of depNames) {
+    const hint = RUNTIME_HINTS[dep];
+    if (hint) {
+      frameworks.push({ name: hint, category: "runtime", evidence_ref: relPath });
     }
   }
   return { pkg, frameworks };
