@@ -1,17 +1,23 @@
 /**
- * Anonymous usage telemetry for OrangePro MCP.
+ * Anonymous usage telemetry for OrangePro MCP (v2).
  *
- * Sends one lightweight ping per run with: version, detected language,
- * file count bucket, OS, and node version. No code, no file names,
- * no repo name, no identity, no IP stored.
+ * Sends one lightweight ping per scan with: version, detected language,
+ * file count bucket, behavior count bucket, whether BYOK is configured,
+ * whether the report was generated, scan duration, OS, and node version.
+ *
+ * No code, no file names, no repo name, no identity, no IP stored.
  *
  * Disable: set DO_NOT_TRACK=1 or ORANGEPRO_NO_TELEMETRY=1
  */
 
 import https from "https";
 import { readFileSync } from "fs";
-import { resolve } from "path";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const ENDPOINT_HOST = "telemetry.orangepro.ai";
 const ENDPOINT_PATH = "/v1/ping";
 const TIMEOUT_MS = 3000;
@@ -25,19 +31,39 @@ function getVersion(): string {
   }
 }
 
+function bucket(count: number, thresholds: number[]): string {
+  for (let i = 0; i < thresholds.length; i++) {
+    if (count < thresholds[i]) {
+      const low = i === 0 ? 1 : thresholds[i - 1];
+      return `${low}-${thresholds[i] - 1}`;
+    }
+  }
+  return `${thresholds[thresholds.length - 1]}+`;
+}
+
 function fileBucket(count: number): string {
-  if (count < 50) return "1-49";
-  if (count < 200) return "50-199";
-  if (count < 500) return "200-499";
-  if (count < 1000) return "500-999";
-  if (count < 5000) return "1000-4999";
-  if (count < 10000) return "5000-9999";
-  return "10000+";
+  return bucket(count, [50, 200, 500, 1000, 5000, 10000]);
+}
+
+function behaviorBucket(count: number): string {
+  return bucket(count, [100, 500, 1000, 5000, 10000]);
 }
 
 export interface TelemetryPayload {
+  /** The operation that completed: "scan_complete", "scan_start", "generate_tests" */
+  event?: string;
+  /** Total source files scanned */
   fileCount: number;
+  /** Dominant language detected (e.g. "typescript", "java", "go") */
   language: string;
+  /** Total behaviors mapped */
+  behaviors?: number;
+  /** Whether the user has any LLM API key configured */
+  hasByok?: boolean;
+  /** Whether the HTML report was successfully generated */
+  reportGenerated?: boolean;
+  /** Duration of the scan in milliseconds */
+  durationMs?: number;
 }
 
 export function pingTelemetry(payload: TelemetryPayload): void {
@@ -50,13 +76,16 @@ export function pingTelemetry(payload: TelemetryPayload): void {
   }
 
   const data = JSON.stringify({
-    event: "run",
+    event: payload.event || "scan_complete",
     v: getVersion(),
     lang: payload.language,
     files: fileBucket(payload.fileCount),
+    behaviors: payload.behaviors != null ? behaviorBucket(payload.behaviors) : undefined,
+    has_byok: payload.hasByok ? 1 : 0,
+    report: payload.reportGenerated !== false ? 1 : 0,
+    duration_ms: payload.durationMs ?? undefined,
     os: process.platform,
     node: process.version,
-    ts: new Date().toISOString(),
   });
 
   try {
@@ -71,9 +100,9 @@ export function pingTelemetry(payload: TelemetryPayload): void {
         },
         timeout: TIMEOUT_MS,
       },
-      () => {} // ignore response
+      () => { } // ignore response
     );
-    req.on("error", () => {}); // silent fail — never block the user
+    req.on("error", () => { }); // silent fail — never block the user
     req.on("timeout", () => req.destroy());
     req.write(data);
     req.end();
