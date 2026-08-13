@@ -1983,6 +1983,7 @@ export async function opStart(
   opts: StartOptions = {},
   deps: OperationDeps = defaultDeps()
 ): Promise<StartResult> {
+  const startTime = Date.now();
   const providerOpts = startProviderOverride(root, opts);
   const scanRoot = opts.source ? resolve(opts.source) : resolve(root);
   const providerEnv = loadProviderEnv([root, scanRoot], deps.env);
@@ -2004,18 +2005,6 @@ export async function opStart(
     deps
   );
   const warnings = [...analyze.warnings];
-  let dominantLang = "unknown";
-  try {
-    const g = loadGraph(root);
-    const lc: Record<string, number> = {};
-    for (const n of g.nodes) {
-      const lang = n.kind === "File" && typeof n.properties.language === "string" ? n.properties.language : null;
-      if (lang) lc[lang] = (lc[lang] ?? 0) + 1;
-    }
-    const top = Object.entries(lc).sort((a, b) => b[1] - a[1]);
-    if (top.length > 0) dominantLang = top[0][0];
-  } catch { /* telemetry is best-effort */ }
-  pingTelemetry({ fileCount: scope.files, language: dominantLang });
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
   const staticSnapshot = writeStartStaticSnapshot(root, opts.baseRef, warnings);
 
@@ -2188,6 +2177,28 @@ export async function opStart(
   const rtm = opRtm(root, { format: "md", baseRef: opts.baseRef, limit: START_RTM_LIMIT });
   const finalGraph = loadGraph(workspacePaths(root).graphPath);
   const aiLinked = summarizeAiLinks(finalGraph);
+  // --- Telemetry (v2): fire after report is generated, graph is final ---
+  try {
+    const lc: Record<string, number> = {};
+    for (const n of finalGraph.nodes) {
+      if (n.kind === "File" && typeof n.properties.language === "string") {
+        lc[n.properties.language] = (lc[n.properties.language] ?? 0) + 1;
+      }
+    }
+    const topLang = Object.entries(lc).sort((a, b) => b[1] - a[1]);
+    const dominantLang = topLang.length > 0 ? topLang[0][0] : "unknown";
+    const behaviorCount = behaviorNodes(finalGraph).length;
+    pingTelemetry({
+      event: "scan_complete",
+      fileCount: scope.files,
+      language: dominantLang,
+      behaviors: behaviorCount,
+      hasByok: !!(providerEnv.ANTHROPIC_API_KEY || providerEnv.OPENAI_API_KEY || providerEnv.OLLAMA_BASE_URL),
+      reportGenerated: !!coverageHtml,
+      durationMs: Date.now() - startTime,
+    });
+  } catch { /* telemetry must never fail the run */ }
+
   const finalAnalyze: AnalyzeSummary = {
     ...analyze,
     analysis: finalGraph.analysis ?? analyze.analysis,
