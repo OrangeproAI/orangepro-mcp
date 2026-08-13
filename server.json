@@ -7,12 +7,12 @@
     "url": "https://github.com/OrangeproAI/orangepro-mcp",
     "source": "github"
   },
-  "version": "0.2.27",
+  "version": "0.2.28",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@orangepro/mcp-server",
-      "version": "0.2.27",
+      "version": "0.2.28",
       "transport": {
         "type": "stdio"
       },
