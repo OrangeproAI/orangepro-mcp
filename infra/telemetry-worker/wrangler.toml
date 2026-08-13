@@ -11,3 +11,7 @@ routes = [
 binding = "DB"
 database_name = "orangepro-telemetry"
 database_id = "f8307cdb-009b-4447-805c-ad291cff94f3"  
+
+[triggers]
+crons = ["0 * * * *"]
+
