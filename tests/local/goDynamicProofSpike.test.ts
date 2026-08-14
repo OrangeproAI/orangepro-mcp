@@ -296,7 +296,7 @@ describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
     expect(verdict.reason).toMatch(/trusted value assertion/i);
   }, TEST_TIMEOUT);
 
-  it.skip("PART A: never credits a same-named test in ANOTHER package (cross-package false Proven)", async () => {
+  it("PART A: never credits a same-named test in ANOTHER package (cross-package false Proven)", async () => {
     // Two packages under ONE module. pkga has the target Foo + TestName whose
     // assertion SURVIVES the sentinel (Foo() >= 0 stays true when Foo -> 0). pkgb
     // imports pkga and has a SAME-NAMED TestName (same file basename foo_test.go,
