@@ -1,117 +1,124 @@
-# OrangePro MCP
+<p align="center">
+  <img src="https://github.com/OrangeproAI/orangepro-mcp/raw/main/docs/logo-horizontal.svg" alt="OrangePro" width="320" />
+</p>
 
-[![npm version](https://badge.fury.io/js/@orangepro%2Fmcp-server.svg )](https://www.npmjs.com/package/@orangepro/mcp-server )
-[![MIT License](https://img.shields.io/badge/license-MIT-green.svg )](LICENSE)
-[![npm downloads](https://img.shields.io/npm/dw/@orangepro/mcp-server.svg )](https://www.npmjs.com/package/@orangepro/mcp-server )
-[![orangepro-mcp MCP server](https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp/badges/score.svg )](https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp )
-[![MCP Registry](https://img.shields.io/badge/MCP_Registry-ai.orangepro%2Fmcp-orange.svg )](https://registry.modelcontextprotocol.io/?q=orangepro )
+<p align="center">
+  <strong>Find the behaviors your tests miss. Generate grounded tests that actually run.</strong>
+</p>
 
-**Find the behaviors your tests miss. Generate grounded tests that actually run.**
-
-`opro` builds a knowledge graph from your local checkout, maps every behavior in your code, shows which ones are tested and which aren't, and generates integration-level tests grounded in real symbols — not hallucinated imports. It runs as a CLI and a local stdio MCP server.
-
-Once you run the mcp server against a repo, you can get behavior-coverage/html
-**<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM behavior coverage report</a>**
-
-<img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
-
-*Fig 1: System map — entry lanes (GraphQL, HTTP, Jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
-
-<img width="818" height="1284" alt="Screenshot 2026-07-30 at 4 38 35 PM" src="https://github.com/user-attachments/assets/1c41475d-be2a-4c6d-ace6-c6546573bf97" />
-
-
-*Fig 2: Priority gaps — top 20 unproven behaviors ranked by blast radius, with generated test drafts and applicable testing categories.*
+<p align="center">
+  <a href="https://www.npmjs.com/package/@orangepro/mcp-server"><img src="https://badge.fury.io/js/@orangepro%2Fmcp-server.svg" alt="npm version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
+  <a href="https://www.npmjs.com/package/@orangepro/mcp-server"><img src="https://img.shields.io/npm/dw/@orangepro/mcp-server.svg" alt="npm downloads" /></a>
+  <a href="https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp"><img src="https://glama.ai/mcp/servers/OrangeproAI/orangepro-mcp/badges/score.svg" alt="Glama score" /></a>
+  <a href="https://registry.modelcontextprotocol.io/?q=orangepro"><img src="https://img.shields.io/badge/MCP_Registry-orangepro-orange.svg" alt="MCP Registry" /></a>
+</p>
 
 ---
-Install the target repository's dependencies first, then run OrangePro from that repository:
+
+OrangePro maps every public behavior in your codebase, scores each one by real test evidence, and shows you the structural blind spots before your users find them. Runs locally. Your code never leaves your machine.
 
 ```bash
-cd /path/to/your/repo
-npm install # or pnpm install / bun install / the repository's package manager
+npx -y @orangepro/mcp-server@latest start .
+```
 
-# Optional: enables AI candidate links, candidate flows, and test generation.
-export ANTHROPIC_API_KEY="..." # or OPENAI_API_KEY / OLLAMA_BASE_URL
+<!-- TODO: Replace with a terminal GIF showing the command running and report opening -->
 
-npx -y @orangepro/mcp-server@latest start . --prompt-version v5
+---
+
+## Table of Contents
+
+- [What you get](#what-you-get)
+- [Evidence tiers](#evidence-tiers)
+- [Quick start](#quick-start)
+- [Use with your coding agent](#use-with-your-coding-agent)
+- [How it works](#how-it-works)
+- [Language support](#language-support)
+- [Privacy](#privacy)
+- [CLI reference](#cli-reference)
+- [MCP tools](#mcp-tools-18-total)
+- [Platform](#whats-on-the-hosted-platform)
+- [Contributing](#contributing)
+
+---
+
+## What you get
+
+One command produces an interactive HTML report:
+
+```bash
+npx -y @orangepro/mcp-server@latest start .
 open .orangepro/behavior-coverage.html
 ```
 
-With no model key, the same command still performs deterministic analysis, renders the report, and dynamically proves eligible behaviors using existing tests. With a key, it also discovers AI candidate flows and drafts grounded tests for the highest-risk gaps. AI output never changes evidence tiers; only the mutation-kill oracle can mint **Dynamically Proven**.
+**<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM (4,849 behaviors mapped)</a>**
 
-The command writes:
+<img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
 
-```
-.orangepro/
-├── behavior-coverage.html   ← open this: system map, risks, flows, behaviors
-├── graph.json               ← deterministic evidence graph
-├── COVERAGE_REPORT.md       ← coverage and gap summary
-├── rtm.md                   ← requirements traceability matrix
-└── ai/                      ← candidate AI links/flows when a provider is configured
+*System map — entry lanes (GraphQL, HTTP, Jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
 
-orangepro_generated/         ← contained generated tests; existing source files are untouched
-```
+<img width="818" alt="Priority gaps" src="https://github.com/user-attachments/assets/1c41475d-be2a-4c6d-ace6-c6546573bf97" />
 
-The report opens on a **system map** of your repo — entry lanes (GraphQL/HTTP/Jobs) flowing into the services they reach, sized by traffic, colored by evidence tier, risk-ringed — identical on every run. Each completed rerun shows a **delta banner** against the previous completed run. The report discloses when bounded path enumeration prunes additional branch expansions. Every behavior gets a plain-English description; every top risk gets a deterministic context line and a state-aware next step.
-
-Run `opro export` when you want a machine-readable evidence pack.
+*Priority gaps — top 20 unproven behaviors ranked by blast radius, with generated test drafts.*
 
 ---
 
-## Install
+## Evidence tiers
+
+Every behavior gets exactly one tier. Nothing is labeled "tested" on faith.
+
+| Tier | Color | What it means |
+|------|-------|---------------|
+| **Dynamically Proven** | 🟢 | A real test kills a targeted mutation of this behavior |
+| **Runtime-covered** | 🟢 | Coverage tool executed this code |
+| **Statically Linked** | 🟡 | A test imports and calls this code — structural link, not proof |
+| **Unconfirmed Candidate** | ⚪ | A similar test file exists — a lead, not evidence |
+| **No Signal** | 🔴 | Nothing tests this behavior |
+
+> **"Dynamically Proven 0" is normal on first run.** Proof requires running tests against targeted mutations. That's the trust model.
+
+---
+
+## Quick start
 
 ```bash
-# No install needed: run the full local workflow in the current repository
-npx -y @orangepro/mcp-server@latest start . --prompt-version v5
+cd /path/to/your/repo
+npm install          # install the repo's own dependencies first
 
-# Or global install
-npm install -g @orangepro/orangepro-mcp
-opro start . --prompt-version v5
-
-# Or from source
-git clone https://github.com/OrangeproAI/orangepro-mcp.git
-cd orangepro-mcp && npm ci && npm run build && npm link
+npx -y @orangepro/mcp-server@latest start .
+open .orangepro/behavior-coverage.html
 ```
+
+No API key needed. The report shows your system map, evidence tiers, priority gaps, and delta since last run.
+
+**Want test generation?** Add a model key (BYOK):
+
+```bash
+export ANTHROPIC_API_KEY="..."   # or OPENAI_API_KEY / OLLAMA_BASE_URL
+npx -y @orangepro/mcp-server@latest start .
+```
+
+AI output never changes evidence tiers. Only the mutation-kill oracle can mint Dynamically Proven.
+
+**Output:**
+
+```
+.orangepro/
+├── behavior-coverage.html   ← open this
+├── graph.json               ← deterministic evidence graph
+├── COVERAGE_REPORT.md       ← coverage and gap summary
+└── ai/                      ← candidate flows (when a key is configured)
+
+orangepro_generated/         ← generated tests; your source files are never touched
+```
+
+Each rerun shows a **delta banner**: what entered the codebase, what moved up in risk, what got resolved.
 
 ---
 
 ## Use with your coding agent
 
-OrangePro runs as an MCP server. Any MCP-compatible agent (Cursor, Claude Code, Codex, Copilot, OpenCode) can drive it.
-
-### Quick agent setup
-
-If you already have `opro` on your PATH, print the exact config for your client:
-
-```bash
-opro agent --client codex
-opro agent --client claude-code
-opro agent --client cursor
-opro agent --client opencode
-opro agent --client generic
-```
-
-No global install is required. These commands use the published package:
-
-```bash
-# Codex
-npx -y @orangepro/mcp-server@latest agent --client codex
-
-# Claude Code
-npx -y @orangepro/mcp-server@latest agent --client claude-code
-
-# Cursor
-npx -y @orangepro/mcp-server@latest agent --client cursor
-
-# OpenCode
-npx -y @orangepro/mcp-server@latest agent --client opencode
-
-# Generic MCP clients, including VS Code/Copilot-style MCP settings
-npx -y @orangepro/mcp-server@latest agent --client generic
-```
-
-### Manual MCP config
-
-Add to your client's MCP config:
+OrangePro runs as an MCP server. Add to your client's config:
 
 ```json
 {
@@ -124,167 +131,32 @@ Add to your client's MCP config:
 }
 ```
 
-| Client | Config location |
+| Client | Where to put it |
 | --- | --- |
 | Claude Code | `.mcp.json` or `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` or Settings → MCP |
-| Codex | Config printed by `opro agent --client codex` or `npx -y @orangepro/mcp-server@latest agent --client codex` |
-| VS Code / Copilot | MCP settings; use the `generic` config if your client accepts raw MCP server JSON |
-| OpenCode | Config printed by `opro agent --client opencode` |
+| VS Code / Copilot | MCP settings |
+| Codex / OpenCode | Run `npx -y @orangepro/mcp-server@latest agent --client codex` |
 
-### The workflow
-
-Tell your agent:
+**The workflow:** Tell your agent:
 
 > "Use `orangepro_start`, then `orangepro_generate_tests` with base_ref=main. Write each test to its suggested_path, run it, and report pass/fail."
 
 The agent writes the test, runs it, calls `orangepro_prove`, and the behavior turns Dynamically Proven. One prompt, full loop.
 
-### MCP tools (18 total)
-
-| Tool | What it does |
-|------|--------------|
-| `orangepro_start` | One-command setup: analyze + report + next actions |
-| `orangepro_analyze_sources` | Build/refresh the evidence graph |
-| `orangepro_generate_tests` | Generate grounded tests for gaps |
-| `orangepro_prove` | Run mutation-kill oracle on a behavior |
-| `orangepro_prove_loop` | Setup commands + dynamic proof + report refresh for one behavior |
-| `orangepro_find_test_gaps` | List behaviors with weak/missing tests, ranked by risk |
-| `orangepro_graph_score` | Graph readiness score (0–100) |
-| `orangepro_status` | Workspace state without generating anything |
-| `orangepro_doctor` | Recommend next evidence to improve quality |
-| `orangepro_rtm` | Requirements traceability matrix |
-| `orangepro_stats` | Aggregate statistics |
-| `orangepro_changed_impact` | What a diff touches (requires git + base ref) |
-| `orangepro_record_run` | Record a test run result |
-| `orangepro_explain_test` | Explain why a test was generated |
-| `orangepro_export_evidence_pack` | Export metadata-only evidence pack |
-| `orangepro_update_graph` | Incremental graph update |
-| `orangepro_ai_links` | Weak behavior→symbol suggestions (optional AI) |
-| `orangepro_ai_flows` | Candidate flow discovery (optional AI) |
-
 ---
 
-## CLI reference
+## Works with
 
-```bash
-opro                          # analyze + report + agent next actions
-opro start --base main        # same, scoped to a branch diff
-opro analyze                  # build the evidence graph
-opro score                    # graph readiness (0–100)
-opro gaps --limit 10          # top 10 untested behaviors
-opro generate --base main     # tests for PR diff
-opro generate --single        # top gap, whole repo
-opro prove                    # mutation-kill oracle (use the prove_run args returned by generate)
-opro rtm                      # traceability matrix
-opro export                   # metadata-only evidence pack
-opro mcp                      # run as MCP server (stdio)
-opro doctor                   # what evidence to add next
-opro doctor --proof           # explain why dynamic proof could not close
-opro coverage                 # ingest runtime coverage
-```
+<p>
+  <strong>Claude Code</strong> · <strong>Cursor</strong> · <strong>GitHub Copilot</strong> · <strong>Codex</strong> · <strong>Windsurf</strong> · <strong>OpenCode</strong> · <strong>VS Code</strong>
+</p>
 
-Add `--json` to any read command for machine output. Run `opro help` for the full reference.
-
----
-
-## PR workflow
-
-```bash
-opro generate --base main              # tests for what this branch changed
-opro generate --pr 1234                # checks out PR #1234 — mutates your working tree; needs gh + confirmation (prefer --base)
-opro generate --changed                # current branch diff vs main
-```
-
-Each generated test includes:
-- **Grounding** — the real files, symbols, and existing tests it cites
-- **Run hints** — where to write it, how to run it
-- **Scenario bucket + technique** — what failure mode it targets and how
-
-If the environment can't run tests yet (dependencies not installed, runner unconfigured), rejected drafts are kept as **Manual tests** — scenario, Given/When/Then steps, synthetic test data, and expected outcome in plain English, with the exact blocker named. Install dependencies and re-run `opro start` to turn them into runnable tests. Runnable tests always replace Manual tests for the same behavior; the two are never mixed.
-
----
-
-## Test categories
-
-Generation is evidence-gated. A category is produced only when the graph has supporting evidence — never padded with generic filler. These are the local generation buckets. The report additionally shows each risk's **applicable testing categories** (contract, boundary limits, integration flow, state lifecycle, failure recovery, …), derived deterministically from graph facts. Categories with generated drafts are highlighted as drafts; they are not coverage or proof, and remaining applicable categories stay outlined. Neither taxonomy changes evidence tiers.
-
-| Category | What it targets |
-|----------|-----------------|
-| Happy path | Primary expected behavior |
-| Validation error | Bad/invalid input handling |
-| Edge case | Boundaries, empty/null, concurrency, retries |
-| Integration flow | Multi-step behavior across services |
-| Security / privacy | Auth, injection, data leakage |
-| Regression | Pinning a previously-broken behavior |
-
----
-
-## Evidence tiers
-
-Every behavior gets exactly one tier. Nothing is labeled "tested" on faith.
-
-| Tier | What it means | How you get there |
-|------|---------------|------------------|
-| **Dynamically Proven** | A real test kills a targeted mutant of this behavior | `opro prove` after writing/running a test |
-| **Runtime-covered** | Coverage tool executed this code | `opro start --generate-coverage` |
-| **Statically Linked** | A test **imports and calls** this code — a hard structural link | Automatic during analysis |
-| **Unconfirmed Candidate** | A lexically similar test file exists, but nothing links it — a lead, **not evidence** | Automatic; upgrade it by writing the linking test |
-| **No Signal** | Nothing tests this behavior yet | — |
-
-> **"Dynamically Proven 0" is normal on first run.** Static analysis always runs. Dynamic proof requires running tests against targeted mutations. That's the trust model — nothing is Dynamically Proven until a real test kills a real mutant.
-
-When runtime coverage is available, `opro start` also compares Runtime-covered and Dynamically Proven behaviors over the same deterministic denominator. It never compares source-line coverage with behavior proof or folds off-denominator proofs into that percentage.
-
----
-
-## Language support
-
-OrangePro separates static mapping, generated tests, runtime coverage, and dynamic proof. Those are different confidence bars.
-
-| Language | Static behavior extraction | Generated tests | Runtime coverage | Dynamic proof |
-|----------|:--------------------------:|:---------------:|:----------------:|:-------------:|
-| TypeScript / JavaScript | ✓ | ✓ Jest / Vitest / Mocha / AVA-style drafts | ✓ lcov.info | ✓ Vitest / Jest / Mocha |
-| Python | ✓ | ✓ pytest | ✓ coverage.py / pytest-cov XML | ✓ pytest |
-| Go | ✓ | ✓ same-package `*_test.go` | ✓ coverprofile | ✓ `go test` |
-| Java | ✓ | ✓ JUnit 4/5 | ✓ JaCoCo XML | ✓ Maven/JUnit |
-| Kotlin, Rust, PHP, C#, Ruby, Swift, C, C++ | ✓ static behavior extraction | planned | planned where standard coverage exists | planned proof profiles |
-
-Static mapping works across many languages through tree-sitter and repo metadata. Dynamic proof is deliberately narrower: each language needs a runner, mutation locator, sandbox profile, and false-proof regressions before it can mint Dynamically Proven.
-
----
-
-## Model setup (BYOK)
-
-Analysis, scoring, and proof need no model key. Generation does.
-
-| Provider | Environment variable |
-|----------|---------------------|
-| OpenAI-compatible | `OPENAI_API_KEY` (optional: `OPENAI_BASE_URL`, `OPENAI_MODEL`) |
-| Anthropic | `ANTHROPIC_API_KEY` (optional: `ANTHROPIC_MODEL`) |
-| Ollama (local, no key) | `OLLAMA_BASE_URL` (optional: `OLLAMA_MODEL`) |
-
-Auto-detect order: OpenAI → Ollama → Anthropic. Override with `--provider` and `--model`.
-
-Run `opro setup` to configure interactively. Keys stay in your environment — never written to graph, config, or artifacts.
-
----
-
-## AI candidate lanes
-
-With a provider key, OrangePro can stage weak AI behavior→symbol links and AI-suggested candidate flows. These are ready for local use as review/generation worklists, but they are not evidence:
-
-- AI links appear as `AI-linked` suggestions.
-- AI flows are stored separately from deterministic flows.
-- Neither lane changes Dynamically Proven, Runtime-covered, Statically Linked, denominator counts, or evidence tiers.
-
-Use them when you want the agent to find likely service-boundary flows faster; ignore them when you want a deterministic-only report.
+Any MCP-compatible agent can drive OrangePro. No vendor lock-in.
 
 ---
 
 ## How it works
-
-OrangePro separates **analysis** (what your code does) from **proof** (whether tests actually verify it).
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
@@ -303,21 +175,149 @@ OrangePro separates **analysis** (what your code does) from **proof** (whether t
 | Phase | What happens | Needs a model key? |
 |-------|-------------|-------------------|
 | **Analyze** | AST walk → behaviors, flows, evidence tiers | No |
-| **Score** | Graph readiness score (0–100) with reasons | No |
-| **Generate** | Grounded tests for top gaps, per-behavior | Yes (BYOK) |
-| **Prove** | Mutation-kill oracle confirms test actually breaks if behavior changes | No |
+| **Score** | Graph readiness score (0–100) | No |
+| **Generate** | Grounded tests for top gaps | Yes (BYOK) |
+| **Prove** | Mutation-kill oracle confirms test breaks if behavior changes | No |
 
-Reruns are cache-accelerated: unchanged files skip re-parsing, BYOK stages don't re-spend tokens on unchanged inputs, and proof certificates persist in a local ledger until the certified file changes. Upgrading the tool auto-invalidates caches.
+Same code = same score. Deterministic. Always.
+
+---
+
+## Language support
+
+| Language | Static mapping | Generated tests | Dynamic proof |
+|----------|:-:|:-:|:-:|
+| TypeScript / JavaScript | ✓ | ✓ Jest / Vitest / Mocha | ✓ |
+| Python | ✓ | ✓ pytest | ✓ |
+| Go | ✓ | ✓ `*_test.go` | ✓ |
+| Java | ✓ | ✓ JUnit 4/5 | ✓ |
+| Kotlin, Rust, PHP, C#, Ruby, Swift, C, C++ | ✓ | planned | planned |
+
+Static mapping works across many languages via tree-sitter. Dynamic proof is deliberately narrower — each language needs a runner, mutation locator, and sandbox profile.
 
 ---
 
 ## Privacy
 
 - **No stored source.** Reads code in-process. Never uploads to an OrangePro server.
-- **No existing-source mutation.** Never edits existing source or test files. Writes metadata to `.orangepro/`; keyed auto-drive may write new, reviewable tests under `orangepro_generated/`.
-- **Metadata-only exports.** File paths, names, hashes, scores — not raw source.
+- **No existing-source mutation.** Never edits your source or test files.
 - **Your keys stay yours.** Read from env at call time, never persisted.
-- **BYOK is direct.** When AI lanes are enabled, grounded code context is sent directly to the model provider you configure; OrangePro's hosted service is not in that path.
+- **BYOK is direct.** Code context goes to the model provider you configure. OrangePro is not in that path.
+
+---
+
+<details>
+<summary><strong>CLI reference</strong></summary>
+
+```bash
+opro                          # analyze + report + agent next actions
+opro start --base main        # same, scoped to a branch diff
+opro analyze                  # build the evidence graph
+opro score                    # graph readiness (0–100)
+opro gaps --limit 10          # top 10 untested behaviors
+opro generate --base main     # tests for PR diff
+opro generate --single        # top gap, whole repo
+opro prove                    # mutation-kill oracle
+opro rtm                      # traceability matrix
+opro export                   # metadata-only evidence pack
+opro mcp                      # run as MCP server (stdio)
+opro doctor                   # what evidence to add next
+opro coverage                 # ingest runtime coverage
+```
+
+Add `--json` to any read command for machine output. Run `opro help` for the full reference.
+
+</details>
+
+<details>
+<summary><strong>MCP tools (18 total)</strong></summary>
+
+| Tool | What it does |
+|------|--------------|
+| `orangepro_start` | One-command setup: analyze + report + next actions |
+| `orangepro_analyze_sources` | Build/refresh the evidence graph |
+| `orangepro_generate_tests` | Generate grounded tests for gaps |
+| `orangepro_prove` | Run mutation-kill oracle on a behavior |
+| `orangepro_prove_loop` | Setup + dynamic proof + report refresh for one behavior |
+| `orangepro_find_test_gaps` | List behaviors with weak/missing tests, ranked by risk |
+| `orangepro_graph_score` | Graph readiness score (0–100) |
+| `orangepro_status` | Workspace state without generating anything |
+| `orangepro_doctor` | Recommend next evidence to improve quality |
+| `orangepro_rtm` | Requirements traceability matrix |
+| `orangepro_stats` | Aggregate statistics |
+| `orangepro_changed_impact` | What a diff touches (requires git + base ref) |
+| `orangepro_record_run` | Record a test run result |
+| `orangepro_explain_test` | Explain why a test was generated |
+| `orangepro_export_evidence_pack` | Export metadata-only evidence pack |
+| `orangepro_update_graph` | Incremental graph update |
+| `orangepro_ai_links` | Weak behavior→symbol suggestions (optional AI) |
+| `orangepro_ai_flows` | Candidate flow discovery (optional AI) |
+
+</details>
+
+<details>
+<summary><strong>PR workflow</strong></summary>
+
+```bash
+opro generate --base main              # tests for what this branch changed
+opro generate --pr 1234                # checks out PR #1234
+opro generate --changed                # current branch diff vs main
+```
+
+Each generated test includes:
+- **Grounding** — the real files, symbols, and existing tests it cites
+- **Run hints** — where to write it, how to run it
+- **Scenario bucket** — what failure mode it targets
+
+If dependencies aren't installed, tests are kept as **Manual tests** (Given/When/Then steps with the blocker named). Install dependencies and re-run to convert them to runnable tests.
+
+</details>
+
+<details>
+<summary><strong>Test categories</strong></summary>
+
+Generation is evidence-gated. A category is produced only when the graph has supporting evidence.
+
+| Category | What it targets |
+|----------|-----------------|
+| Happy path | Primary expected behavior |
+| Validation error | Bad/invalid input handling |
+| Edge case | Boundaries, empty/null, concurrency, retries |
+| Integration flow | Multi-step behavior across services |
+| Security / privacy | Auth, injection, data leakage |
+| Regression | Pinning a previously-broken behavior |
+
+</details>
+
+<details>
+<summary><strong>Model setup (BYOK)</strong></summary>
+
+Analysis, scoring, and proof need no model key. Generation does.
+
+| Provider | Environment variable |
+|----------|---------------------|
+| OpenAI-compatible | `OPENAI_API_KEY` (optional: `OPENAI_BASE_URL`, `OPENAI_MODEL`) |
+| Anthropic | `ANTHROPIC_API_KEY` (optional: `ANTHROPIC_MODEL`) |
+| Ollama (local, no key) | `OLLAMA_BASE_URL` (optional: `OLLAMA_MODEL`) |
+
+Auto-detect order: OpenAI → Ollama → Anthropic. Override with `--provider` and `--model`.
+
+Run `opro setup` to configure interactively. Keys stay in your environment — never written to graph, config, or artifacts.
+
+</details>
+
+<details>
+<summary><strong>AI candidate lanes</strong></summary>
+
+With a provider key, OrangePro stages weak AI behavior→symbol links and AI-suggested candidate flows. These are review/generation worklists, not evidence:
+
+- AI links appear as `AI-linked` suggestions.
+- AI flows are stored separately from deterministic flows.
+- Neither lane changes evidence tiers or denominator counts.
+
+Use them when you want the agent to find likely service-boundary flows faster; ignore them for a deterministic-only report.
+
+</details>
 
 ---
 
@@ -326,25 +326,26 @@ Reruns are cache-accelerated: unchanged files skip re-parsing, BYOK stages don't
 This repo is the free local tool. The [OrangePro platform](https://orangepro.ai) adds:
 
 - Persistent knowledge graph across PRs and repos
-- Managed dynamic proof at scale (larger budgets, CI workers, service setup profiles)
-- PR/CI policy gates over Dynamically Proven, Runtime-covered, and risk deltas
+- PR/CI policy gates over evidence tiers and risk deltas
 - Jira / Confluence / TestRail / OpenAPI enrichment
 - Cross-repo intelligence and recurring-flow memory
 - Production incident correlation and regression targeting
-- Full test lifecycle management and team dashboards
+- Team dashboards and test lifecycle management
 
 ---
 
 ## Contributing
 
 ```bash
-npm run build       # compile to dist/
-npm test            # vitest
-npm run typecheck   # type check without emitting
+git clone https://github.com/OrangeproAI/orangepro-mcp.git
+cd orangepro-mcp && npm ci && npm run build
+npm test
 ```
 
-See [docs/local-proof-kit.md](docs/local-proof-kit.md) for the full development reference.
+PRs welcome. Please open an issue first for large changes.
 
-## License
+---
 
-[MIT](LICENSE) © OrangePro
+<p align="center">
+  MIT License · <a href="https://orangepro.ai">orangepro.ai</a>
+</p>
