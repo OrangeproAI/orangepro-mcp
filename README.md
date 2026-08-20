@@ -52,15 +52,16 @@ open .orangepro/behavior-coverage.html
 ```
 The report has two modes: **Simple** (integration-level blind spots, plain English) and **Expert** (full behavior list, evidence tiers, flows, system map). Toggle with the pill switch at the top.
 
-**<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM (4,849 behaviors mapped)</a>**
+**<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM (5,237 behaviors mapped)</a>**
 
-<img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
+<img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42](https://github.com/user-attachments/assets/a4d85b98-4f19-4647-8dd9-db5911574f49" />
 
 *System map — entry lanes (GraphQL, HTTP, Jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
 
-<img width="818" alt="Priority gaps" src="https://github.com/user-attachments/assets/1c41475d-be2a-4c6d-ace6-c6546573bf97" />
 
-*Priority gaps — top 20 unproven behaviors ranked by blast radius, with generated test drafts.*
+<img width="818" alt="Priority gaps" src="https://github.com/user-attachments/assets/30a512b6-7830-48db-a00f-a616e7176ea8" />
+
+*Priority gaps of another open source Project HONO — top 20 unproven behaviors ranked by blast radius, with generated test drafts.*
 
 ---
 
