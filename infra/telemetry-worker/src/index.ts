@@ -10,12 +10,11 @@
 
 export interface Env {
   DB: D1Database;
+  DISCORD_WEBHOOK_URL: string;
 }
 
-const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1537387505614331964/rOFeOVa1fFho3xxqS5pEKiDPzSSKS0mjaws4wurxgzFHjMKQZEWsvNguqNU7iaLoYHhL";
-
-async function sendDiscord(content: string): Promise<void> {
-  await fetch(DISCORD_WEBHOOK, {
+async function sendDiscord(env: Env, content: string): Promise<void> {
+  await fetch(env.DISCORD_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
@@ -61,7 +60,7 @@ async function hourlyNotification(env: Env): Promise<void> {
   let msg = `🟠 **${row.c} scan(s)** in the last hour: ${langParts.join(", ")}. Largest repo: ${largest} files.`;
   if (byok && byok.k > 0) msg += ` ${byok.k} with BYOK.`;
 
-  await sendDiscord(msg);
+  await sendDiscord(env, msg);
 }
 
 // ─── 12-hour summary table ──────────────────────────────────────────────────
@@ -102,7 +101,7 @@ async function twelveHourSummary(env: Env): Promise<void> {
   }
   table += "```";
 
-  await sendDiscord(`📊 **12-hour summary** (${row.c} total scans):\n${table}`);
+  await sendDiscord(env, `📊 **12-hour summary** (${row.c} total scans):\n${table}`);
 }
 
 // ─── Daily full table (24h entries) ─────────────────────────────────────────
@@ -116,7 +115,7 @@ async function dailyFullTable(env: Env): Promise<void> {
   ).all();
 
   if (!rows.results || rows.results.length === 0) {
-    await sendDiscord("📋 **Daily report**: No scans in the last 24 hours.");
+    await sendDiscord(env, "📋 **Daily report**: No scans in the last 24 hours.");
     return;
   }
 
@@ -141,7 +140,7 @@ async function dailyFullTable(env: Env): Promise<void> {
   const byokTotal = rows.results.filter((r: any) => r.has_byok).length;
   const header = `📋 **Daily report** — ${total} scans in 24h, ${byokTotal} with BYOK (${Math.round(byokTotal / total * 100)}% conversion potential):`;
 
-  await sendDiscord(`${header}\n${table}`);
+  await sendDiscord(env, `${header}\n${table}`);
 }
 
 // ─── Main exports ───────────────────────────────────────────────────────────
