@@ -119,7 +119,15 @@ export function getFrameworkRules(framework: string): string {
     return "Python: `def test_...` with `assert`. Use `# Concern:` and `# Technique:` comments.";
   }
   if (fw.includes("go")) {
-    return "Go: same-package `_test.go`, `func Test...(t *testing.T)`. Stdlib preferred.";
+    return [
+      "Go: same-package `_test.go` file. `func Test...(t *testing.T)`.",
+      "MUST start with `package <name>` matching the package under test.",
+      "MUST import `\"testing\"` and every stdlib package used (\"fmt\", \"context\", \"strings\", \"errors\", \"time\", etc.).",
+      "For internal imports use the FULL module path from go.mod (e.g. `\"go.temporal.io/server/common/log\"` not `\"common/log\"`).",
+      "Never reference unexported symbols from outside the package.",
+      "Prefer stdlib `testing` over testify unless testify is already in SUBJECT IMPORTS.",
+      "If the test needs types or functions from other packages, import them by their full module path visible in the source excerpts."
+    ].join(" ");
   }
   if (fw.includes("junit4") || fw.includes("java4")) {
     return "JUnit 4: `import org.junit.Test;` + `import static org.junit.Assert.*;`. Complete .java file.";
