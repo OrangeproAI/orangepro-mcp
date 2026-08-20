@@ -50,6 +50,7 @@ One command produces an interactive HTML report:
 npx -y @orangepro/mcp-server@latest start .
 open .orangepro/behavior-coverage.html
 ```
+The report has two modes: **Simple** (integration-level blind spots, plain English) and **Expert** (full behavior list, evidence tiers, flows, system map). Toggle with the pill switch at the top.
 
 **<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM (4,849 behaviors mapped)</a>**
 
