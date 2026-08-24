@@ -9,6 +9,7 @@ import {
   parsePlannedScenarios,
   parsePlannedScenariosStrict
 } from "../../src/local/generate/promptV5.js";
+import { buildGroundedUserPrompt } from "../../src/local/generate/prompt.js";
 
 const VALID_SCENARIO = {
   id: 1,
@@ -67,6 +68,67 @@ describe("prompt v5", () => {
     });
     expect(prompt).toContain("HOW: Test at exact boundaries");
     expect(prompt).not.toContain("Simulate infrastructure failure");
+  });
+
+  it("distinguishes exact Go package imports from module identities", () => {
+    const prompt = buildBatchGenerationUserPromptV5({
+      behavior_title: "Activity options",
+      actors: [],
+      framework: "go test",
+      test_layer: "unit",
+      code_context: ["service/activity.go"],
+      source_excerpts: [],
+      existing_tests: [],
+      subject_imports: [],
+      weak_context: [],
+      go_module_paths: ["go.temporal.io/server"],
+      go_target_package_paths: ["go.temporal.io/server/service/history"],
+      go_import_paths: ["go.temporal.io/api/activity/v1"],
+      scenarios: [
+        {
+          id: 1,
+          title: "returns activity options",
+          concern: "contract",
+          technique: "contract_verification",
+          rationale: "public contract",
+          assertion_targets: ["activity options"],
+          complexity: "basic",
+          risk_rank: 1
+        }
+      ]
+    });
+    expect(prompt).toContain("GO MODULE IDENTITIES (module roots only");
+    expect(prompt).toContain("go.temporal.io/server");
+    expect(prompt).toContain("OBSERVED GO IMPORT PATHS (exact repo-evidenced package paths)");
+    expect(prompt).toContain("go.temporal.io/api/activity/v1");
+    expect(prompt).toContain("Never invent a package path");
+    expect(prompt).toContain("TARGET GO PACKAGE PATHS (do not import");
+    expect(prompt).toContain("go.temporal.io/server/service/history");
+  });
+
+  it("includes the same grounded Go import evidence in the default v2 prompt", () => {
+    const prompt = buildGroundedUserPrompt({
+      behavior_external_id: "flow:activity-options",
+      behavior_title: "Activity options",
+      actors: [],
+      acceptance_criteria: [],
+      workflow_steps: [],
+      framework: "go test",
+      test_layer: "unit",
+      code_context: ["service/activity.go"],
+      source_excerpts: [],
+      weak_context: [],
+      existing_tests: [],
+      subject_imports: [],
+      go_module_paths: ["go.temporal.io/server"],
+      go_target_package_paths: ["go.temporal.io/server/service/history"],
+      go_import_paths: ["go.temporal.io/api/activity/v1"]
+    });
+    expect(prompt).toContain("GO MODULE IDENTITIES (module roots only");
+    expect(prompt).toContain("OBSERVED GO IMPORT PATHS (exact repo-evidenced package paths");
+    expect(prompt).toContain("go.temporal.io/api/activity/v1");
+    expect(prompt).toContain("Never invent a package path");
+    expect(prompt).toContain("Never import a TARGET GO PACKAGE PATH");
   });
 
   it("parses planned scenarios by risk order and caps caller-side", () => {

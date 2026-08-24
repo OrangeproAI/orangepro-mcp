@@ -50,7 +50,10 @@ const SYMBOL_EXCERPT_CONTEXT_LINES = 3;
 const MAX_EXCERPT_CHARS = 8000;
 const MAX_TARGET_TYPE_EXCERPT_CHARS = 5000;
 const STATIC_CHECK_TIMEOUT_MS = 3000;
-const GO_COMPILE_CHECK_TIMEOUT_MS = 20000;
+// Large Go monorepos can spend tens of seconds populating a cold module cache
+// before the target package is compiled. Keep the check authoritative instead
+// of downgrading valid generated tests while dependencies are still downloading.
+const GO_COMPILE_CHECK_TIMEOUT_MS = 120000;
 /** A source ref that names a test file (used to place a generated test next to it). */
 const TEST_REF_RE = /(\.(test|spec)\.[cm]?[jt]sx?$)|((^|\/)test\.[cm]?[jt]sx?$)|(_test\.[a-z]+$)|(_spec\.[a-z]+$)|((^|\/)test_[^/]+\.[a-z]+$)/i;
 
@@ -549,6 +552,9 @@ export function gatherContext(
   // Subject imports are TS/JS lines — feeding them to a pytest/go target would
   // produce an unparseable test in the other language.
   const fwLower = framework.toLowerCase();
+  const goContext = fwLower.includes("go")
+    ? goGenerationImportContext(graph.workspace.root, [...relatedFiles, ...testFiles], fileReader)
+    : { go_import_paths: [], go_module_paths: [], go_target_package_paths: [] };
   const subjectImports =
     fwLower.includes("pytest") || fwLower.includes("python") || fwLower.includes("go") || fwLower.includes("junit") || fwLower.includes("java")
       ? []
@@ -598,6 +604,9 @@ export function gatherContext(
     // MISSING, never a re-derivation of a test that already exists.
     existing_tests: examples.slice(0, 10),
     subject_imports: subjectImports,
+    ...(goContext.go_import_paths.length ? { go_import_paths: goContext.go_import_paths } : {}),
+    ...(goContext.go_module_paths.length ? { go_module_paths: goContext.go_module_paths } : {}),
+    ...(goContext.go_target_package_paths.length ? { go_target_package_paths: goContext.go_target_package_paths } : {}),
     ...(flowChain ? { flow_chain: flowChain } : {})
   };
 
@@ -1575,10 +1584,6 @@ function goStaticIssue(body: string): string | null {
   if (!/\bfunc\s+Test[A-Za-z0-9_]*\s*\(\s*t\s+\*testing\.T\s*\)/m.test(body)) {
     return "Go test is missing a func Test...(t *testing.T) entrypoint.";
   }
-  const external = imports.filter((spec) => spec.split("/")[0].includes("."));
-  if (external.length) {
-    return `Go test imports module-path package(s) ${external.join(", ")}; OrangePro cannot verify module imports resolve from the generated file. Prefer same-package or stdlib-only code.`;
-  }
   if (!commandAvailable("gofmt")) return "gofmt not found; cannot verify Go syntax.";
   const { dir, file } = writeTempStaticFile("go", body);
   try {
@@ -1605,23 +1610,60 @@ function findGoModuleRoot(startDir: string, workspaceRoot: string): string | nul
   return null;
 }
 
-function goCompileIssue(body: string, workspaceRoot: string, relatedFiles: string[]): string | null {
+interface GoCompileResult {
+  body: string;
+  issue: string | null;
+}
+
+function unusedImportLineNumbers(output: string, tempRel: string): Set<number> {
+  const escaped = tempRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const diagnostic = new RegExp(`(?:^|\\n)(?:\\./)?${escaped}:(\\d+):\\d+:\\s+[^\\n]*\\bimported\\b[^\\n]*\\bnot used\\b`, "g");
+  return new Set([...output.matchAll(diagnostic)].map((match) => Number(match[1])).filter(Number.isFinite));
+}
+
+function removeLines(body: string, lineNumbers: Set<number>): string {
+  if (!lineNumbers.size) return body;
+  return body
+    .split(/\r?\n/)
+    .filter((_line, index) => !lineNumbers.has(index + 1))
+    .join("\n");
+}
+
+function goCompile(body: string, workspaceRoot: string, relatedFiles: string[]): GoCompileResult {
+  const externalImports = goImportSpecs(body).filter((spec) => spec.split("/")[0].includes("."));
+  const unverifiedImportIssue = externalImports.length
+    ? `Go test imports module-path package(s) ${externalImports.join(", ")}, but OrangePro could not run the target-package compile check to verify they resolve.`
+    : null;
   const sourceFile = relatedFiles.find((rel) => /\.go$/i.test(rel) && !TEST_REF_RE.test(rel));
-  if (!sourceFile) return null;
+  if (!sourceFile) return { body, issue: unverifiedImportIssue };
   const packageDir = path.resolve(workspaceRoot, path.dirname(sourceFile));
-  if (!existsSync(packageDir) || !findGoModuleRoot(packageDir, workspaceRoot)) return null;
-  if (!commandAvailable("go")) return "go not found; cannot verify generated Go test compiles.";
+  if (!existsSync(packageDir) || !findGoModuleRoot(packageDir, workspaceRoot)) return { body, issue: unverifiedImportIssue };
+  if (!commandAvailable("go")) return { body, issue: "go not found; cannot verify generated Go test compiles." };
 
   const tempRel = `orangepro_compile_${process.pid}_${shortHash(body)}_test.go`;
   const tempFile = path.join(packageDir, tempRel);
+  let checkedBody = body;
   try {
-    writeFileSync(tempFile, body);
+    writeFileSync(tempFile, checkedBody);
     execFileSync("go", ["test", "-run", "^$", "."], { cwd: packageDir, stdio: "pipe", timeout: GO_COMPILE_CHECK_TIMEOUT_MS });
-    return null;
+    return { body: checkedBody, issue: null };
   } catch (e) {
     const err = e as { stdout?: Buffer; stderr?: Buffer; message?: string };
     const output = `${err.stdout?.toString() ?? ""}${err.stderr?.toString() ?? ""}`;
-    return `Go compile check failed: ${shortStaticDiag(output || err.message || "unknown error")}`;
+    const withoutUnusedImports = removeLines(checkedBody, unusedImportLineNumbers(output, tempRel));
+    if (withoutUnusedImports !== checkedBody) {
+      checkedBody = withoutUnusedImports;
+      try {
+        writeFileSync(tempFile, checkedBody);
+        execFileSync("go", ["test", "-run", "^$", "."], { cwd: packageDir, stdio: "pipe", timeout: GO_COMPILE_CHECK_TIMEOUT_MS });
+        return { body: checkedBody, issue: null };
+      } catch (retryError) {
+        const retry = retryError as { stdout?: Buffer; stderr?: Buffer; message?: string };
+        const retryOutput = `${retry.stdout?.toString() ?? ""}${retry.stderr?.toString() ?? ""}`;
+        return { body: checkedBody, issue: `Go compile check failed: ${shortStaticDiag(retryOutput || retry.message || "unknown error")}` };
+      }
+    }
+    return { body: checkedBody, issue: `Go compile check failed: ${shortStaticDiag(output || err.message || "unknown error")}` };
   } finally {
     rmSync(tempFile, { force: true });
   }
@@ -1647,6 +1689,48 @@ function goImportSpecs(body: string): string[] {
     }
   }
   return specs;
+}
+
+function goGenerationImportContext(
+  workspaceRoot: string,
+  files: string[],
+  fileReader: FileReader
+): { go_import_paths: string[]; go_module_paths: string[]; go_target_package_paths: string[] } {
+  const goFiles = files.filter((file) => /\.go$/i.test(file));
+  const moduleRoots = dedupe(
+    goFiles
+      .map((file) => findGoModuleRoot(path.resolve(workspaceRoot, path.dirname(file)), workspaceRoot))
+      .filter((root): root is string => Boolean(root))
+  );
+  const modulePathByRoot = new Map(
+    moduleRoots.map((root) => {
+      try {
+        return [root, readFileSync(path.join(root, "go.mod"), "utf8").match(/^\s*module\s+(\S+)/m)?.[1] ?? ""] as const;
+      } catch {
+        return [root, ""] as const;
+      }
+    })
+  );
+  const go_module_paths = dedupe([...modulePathByRoot.values()].filter(Boolean));
+  const go_target_package_paths = dedupe(
+    goFiles
+      .map((file) => {
+        const sourceDir = path.resolve(workspaceRoot, path.dirname(file));
+        const moduleRoot = findGoModuleRoot(sourceDir, workspaceRoot);
+        const modulePath = moduleRoot ? modulePathByRoot.get(moduleRoot) : "";
+        if (!moduleRoot || !modulePath) return "";
+        const packageDir = path.relative(moduleRoot, sourceDir).split(path.sep).join("/");
+        return packageDir && packageDir !== "." ? `${modulePath}/${packageDir}` : modulePath;
+      })
+      .filter(Boolean)
+  );
+  const targetPaths = new Set(go_target_package_paths);
+  const go_import_paths = dedupe(
+    goFiles
+      .flatMap((file) => goImportSpecs(fileReader(file) ?? ""))
+      .filter((spec) => spec.split("/")[0].includes(".") && !targetPaths.has(spec))
+  ).slice(0, 40);
+  return { go_import_paths, go_module_paths, go_target_package_paths };
 }
 
 function hasBalancedBraces(body: string): boolean {
@@ -2203,8 +2287,13 @@ export async function generateTests(
         body = applyPythonSrcLayoutImports(body, relatedFiles);
       }
       body = ensureFrameworkScaffold(body, framework);
+      let compileIssue: string | null = null;
+      if (framework.toLowerCase().includes("go")) {
+        const checked = goCompile(body, graph.workspace.root, relatedFiles);
+        body = checked.body;
+        compileIssue = checked.issue;
+      }
       const staticIssue = staticFormatIssue(body, framework);
-      const compileIssue = framework.toLowerCase().includes("go") ? goCompileIssue(body, graph.workspace.root, relatedFiles) : null;
       const runnable = hasAssertion(body, framework) && !staticIssue && !compileIssue;
       generated.push({
         id: `${run_id}-t${generated.length + 1}`,
@@ -2451,7 +2540,12 @@ export async function generateTests(
           }
         }
         const importErrors = isResolverFramework(framework) ? unresolvedLocalImports(body, genTestAbs, graph.workspace.root, declaredDeps) : [];
-        const compileIssue = framework.toLowerCase().includes("go") ? goCompileIssue(body, graph.workspace.root, relatedFiles) : null;
+        let compileIssue: string | null = null;
+        if (framework.toLowerCase().includes("go")) {
+          const checked = goCompile(body, graph.workspace.root, relatedFiles);
+          body = checked.body;
+          compileIssue = checked.issue;
+        }
         const runnable = isRunnable(body, framework, import_provenance, importErrors) && !compileIssue;
         if (!runnable) {
           const reason = unresolved_reason ?? compileIssue ?? runnableFailureReason(body, framework, import_provenance, importErrors, declaredDeps);
@@ -2675,7 +2769,12 @@ export async function generateTests(
       // from where the test will live. A test whose own import won't load is never
       // marked runnable.
       const importErrors = isResolverFramework(framework) ? unresolvedLocalImports(body, genTestAbs, graph.workspace.root, declaredDeps) : [];
-      const compileIssue = framework.toLowerCase().includes("go") ? goCompileIssue(body, graph.workspace.root, relatedFiles) : null;
+      let compileIssue: string | null = null;
+      if (framework.toLowerCase().includes("go")) {
+        const checked = goCompile(body, graph.workspace.root, relatedFiles);
+        body = checked.body;
+        compileIssue = checked.issue;
+      }
       const runnable = isRunnable(body, framework, import_provenance, importErrors) && !compileIssue;
       if (!runnable && !unresolved_reason) {
         unresolved_reason = compileIssue ?? runnableFailureReason(body, framework, import_provenance, importErrors, declaredDeps);

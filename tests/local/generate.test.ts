@@ -26,7 +26,7 @@ import {
   GraphEdge,
   CandidateEdge
 } from "../../src/local/graph/ontology.js";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 const CLOCK = () => "2026-06-07T00:00:00Z";
 
@@ -870,9 +870,218 @@ describe("generateTests — well-grounded behavior", () => {
     );
     const test = result.generated_tests[0];
     expect(test.runnable).toBe(false);
-    expect(test.unresolved_reason).toContain("imports module-path package");
-    expect(test.unresolved_reason).toContain("same-package or stdlib-only");
+    expect(test.unresolved_reason).toContain("github.com/go-chi/chi");
+    expect(test.unresolved_reason).toContain("could not run the target-package compile check");
     expect(runnableRunHintsFor(result.generated_tests)).toEqual([]);
+  });
+
+  it.skipIf(!GO)("keeps a generated Go test runnable when its module import resolves", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opro-go-valid-module-import-"));
+    try {
+      mkdirSync(join(root, "support"));
+      writeFileSync(join(root, "go.mod"), "module example.com/fixture\n\ngo 1.23\n");
+      writeFileSync(join(root, "service.go"), "package fixture\n\nfunc Current() int { return 1 }\n");
+      writeFileSync(join(root, "support", "support.go"), "package support\n\nfunc Value() int { return 1 }\n");
+      const behavior = makeNode({
+        kind: "UserFlow",
+        external_id: "flow:go-valid-module-import",
+        title: "Current value uses module support",
+        properties: { area: "go", example_behaviors: ["current value uses support"] },
+        evidence_strength: "candidate",
+        review_status: "auto_detected",
+        confidence: 0.6,
+        provenance: provenance("service.go")
+      });
+      const file = makeNode({
+        kind: "File",
+        external_id: "service.go",
+        title: "service.go",
+        properties: { role: "code", language: "go", file: "service.go" },
+        evidence_strength: "hard",
+        review_status: "auto_detected",
+        confidence: 1,
+        provenance: provenance("service.go")
+      });
+      const graph = makeGraph({
+        workspaceRoot: root,
+        nodes: [behavior, file],
+        edges: [
+          makeEdge({
+            from_external_id: behavior.external_id,
+            to_external_id: file.external_id,
+            relationship_type: "IMPLEMENTED_IN",
+            evidence_strength: "hard",
+            review_status: "auto_detected",
+            provenance: provenance("service.go")
+          })
+        ]
+      });
+      const provider: ModelProvider = {
+        providerName: "fake",
+        modelName: "valid-go-module-import",
+        complete: async () => [
+          "package guessed",
+          "",
+          "import (",
+          '  "testing"',
+          '  "example.com/fixture/support"',
+          ")",
+          "",
+          "func TestCurrentValueUsesModuleSupport(t *testing.T) {",
+          "  if support.Value() != Current() { t.Fatalf(\"values differ\") }",
+          "}"
+        ].join("\n")
+      };
+
+      const result = await generateTests(
+        graph,
+        { target_ids: [behavior.external_id], limit: 1 },
+        provider,
+        (rel) => (rel === "service.go" ? readFileSync(join(root, rel), "utf8") : null),
+        CLOCK
+      );
+      const test = result.generated_tests[0];
+      expect(test.runnable).toBe(true);
+      writeFileSync(join(root, "emitted_test.go"), test.body);
+      expect(() => execFileSync("go", ["test", "-run", "^$", "."], { cwd: root, stdio: "pipe" })).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!GO)("removes compiler-confirmed unused imports from the emitted Go test", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opro-go-unused-import-"));
+    try {
+      writeFileSync(join(root, "go.mod"), "module example.com/fixture\n\ngo 1.23\n");
+      writeFileSync(join(root, "service.go"), "package fixture\n\nfunc current() int { return 1 }\n");
+      const behavior = makeNode({
+        kind: "UserFlow",
+        external_id: "flow:go-unused-import",
+        title: "Current value is returned",
+        properties: { area: "go", example_behaviors: ["current value is returned"] },
+        evidence_strength: "candidate",
+        review_status: "auto_detected",
+        confidence: 0.6,
+        provenance: provenance("service.go")
+      });
+      const file = makeNode({
+        kind: "File",
+        external_id: "service.go",
+        title: "service.go",
+        properties: { role: "code", language: "go", file: "service.go" },
+        evidence_strength: "hard",
+        review_status: "auto_detected",
+        confidence: 1,
+        provenance: provenance("service.go")
+      });
+      const graph = makeGraph({
+        workspaceRoot: root,
+        nodes: [behavior, file],
+        edges: [
+          makeEdge({
+            from_external_id: behavior.external_id,
+            to_external_id: file.external_id,
+            relationship_type: "IMPLEMENTED_IN",
+            evidence_strength: "hard",
+            review_status: "auto_detected",
+            provenance: provenance("service.go")
+          })
+        ]
+      });
+      const provider: ModelProvider = {
+        providerName: "fake",
+        modelName: "unused-go-import",
+        complete: async () => [
+          "package guessed",
+          "",
+          "import (",
+          '  formatting "fmt"',
+          '  "testing"',
+          ")",
+          "",
+          "func TestCurrentValueIsReturned(t *testing.T) {",
+          "  if current() != 1 { t.Fatalf(\"unexpected value\") }",
+          "}"
+        ].join("\n")
+      };
+
+      const result = await generateTests(
+        graph,
+        { target_ids: [behavior.external_id], limit: 1 },
+        provider,
+        (rel) => (rel === "service.go" ? readFileSync(join(root, rel), "utf8") : null),
+        CLOCK
+      );
+      const test = result.generated_tests[0];
+      expect(test.runnable).toBe(true);
+      expect(test.body).not.toContain('formatting "fmt"');
+      writeFileSync(join(root, "emitted_test.go"), test.body);
+      expect(() => execFileSync("go", ["test", "-run", "^$", "."], { cwd: root, stdio: "pipe" })).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("grounds Go prompts with exact observed imports and the nearest module identity", () => {
+    const root = mkdtempSync(join(tmpdir(), "opro-go-import-context-"));
+    try {
+      mkdirSync(join(root, "service"));
+      writeFileSync(join(root, "go.mod"), "module example.com/root\n\ngo 1.23\n");
+      writeFileSync(join(root, "service", "go.mod"), "module example.com/nested\n\ngo 1.23\n");
+      const source = [
+        "package service",
+        "",
+        "import (",
+        '  "context"',
+        '  activitypb "go.temporal.io/api/activity/v1"',
+        '  "github.com/stretchr/testify/require"',
+        ")",
+        "",
+        "func Current(context.Context) *activitypb.ActivityOptions { return nil }"
+      ].join("\n");
+      writeFileSync(join(root, "service", "service.go"), source);
+      const behavior = makeNode({
+        kind: "UserFlow",
+        external_id: "flow:go-import-context",
+        title: "Current activity options are returned",
+        properties: { area: "go" },
+        evidence_strength: "hard",
+        review_status: "auto_detected",
+        confidence: 1,
+        provenance: provenance("service/service.go")
+      });
+      const file = makeNode({
+        kind: "File",
+        external_id: "service/service.go",
+        title: "service.go",
+        properties: { role: "code", language: "go", file: "service/service.go" },
+        evidence_strength: "hard",
+        review_status: "auto_detected",
+        confidence: 1,
+        provenance: provenance("service/service.go")
+      });
+      const graph = makeGraph({
+        workspaceRoot: root,
+        nodes: [behavior, file],
+        edges: [
+          makeEdge({
+            from_external_id: behavior.external_id,
+            to_external_id: file.external_id,
+            relationship_type: "IMPLEMENTED_IN",
+            evidence_strength: "hard",
+            review_status: "auto_detected",
+            provenance: provenance("service/service.go")
+          })
+        ]
+      });
+
+      const { ctx } = gatherContext(graph, behavior, "go test", (rel) => (rel === "service/service.go" ? source : null));
+      expect(ctx.go_module_paths).toEqual(["example.com/nested"]);
+      expect(ctx.go_target_package_paths).toEqual(["example.com/nested"]);
+      expect(ctx.go_import_paths).toEqual(["go.temporal.io/api/activity/v1", "github.com/stretchr/testify/require"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("chooses pytest for a behavior grounded in Python code before falling back to a repo-level JS framework", async () => {
@@ -2299,7 +2508,8 @@ describe("prompt v2 — existing coverage, subject imports, and framework runnab
 
     const go = buildGroundedUserPrompt({ ...base, framework: "go", code_context: ["svc/x.go"] }, "happy_path");
     expect(go).toContain("same-package Go test code");
-    expect(go).toContain("Do not import third-party or module-path packages");
+    expect(go).toContain("Do not import packages you do not use");
+    expect(go).toContain("Prefer stdlib and exact OBSERVED GO IMPORT PATHS");
 
     const java = buildGroundedUserPrompt({ ...base, framework: "junit", code_context: ["src/main/java/X.java"] }, "happy_path");
     expect(java).toContain("JUnit 5 code");
