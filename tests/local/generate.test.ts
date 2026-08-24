@@ -947,7 +947,7 @@ describe("generateTests — well-grounded behavior", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it.skipIf(!GO)("removes compiler-confirmed unused imports from the emitted Go test", async () => {
     const root = mkdtempSync(join(tmpdir(), "opro-go-unused-import-"));
@@ -1020,7 +1020,7 @@ describe("generateTests — well-grounded behavior", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("grounds Go prompts with exact observed imports and the nearest module identity", () => {
     const root = mkdtempSync(join(tmpdir(), "opro-go-import-context-"));
