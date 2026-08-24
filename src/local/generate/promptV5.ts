@@ -87,6 +87,9 @@ export interface BatchGenerationContext {
   weak_context: string[];
   flow_chain?: FlowStep[];
   scenarios: PlannedScenario[];
+  go_import_paths?: string[];
+  go_module_paths?: string[];
+  go_target_package_paths?: string[];
 }
 
 export interface ParsedScenarioTest {
@@ -122,11 +125,11 @@ export function getFrameworkRules(framework: string): string {
     return [
       "Go: same-package `_test.go` file. `func Test...(t *testing.T)`.",
       "MUST start with `package <name>` matching the package under test.",
-      "MUST import `\"testing\"` and every stdlib package used (\"fmt\", \"context\", \"strings\", \"errors\", \"time\", etc.).",
-      "For internal imports use the FULL module path from go.mod (e.g. `\"go.temporal.io/server/common/log\"` not `\"common/log\"`).",
-      "Never reference unexported symbols from outside the package.",
-      "Prefer stdlib `testing` over testify unless testify is already in SUBJECT IMPORTS.",
-      "If the test needs types or functions from other packages, import them by their full module path visible in the source excerpts."
+      "MUST import `\"testing\"`; do not import any package you do not use.",
+      "Prefer stdlib and exact OBSERVED GO IMPORT PATHS. Never invent a package path or derive a subpath from a GO MODULE IDENTITY.",
+      "Never import a TARGET GO PACKAGE PATH; call its identifiers directly because this is a same-package test.",
+      "Do not qualify lowercase (unexported) identifiers from imported packages; bare same-package identifiers may be unexported.",
+      "Prefer stdlib `testing` over testify unless testify appears in OBSERVED GO IMPORT PATHS."
     ].join(" ");
   }
   if (fw.includes("junit4") || fw.includes("java4")) {
@@ -263,6 +266,18 @@ export function buildBatchGenerationUserPromptV5(ctx: BatchGenerationContext): s
   if (ctx.actors.length) lines.push(`ACTORS: ${ctx.actors.join(", ")}`);
   lines.push(`FRAMEWORK: ${ctx.framework} | LAYER: ${ctx.test_layer}`);
   lines.push(`FRAMEWORK RULES: ${getFrameworkRules(ctx.framework)}`);
+  if (ctx.go_module_paths?.length) {
+    lines.push("GO MODULE IDENTITIES (module roots only — never guess package subpaths from these):");
+    for (const modulePath of ctx.go_module_paths) lines.push(`  ${modulePath}`);
+  }
+  if (ctx.go_import_paths?.length) {
+    lines.push("OBSERVED GO IMPORT PATHS (exact repo-evidenced package paths):");
+    for (const importPath of ctx.go_import_paths) lines.push(`  ${importPath}`);
+  }
+  if (ctx.go_target_package_paths?.length) {
+    lines.push("TARGET GO PACKAGE PATHS (do not import; this is a same-package test):");
+    for (const targetPath of ctx.go_target_package_paths) lines.push(`  ${targetPath}`);
+  }
   lines.push("");
   if (ctx.flow_chain?.length) {
     lines.push("FLOW CHAIN:");

@@ -39,6 +39,12 @@ export interface GenerationContext {
   existing_tests: string[];
   /** Working import lines reconstructed from graph metadata (linked test file's imports). */
   subject_imports: string[];
+  /** Exact non-stdlib Go imports observed in related source or test files. */
+  go_import_paths?: string[];
+  /** Module identities from the nearest go.mod files for the related Go sources. */
+  go_module_paths?: string[];
+  /** Same-package import paths that generated Go tests must not import. */
+  go_target_package_paths?: string[];
 }
 
 export function buildSystemPrompt(): string {
@@ -64,8 +70,10 @@ export function buildSystemPrompt(): string {
     "- Framework format rules:",
     "  - pytest: output a valid Python file with pytest-style `def test_...` functions and `assert` statements.",
     "  - Go: output a same-package `_test.go` body. Include `package <same package>`, `import \"testing\"`,",
-    "    and `func Test...(t *testing.T)`. Avoid third-party or module-path imports; use stdlib-only unless",
-    "    the evidence gives an existing same-package helper.",
+    "    and `func Test...(t *testing.T)`. Do not import packages you do not use. Prefer stdlib and exact",
+    "    OBSERVED GO IMPORT PATHS; never derive or invent a package subpath from a module name.",
+    "    Do not qualify lowercase (unexported) identifiers from imported packages. Bare same-package",
+    "    identifiers may be unexported because the generated test is rewritten into the target package.",
     "  - Java/JUnit: output a complete `.java` file, not a method fragment. Include a `class <Name>Test { ... }`,",
     "    the requested JUnit version's `@Test` import, and a JUnit assertion.",
     "  - TS/JS: output valid framework code for the named framework and use complete imports.",
@@ -103,6 +111,18 @@ export function buildGroundedUserPrompt(ctx: GenerationContext, bucket?: LocalBu
     lines.push("SUBJECT IMPORTS (working import lines from the repo's own test for this area — reuse them):");
     for (const imp of ctx.subject_imports) lines.push(imp);
   }
+  if (ctx.go_module_paths?.length) {
+    lines.push("GO MODULE IDENTITIES (module roots only — never guess package subpaths from these):");
+    for (const modulePath of ctx.go_module_paths) lines.push(`- ${modulePath}`);
+  }
+  if (ctx.go_import_paths?.length) {
+    lines.push("OBSERVED GO IMPORT PATHS (exact repo-evidenced package paths; prefer these for non-stdlib imports):");
+    for (const importPath of ctx.go_import_paths) lines.push(`- ${importPath}`);
+  }
+  if (ctx.go_target_package_paths?.length) {
+    lines.push("TARGET GO PACKAGE PATHS (do not import these; the test is rewritten into the same package):");
+    for (const targetPath of ctx.go_target_package_paths) lines.push(`- ${targetPath}`);
+  }
   if (ctx.source_excerpts.length) {
     lines.push("SOURCE EXCERPTS:");
     lines.push("Use these for understanding only; do not copy their lines verbatim into the test body.");
@@ -119,8 +139,10 @@ export function buildGroundedUserPrompt(ctx: GenerationContext, bucket?: LocalBu
     lines.push("- Emit a pytest file with at least one `def test_...` function and a real `assert`.");
   } else if (fw.includes("go")) {
     lines.push("- Emit same-package Go test code only: `package ...`, `import \"testing\"`, and `func Test...(t *testing.T)`.");
-    lines.push("- Do not import third-party or module-path packages such as `github.com/...`; prefer stdlib-only tests.");
-    lines.push("- Do not use testify/assert/require unless an existing same-package helper in the evidence clearly requires it.");
+    lines.push("- Do not import packages you do not use.");
+    lines.push("- Prefer stdlib and exact OBSERVED GO IMPORT PATHS. Never invent a package path or derive a subpath from a GO MODULE IDENTITY.");
+    lines.push("- Never import a TARGET GO PACKAGE PATH; call its identifiers directly because this is a same-package test.");
+    lines.push("- Do not qualify lowercase (unexported) identifiers from imported packages; bare same-package identifiers may be unexported.");
   } else if (fw.includes("junit") || fw.includes("java")) {
     if (fw.includes("junit4")) {
       lines.push("- Emit JUnit 4 code with `import org.junit.Test;` and `import static org.junit.Assert.*;`.");
