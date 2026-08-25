@@ -129,15 +129,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
         )) as { choices?: Array<{ message?: { content?: string }; finish_reason?: string }> };
         const choice = data.choices?.[0];
         const content = choice?.message?.content ?? "";
-        // Reasoning starvation: the model spent the ENTIRE completion budget on
-        // hidden reasoning and returned no visible content (finish_reason
-        // "length"). Long grounded prompts trigger this on gpt-5/o-series at the
-        // 4000-token seed. Retry ONCE with 4x the budget; if it still comes back
-        // empty, return "" and let the caller refuse to emit an empty test.
-        if (!content.trim() && choice?.finish_reason === "length" && !tried.has("starved")) {
-          tried.add("starved");
+        // A length stop means the completion is truncated even when it contains
+        // visible text. Returning that prefix turns cut-off source into a fake
+        // compiler/setup problem. Retry once with more room, then fail closed.
+        if (choice?.finish_reason === "length" && !tried.has("length-retry")) {
+          tried.add("length-retry");
           maxTokens = maxTokens * 4;
           continue;
+        }
+        if (choice?.finish_reason === "length") {
+          throw new Error("Model output was truncated at the token limit after one retry; no generated code was accepted.");
         }
         return content;
       } catch (e) {
@@ -188,19 +189,32 @@ export class AnthropicProvider implements ModelProvider {
     return this.cfg.model;
   }
   async complete(req: ModelCompletionRequest): Promise<string> {
-    const data = (await postJson(
-      this.fetchImpl,
-      `${this.cfg.baseUrl}/messages`,
-      { "x-api-key": this.cfg.apiKey ?? "", "anthropic-version": "2023-06-01" },
-      {
-        model: this.cfg.model,
-        max_tokens: req.maxTokens ?? 900,
-        temperature: req.temperature ?? 0.2,
-        system: req.system,
-        messages: [{ role: "user", content: req.user }]
+    let maxTokens = req.maxTokens ?? 900;
+    let retriedLength = false;
+    for (;;) {
+      const data = (await postJson(
+        this.fetchImpl,
+        `${this.cfg.baseUrl}/messages`,
+        { "x-api-key": this.cfg.apiKey ?? "", "anthropic-version": "2023-06-01" },
+        {
+          model: this.cfg.model,
+          max_tokens: maxTokens,
+          temperature: req.temperature ?? 0.2,
+          system: req.system,
+          messages: [{ role: "user", content: req.user }]
+        },
+        providerTimeoutMs(this.cfg.model)
+      )) as { content?: Array<{ text?: string }>; stop_reason?: string };
+      if (data.stop_reason === "max_tokens" && !retriedLength) {
+        retriedLength = true;
+        maxTokens *= 4;
+        continue;
       }
-    )) as { content?: Array<{ text?: string }> };
-    return (data.content ?? []).map((c) => c.text ?? "").join("");
+      if (data.stop_reason === "max_tokens") {
+        throw new Error("Model output was truncated at the token limit after one retry; no generated code was accepted.");
+      }
+      return (data.content ?? []).map((c) => c.text ?? "").join("");
+    }
   }
 }
 

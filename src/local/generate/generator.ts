@@ -42,6 +42,7 @@ import {
   type PlanningContext
 } from "./promptV5.js";
 import { BUCKET_LABEL, BucketEvidence, deriveBucketSignals, selectLocalBuckets } from "./buckets.js";
+import { generatedDraftRemediation } from "./draftGuidance.js";
 
 const MAX_LIMIT = 5;
 const DEFAULT_LIMIT = 3;
@@ -54,6 +55,7 @@ const STATIC_CHECK_TIMEOUT_MS = 3000;
 // before the target package is compiled. Keep the check authoritative instead
 // of downgrading valid generated tests while dependencies are still downloading.
 const GO_COMPILE_CHECK_TIMEOUT_MS = 120000;
+const V5_GENERATION_MAX_TOKENS = 4000;
 /** A source ref that names a test file (used to place a generated test next to it). */
 const TEST_REF_RE = /(\.(test|spec)\.[cm]?[jt]sx?$)|((^|\/)test\.[cm]?[jt]sx?$)|(_test\.[a-z]+$)|(_spec\.[a-z]+$)|((^|\/)test_[^/]+\.[a-z]+$)/i;
 
@@ -2422,7 +2424,8 @@ export async function generateTests(
         completions.push(
           await provider.complete({
             system: buildBatchGenerationSystemPromptV5(),
-            user: buildBatchGenerationUserPromptV5({ ...gc.ctx, scenarios: selected })
+            user: buildBatchGenerationUserPromptV5({ ...gc.ctx, scenarios: selected }),
+            maxTokens: V5_GENERATION_MAX_TOKENS
           })
         );
       } catch (e) {
@@ -2433,7 +2436,8 @@ export async function generateTests(
             completions.push(
               await provider.complete({
                 system: buildBatchGenerationSystemPromptV5(),
-                user: buildBatchGenerationUserPromptV5({ ...gc.ctx, scenarios: [scenario] })
+                user: buildBatchGenerationUserPromptV5({ ...gc.ctx, scenarios: [scenario] }),
+                maxTokens: V5_GENERATION_MAX_TOKENS
               })
             );
           } catch (singleErr) {
@@ -2575,7 +2579,7 @@ export async function generateTests(
               "",
               // Concise blocker: first clause only — the full remedy is one line.
               `Blocked by: ${reason.split(" — ")[0]}`,
-              "Fix: install this repo's dependencies / configure the test runner, then re-run \`opro start\`."
+              `Fix: ${generatedDraftRemediation(reason)}`
             ].join("\n"), gc.ctx.source_excerpts, "//").body;
           generated.push({
             id: `${run_id}-t${generated.length + 1}`,
