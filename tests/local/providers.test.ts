@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { OpenAICompatibleProvider, providerTimeoutMs } from "../../src/local/generate/providers.js";
+import { AnthropicProvider, OpenAICompatibleProvider, providerTimeoutMs } from "../../src/local/generate/providers.js";
 import type { ProviderConfig } from "../../src/local/localConfig.js";
 
 const OK = { choices: [{ message: { content: "GENERATED" } }] };
@@ -83,9 +83,22 @@ describe("OpenAICompatibleProvider reasoning starvation", () => {
       { status: 200, body: STARVED },
       { status: 200, body: STARVED }
     ]);
-    const out = await new OpenAICompatibleProvider(cfg("gpt-5"), f.fn).complete({ system: "s", user: "u" });
-    expect(out).toBe("");
+    await expect(
+      new OpenAICompatibleProvider(cfg("gpt-5"), f.fn).complete({ system: "s", user: "u" })
+    ).rejects.toThrow(/truncated.*token limit/i);
     expect(f.calls).toHaveLength(2);
+  });
+
+  it("retries non-empty output cut off at the token limit instead of returning truncated code", async () => {
+    const f = fakeFetch([
+      { status: 200, body: { choices: [{ message: { content: "package log\nfunc Test" }, finish_reason: "length" }] } },
+      { status: 200, body: OK }
+    ]);
+    const out = await new OpenAICompatibleProvider(cfg("gpt-4.1"), f.fn).complete({ system: "s", user: "u", maxTokens: 1000 });
+    expect(out).toBe("GENERATED");
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[0].max_tokens).toBe(1000);
+    expect(f.calls[1].max_tokens).toBe(4000);
   });
 
   it("does NOT retry a legitimately empty stop (finish_reason stop)", async () => {
@@ -93,6 +106,36 @@ describe("OpenAICompatibleProvider reasoning starvation", () => {
     const out = await new OpenAICompatibleProvider(cfg("gpt-5"), f.fn).complete({ system: "s", user: "u" });
     expect(out).toBe("");
     expect(f.calls).toHaveLength(1);
+  });
+});
+
+describe("AnthropicProvider completion truncation", () => {
+  const anthropicCfg: ProviderConfig = {
+    provider: "anthropic",
+    model: "claude-sonnet",
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKey: "test-key"
+  };
+
+  it("retries non-empty output stopped by max_tokens with a larger budget", async () => {
+    const f = fakeFetch([
+      { status: 200, body: { content: [{ text: "package log\nfunc Test" }], stop_reason: "max_tokens" } },
+      { status: 200, body: { content: [{ text: "COMPLETE" }], stop_reason: "end_turn" } }
+    ]);
+    const out = await new AnthropicProvider(anthropicCfg, f.fn).complete({ system: "s", user: "u", maxTokens: 1000 });
+    expect(out).toBe("COMPLETE");
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[0].max_tokens).toBe(1000);
+    expect(f.calls[1].max_tokens).toBe(4000);
+  });
+
+  it("fails closed when the retry is also truncated", async () => {
+    const truncated = { content: [{ text: "package log\nfunc Test" }], stop_reason: "max_tokens" };
+    const f = fakeFetch([{ status: 200, body: truncated }, { status: 200, body: truncated }]);
+    await expect(
+      new AnthropicProvider(anthropicCfg, f.fn).complete({ system: "s", user: "u", maxTokens: 1000 })
+    ).rejects.toThrow(/truncated.*token limit/i);
+    expect(f.calls).toHaveLength(2);
   });
 });
 

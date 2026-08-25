@@ -3624,6 +3624,8 @@ describe("generateTests — v5 planning JSON hardening", () => {
     const planning = requests.find(isPlanning);
     expect(planning?.temperature).toBe(0);
     expect(planning?.maxTokens).toBeGreaterThanOrEqual(1600);
+    const generation = requests.find((req) => !isPlanning(req) && !isRepair(req));
+    expect(generation?.maxTokens).toBeGreaterThanOrEqual(4000);
   });
 
   it("(c) repairs malformed planning JSON with ONE repair call, then generates", async () => {

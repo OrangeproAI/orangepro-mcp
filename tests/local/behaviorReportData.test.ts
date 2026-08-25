@@ -232,7 +232,7 @@ describe("buildBehaviorReportData", () => {
       flows: "1",
       proof: "0"
     });
-    expect(data.scan.tests).toEqual({ total: 1, integration: 1, unit: 0 });
+    expect(data.scan.tests).toEqual({ total: 1, integration: 1, unit: 0, unclassified: 0 });
     expect(data.behaviorGroups).toEqual([{ key: "src", count: 2 }]);
     expect(data.behaviors.map((b) => [b.sig, b.tier])).toEqual([
       ["OrdersController.create", "assoc"],
