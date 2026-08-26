@@ -87,12 +87,22 @@ export function renderCoverageReport(graph: LocalGraph, ledger: Ledger = emptyLe
       lines.push(`| ${language} | ${row.covered} / ${row.eligible} | ${row.covered_pct}% | ${row.symbols_with_spans} |`);
     }
     lines.push("");
+    lines.push("Coverage by test suite (inclusive counts; unit + integration must not be added because overlap is reported separately):");
+    lines.push("");
+    lines.push("| suite | covered symbols | eligible % |");
+    lines.push("| --- | ---: | ---: |");
+    lines.push(`| unit | ${runtime.by_suite.unit} | ${runtime.by_suite.unit_pct}% |`);
+    lines.push(`| integration | ${runtime.by_suite.integration} | ${runtime.by_suite.integration_pct}% |`);
+    lines.push(`| unit + integration overlap | ${runtime.by_suite.overlap} | ${runtime.by_suite.overlap_pct}% |`);
+    lines.push(`| unclassified | ${runtime.by_suite.unclassified} | ${runtime.by_suite.unclassified_pct}% |`);
+    lines.push(`| combined union | ${runtime.by_suite.union} | ${runtime.by_suite.union_pct}% |`);
+    lines.push("");
     lines.push("Artifacts:");
     lines.push("");
-    lines.push("| artifact | format | files | covered ranges |");
-    lines.push("| --- | --- | ---: | ---: |");
+    lines.push("| artifact | suite | provenance | command | format | files | covered ranges |");
+    lines.push("| --- | --- | --- | --- | --- | ---: | ---: |");
     for (const artifact of runtime.artifacts) {
-      lines.push(`| ${escapeMd(artifact.path)} | ${artifact.format} | ${artifact.files} | ${artifact.covered_ranges} |`);
+      lines.push(`| ${escapeMd(artifact.path)} | ${artifact.suite} | ${artifact.suite_source} | ${escapeMd(artifact.command ?? "-")} | ${artifact.format} | ${artifact.files} | ${artifact.covered_ranges} |`);
     }
     lines.push("");
     if (runtime.skipped_artifacts?.length) {

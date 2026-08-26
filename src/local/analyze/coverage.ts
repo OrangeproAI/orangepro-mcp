@@ -11,6 +11,7 @@ interface CoveredRange {
   end_line: number;
   artifact: string;
   format: RuntimeCoverageFormat;
+  suite?: CoverageSuite;
 }
 
 interface ParseResult {
@@ -21,7 +22,20 @@ interface ParseResult {
 interface ArtifactCandidate {
   path: string;
   format: RuntimeCoverageFormat;
+  suite: CoverageSuite;
+  suite_source: CoverageSuiteSource;
+  command?: string;
 }
+
+type CoverageSuite = "unit" | "integration" | "unclassified";
+type CoverageSuiteSource = "manifest" | "inferred" | "unclassified";
+
+interface CoverageSuiteManifestEntry {
+  suite: "unit" | "integration";
+  command?: string;
+}
+
+const COVERAGE_SUITE_MANIFEST = ".orangepro/coverage-suites.json";
 
 const GO_COVERAGE_CANDIDATES = new Set([
   "coverage.out",
@@ -69,9 +83,48 @@ function symbolLanguage(n: GraphNode): string {
   return "other";
 }
 
+function normalizedArtifactPath(value: string): string | null {
+  const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized || path.posix.isAbsolute(normalized) || normalized.split("/").includes("..")) return null;
+  return normalized;
+}
+
+function coverageSuiteManifest(root: string): Map<string, CoverageSuiteManifestEntry> {
+  const out = new Map<string, CoverageSuiteManifestEntry>();
+  try {
+    const raw = JSON.parse(readFileSync(path.join(root, COVERAGE_SUITE_MANIFEST), "utf8")) as { artifacts?: Record<string, unknown> };
+    for (const [artifactPath, value] of Object.entries(raw.artifacts ?? {})) {
+      const rel = normalizedArtifactPath(artifactPath);
+      if (!rel || !value || typeof value !== "object") continue;
+      const suite = (value as { suite?: unknown }).suite;
+      if (suite !== "unit" && suite !== "integration") continue;
+      const command = (value as { command?: unknown }).command;
+      out.set(rel, { suite, ...(typeof command === "string" && command.trim() ? { command: command.trim() } : {}) });
+    }
+  } catch {
+    // Missing or malformed provenance is fail-visible as unclassified coverage.
+  }
+  return out;
+}
+
+function inferredCoverageSuite(rel: string): CoverageSuite | null {
+  const normalized = `/${rel.toLowerCase().replace(/[^a-z0-9/._-]+/g, "-")}/`;
+  if (/(?:^|[/_.-])(integration|e2e|end-to-end)(?:[/_.-]|$)/.test(normalized)) return "integration";
+  if (/(?:^|[/_.-])unit(?:[/_.-]|$)/.test(normalized)) return "unit";
+  return null;
+}
+
+export function coverageSuiteForArtifact(root: string, rel: string): { suite: CoverageSuite; suite_source: CoverageSuiteSource; command?: string } {
+  const normalized = normalizedArtifactPath(rel) ?? rel.replace(/\\/g, "/");
+  const declared = coverageSuiteManifest(root).get(normalized);
+  if (declared) return { suite: declared.suite, suite_source: "manifest", ...(declared.command ? { command: declared.command } : {}) };
+  const inferred = inferredCoverageSuite(normalized);
+  return inferred ? { suite: inferred, suite_source: "inferred" } : { suite: "unclassified", suite_source: "unclassified" };
+}
+
 function artifactCandidates(root: string, files: FileRecord[]): ArtifactCandidate[] {
-  const out = new Map<string, ArtifactCandidate>();
-  const add = (candidate: ArtifactCandidate): void => {
+  const out = new Map<string, Pick<ArtifactCandidate, "path" | "format">>();
+  const add = (candidate: Pick<ArtifactCandidate, "path" | "format">): void => {
     if (!existsSync(path.join(root, candidate.path))) return;
     out.set(candidate.path, candidate);
   };
@@ -94,11 +147,15 @@ function artifactCandidates(root: string, files: FileRecord[]): ArtifactCandidat
   } catch {
     /* no generated coverage dir */
   }
-  return [...out.values()].sort((a, b) => a.path.localeCompare(b.path));
+  return [...out.values()]
+    .map((candidate): ArtifactCandidate => {
+      return { ...candidate, ...coverageSuiteForArtifact(root, candidate.path) };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function discoverNestedCoverageArtifacts(root: string): ArtifactCandidate[] {
-  const out: ArtifactCandidate[] = [];
+  const out: Array<Pick<ArtifactCandidate, "path" | "format">> = [];
   const addLcov = (rel: string): void => {
     if (existsSync(path.join(root, rel))) out.push({ path: rel, format: "lcov" });
   };
@@ -121,7 +178,7 @@ function discoverNestedCoverageArtifacts(root: string): ArtifactCandidate[] {
     }
   };
   visit("");
-  return out;
+  return out.map((candidate) => ({ ...candidate, ...coverageSuiteForArtifact(root, candidate.path) }));
 }
 
 function goModuleForDir(dir: string, goModulesByDir: Map<string, string>): { dir: string; module: string } | null {
@@ -409,10 +466,14 @@ function parseJacocoXml(root: string, rel: string, codeFiles: Set<string>): Pars
 }
 
 function parseCoverageArtifact(root: string, candidate: ArtifactCandidate, goModulesByDir: Map<string, string>, codeFiles: Set<string>): ParseResult {
-  if (candidate.format === "go-coverprofile") return parseGoCoverprofile(root, candidate.path, goModulesByDir, codeFiles);
-  if (candidate.format === "lcov") return parseLcov(root, candidate.path, codeFiles);
-  if (candidate.format === "coverage-py") return parseCoveragePyXml(root, candidate.path, codeFiles);
-  return parseJacocoXml(root, candidate.path, codeFiles);
+  const parsed = candidate.format === "go-coverprofile"
+    ? parseGoCoverprofile(root, candidate.path, goModulesByDir, codeFiles)
+    : candidate.format === "lcov"
+      ? parseLcov(root, candidate.path, codeFiles)
+      : candidate.format === "coverage-py"
+        ? parseCoveragePyXml(root, candidate.path, codeFiles)
+        : parseJacocoXml(root, candidate.path, codeFiles);
+  return { ...parsed, ranges: parsed.ranges.map((range) => ({ ...range, suite: candidate.suite })) };
 }
 
 function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
@@ -429,13 +490,20 @@ export function applyRuntimeCoverage(root: string, files: FileRecord[], nodes: G
   if (artifacts.length === 0) return undefined;
 
   const rangesByFile = new Map<string, CoveredRange[]>();
-  const artifactStats = new Map<string, { files: Set<string>; covered_ranges: number; format: RuntimeCoverageFormat }>();
+  const artifactStats = new Map<string, { files: Set<string>; covered_ranges: number; format: RuntimeCoverageFormat; suite: CoverageSuite; suite_source: CoverageSuiteSource; command?: string }>();
   const skippedArtifacts: NonNullable<RuntimeCoverageMeta["skipped_artifacts"]> = [];
   for (const artifact of artifacts) {
     const { ranges, skipped } = parseCoverageArtifact(root, artifact, goModulesByDir, codeFiles);
     if (skipped) skippedArtifacts.push(skipped);
     if (ranges.length === 0) continue;
-    const stat = artifactStats.get(artifact.path) ?? { files: new Set<string>(), covered_ranges: 0, format: artifact.format };
+    const stat = artifactStats.get(artifact.path) ?? {
+      files: new Set<string>(),
+      covered_ranges: 0,
+      format: artifact.format,
+      suite: artifact.suite,
+      suite_source: artifact.suite_source,
+      ...(artifact.command ? { command: artifact.command } : {})
+    };
     for (const range of ranges) {
       const list = rangesByFile.get(range.file);
       if (list) list.push(range);
@@ -449,6 +517,9 @@ export function applyRuntimeCoverage(root: string, files: FileRecord[], nodes: G
 
   const byLanguage: RuntimeCoverageMeta["by_language"] = {};
   const coveredSymbols = new Set<string>();
+  const unitSymbols = new Set<string>();
+  const integrationSymbols = new Set<string>();
+  const unclassifiedSymbols = new Set<string>();
   let totalEligible = 0;
   let symbolsWithSpans = 0;
   const ingestedLanguages = new Set<string>([...artifactStats.values()].map((s) => languageForFormat(s.format)));
@@ -470,12 +541,17 @@ export function applyRuntimeCoverage(root: string, files: FileRecord[], nodes: G
     const overlapping = ranges.filter((r) => overlaps(start, end, r.start_line, r.end_line));
     if (overlapping.length === 0) continue;
     const formats = [...new Set(overlapping.map((r) => r.format))].sort();
+    const suites = [...new Set(overlapping.map((r) => r.suite ?? "unclassified"))].sort();
     coveredSymbols.add(n.external_id);
+    if (suites.includes("unit")) unitSymbols.add(n.external_id);
+    if (suites.includes("integration")) integrationSymbols.add(n.external_id);
+    if (suites.includes("unclassified")) unclassifiedSymbols.add(n.external_id);
     bucket.covered++;
     n.properties = {
       ...n.properties,
       runtime_covered: true,
-      runtime_coverage_formats: formats
+      runtime_coverage_formats: formats,
+      runtime_coverage_suites: suites
     };
   }
 
@@ -485,6 +561,9 @@ export function applyRuntimeCoverage(root: string, files: FileRecord[], nodes: G
     artifacts: [...artifactStats.entries()].map(([path, s]) => ({
       path,
       format: s.format,
+      suite: s.suite,
+      suite_source: s.suite_source,
+      ...(s.command ? { command: s.command } : {}),
       files: s.files.size,
       covered_ranges: s.covered_ranges
     })),
@@ -493,6 +572,18 @@ export function applyRuntimeCoverage(root: string, files: FileRecord[], nodes: G
     symbols_with_spans: symbolsWithSpans,
     covered_symbols: coveredSymbols.size,
     covered_pct: pct(coveredSymbols.size, totalEligible),
-    by_language: byLanguage
+    by_language: byLanguage,
+    by_suite: {
+      unit: unitSymbols.size,
+      integration: integrationSymbols.size,
+      overlap: [...unitSymbols].filter((id) => integrationSymbols.has(id)).length,
+      unclassified: unclassifiedSymbols.size,
+      union: coveredSymbols.size,
+      unit_pct: pct(unitSymbols.size, totalEligible),
+      integration_pct: pct(integrationSymbols.size, totalEligible),
+      overlap_pct: pct([...unitSymbols].filter((id) => integrationSymbols.has(id)).length, totalEligible),
+      unclassified_pct: pct(unclassifiedSymbols.size, totalEligible),
+      union_pct: pct(coveredSymbols.size, totalEligible)
+    }
   };
 }

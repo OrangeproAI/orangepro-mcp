@@ -49,6 +49,19 @@ export interface BehaviorReportData {
     services: Array<[name: string, behaviorCount: number]>;
     serviceTotal: number;
     tests: { total: number; integration: number; unit: number; unclassified: number };
+    runtimeCoverage: null | {
+      eligible: number;
+      unit: number;
+      integration: number;
+      overlap: number;
+      unclassified: number;
+      union: number;
+      unitPct: number;
+      integrationPct: number;
+      overlapPct: number;
+      unclassifiedPct: number;
+      unionPct: number;
+    };
     excluded: { count: string; text: string };
   };
   behaviorGroups: Array<{ key: string; count: number }>;
@@ -93,6 +106,8 @@ export interface BehaviorReportData {
   generatedRunnableTotal: number;
   /** Grounded English drafts whose generated code was withheld. */
   generatedDraftTotal: number;
+  /** Terminal outcome of the report-visible generation lane for the latest start run. */
+  generationOutcome: NonNullable<LocalGraph["analysis"]>["start_generation"] | null;
   /** How many of those are rendered inline in risk cards (0 until linkage is wired). */
   shownCount: number;
 }
@@ -394,6 +409,7 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
   const integration = tests.filter((n) => n.properties.test_layer === "integration" || n.properties.test_layer === "api" || n.properties.test_layer === "e2e").length;
   const unit = tests.filter((n) => n.properties.test_layer === "unit" || n.properties.test_layer === "component").length;
   const denominator = graph.analysis?.denominator;
+  const runtime = graph.analysis?.runtime_coverage;
   const excludedCount =
     (denominator?.excluded_boilerplate ?? 0) +
     (denominator?.excluded_infra ?? 0) +
@@ -403,6 +419,21 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
     services: [...services.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 50),
     serviceTotal: services.size,
     tests: { total: tests.length, integration, unit, unclassified: Math.max(0, tests.length - integration - unit) },
+    runtimeCoverage: runtime
+      ? {
+          eligible: runtime.total_eligible_symbols,
+          unit: runtime.by_suite?.unit ?? 0,
+          integration: runtime.by_suite?.integration ?? 0,
+          overlap: runtime.by_suite?.overlap ?? 0,
+          unclassified: runtime.by_suite?.unclassified ?? runtime.covered_symbols,
+          union: runtime.by_suite?.union ?? runtime.covered_symbols,
+          unitPct: runtime.by_suite?.unit_pct ?? 0,
+          integrationPct: runtime.by_suite?.integration_pct ?? 0,
+          overlapPct: runtime.by_suite?.overlap_pct ?? 0,
+          unclassifiedPct: runtime.by_suite?.unclassified_pct ?? runtime.covered_pct,
+          unionPct: runtime.by_suite?.union_pct ?? runtime.covered_pct
+        }
+      : null,
     excluded: {
       count: excludedCount > 0 ? String(excludedCount) : "0",
       text: "non-behavior symbols were excluded from the behavior count — generated code, framework internals, test-inferred flows, and infrastructure plumbing."
@@ -1128,6 +1159,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     generatedTotal: graph.generated_tests?.length ?? 0,
     generatedRunnableTotal: (graph.generated_tests ?? []).filter((t) => t.runnable !== false).length,
     generatedDraftTotal: (graph.generated_tests ?? []).filter((t) => t.runnable === false).length,
+    generationOutcome: graph.analysis?.start_generation ?? null,
     shownCount: risks.reduce((acc, r) => acc + r.generatedTests.length, 0)
   };
 }

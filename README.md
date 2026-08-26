@@ -199,6 +199,50 @@ Static mapping works across many languages via tree-sitter. Dynamic proof is del
 
 ---
 
+## Highest-value local run
+
+Use the repository's own setup and test commands first, and keep unit and integration
+coverage in separate artifacts. Then run `opro start`; it performs analysis, ingests
+the artifacts, attempts targeted proof, generates report-visible drafts, and writes the
+final report. A separate `opro analyze` is unnecessary when `opro start` follows it.
+
+```bash
+# 1. Install/build exactly as the repository documents.
+# 2. Run the repository's unit and integration coverage commands separately.
+# 3. Record artifact provenance (example paths and commands):
+mkdir -p .orangepro
+# create .orangepro/coverage-suites.json using the schema below
+
+opro coverage .                    # optional preflight: discover/generate artifacts
+opro start . --proof-limit 5 --generate-limit 20
+```
+
+```json
+{
+  "artifacts": {
+    ".orangepro/coverage/unit.coverprofile": {
+      "suite": "unit",
+      "command": "make unit-test-coverage"
+    },
+    ".orangepro/coverage/integration.coverprofile": {
+      "suite": "integration",
+      "command": "make integration-test-coverage"
+    }
+  }
+}
+```
+
+Without this manifest, OrangePro conservatively infers clear `unit`/`integration` names
+and labels everything else `unclassified`; it never guesses that an aggregate profile is
+unit-only. The report shows unit, integration, their overlap, unclassified coverage, and
+the combined union separately. `--proof-limit` controls dynamic proof attempts (which
+may draft a test for proof); `--generate-limit` independently controls the additional
+report-visible risk-gap drafting lane. A generation run
+also records its terminal status and exact reason, so a compiler/import failure is not
+misreported as a generic dependency problem.
+
+---
+
 ## Privacy
 
 - **No stored source.** Reads code in-process. Never uploads to an OrangePro server.
@@ -224,7 +268,7 @@ opro rtm                      # traceability matrix
 opro export                   # metadata-only evidence pack
 opro mcp                      # run as MCP server (stdio)
 opro doctor                   # what evidence to add next
-opro coverage                 # ingest runtime coverage
+opro coverage                 # discover/generate artifacts; analyze or start ingests them
 ```
 
 Add `--json` to any read command for machine output. Run `opro help` for the full reference.

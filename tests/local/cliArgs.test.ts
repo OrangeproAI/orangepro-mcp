@@ -50,6 +50,14 @@ describe("parseArgs", () => {
     expect(positionals).toEqual(["start", "server/public"]);
   });
 
+  it("parses independent start proof and generation budgets", () => {
+    expect(VALUE_FLAGS.has("proof-limit")).toBe(true);
+    expect(VALUE_FLAGS.has("generate-limit")).toBe(true);
+    const { flags } = parseArgs(["start", ".", "--proof-limit", "5", "--generate-limit", "20"]);
+    expect(flags["proof-limit"]).toBe("5");
+    expect(flags["generate-limit"]).toBe("20");
+  });
+
   it("treats a value flag with no following token as a boolean", () => {
     const { flags } = parseArgs(["analyze", "--limit"]);
     expect(flags.limit).toBe(true);

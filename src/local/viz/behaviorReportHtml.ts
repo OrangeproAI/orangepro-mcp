@@ -374,6 +374,22 @@ body[data-mode="expert"] .simple-only{display:none!important}
       </div>
     </div>
   </div>
+  <div class="card" id="runtime-suite-card" hidden style="margin-top:16px">
+    <p class="card-lbl">Runtime coverage by suite — inclusive symbol counts; unit + integration overlap is shown separately and must not be added.</p>
+    <div class="split2">
+      <div><div class="v vp" id="runtime-unit">—</div><div class="k">Unit</div></div>
+      <div><div class="v vb" id="runtime-integration">—</div><div class="k">Integration</div></div>
+      <div><div class="v" id="runtime-overlap">—</div><div class="k">Both</div></div>
+      <div><div class="v" id="runtime-unclassified">—</div><div class="k">Unclassified</div></div>
+      <div><div class="v vg" id="runtime-union">—</div><div class="k">Combined union</div></div>
+    </div>
+  </div>
+  <div class="card" id="generation-outcome-card" hidden style="margin-top:16px">
+    <p class="card-lbl">Latest automated test-generation run</p>
+    <div class="v" id="generation-outcome-status">—</div>
+    <p class="card-sub" id="generation-outcome-counts"></p>
+    <p class="card-sub" id="generation-outcome-reason"></p>
+  </div>
 </section>
 
 <!-- TAB 2: BEHAVIORS — bridge from "methods" to "behaviors" -->
@@ -703,6 +719,22 @@ $("#test-total").textContent=D.scan.tests.total;
 $("#test-int").textContent=D.scan.tests.integration;
 $("#test-unit").textContent=D.scan.tests.unit;
 $("#test-unknown").textContent=D.scan.tests.unclassified;
+if(D.scan.runtimeCoverage){
+  const R=D.scan.runtimeCoverage;
+  $("#runtime-suite-card").hidden=false;
+  $("#runtime-unit").textContent=\`\${R.unit} (\${R.unitPct}%)\`;
+  $("#runtime-integration").textContent=\`\${R.integration} (\${R.integrationPct}%)\`;
+  $("#runtime-overlap").textContent=\`\${R.overlap} (\${R.overlapPct}%)\`;
+  $("#runtime-unclassified").textContent=\`\${R.unclassified} (\${R.unclassifiedPct}%)\`;
+  $("#runtime-union").textContent=\`\${R.union} (\${R.unionPct}%)\`;
+}
+if(D.generationOutcome){
+  const G=D.generationOutcome;
+  $("#generation-outcome-card").hidden=false;
+  $("#generation-outcome-status").textContent=String(G.status||"unknown").replaceAll("_"," ");
+  $("#generation-outcome-counts").textContent=G.generated+" draft(s): "+G.runnable+" runnable, "+Math.max(0,G.drafts-G.runnable)+" blocked; "+G.requested+" target(s) requested.";
+  $("#generation-outcome-reason").textContent=G.reason||"Generation completed; inspect each draft for its terminal validation result.";
+}
 
 // behaviors
 function humanizeSig(sig){

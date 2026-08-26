@@ -58,6 +58,47 @@ describe("runtime coverage ingestion", () => {
     expect(graph.edges.filter((e) => e.relationship_type === "COVERS" || e.relationship_type === "TESTED_BY")).toEqual([]);
   });
 
+  it("reports unit, integration, overlap, and union from an explicit suite manifest", () => {
+    const root = repo({
+      "svc/math.go": [
+        "package svc",
+        "func Add(a, b int) int {",
+        "  return a + b",
+        "}",
+        "func Sub(a, b int) int {",
+        "  return a - b",
+        "}"
+      ].join("\n"),
+      ".orangepro/coverage/unit.coverprofile": ["mode: set", "svc/math.go:2.24,4.2 1 1"].join("\n"),
+      ".orangepro/coverage/integration.coverprofile": ["mode: set", "svc/math.go:2.24,4.2 1 1", "svc/math.go:5.24,7.2 1 1"].join("\n"),
+      ".orangepro/coverage-suites.json": JSON.stringify({
+        artifacts: {
+          ".orangepro/coverage/unit.coverprofile": { suite: "unit", command: "make unit-test-coverage" },
+          ".orangepro/coverage/integration.coverprofile": { suite: "integration", command: "make integration-test-coverage" }
+        }
+      })
+    });
+
+    const graph = analyzeRepo(root, { readContent: true });
+    expect(graph.analysis.runtime_coverage?.by_suite).toEqual({
+      unit: 1,
+      integration: 2,
+      overlap: 1,
+      unclassified: 0,
+      union: 2,
+      unit_pct: 50,
+      integration_pct: 100,
+      overlap_pct: 50,
+      unclassified_pct: 0,
+      union_pct: 100
+    });
+    expect(graph.analysis.runtime_coverage?.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ".orangepro/coverage/unit.coverprofile", suite: "unit", suite_source: "manifest", command: "make unit-test-coverage" }),
+      expect.objectContaining({ path: ".orangepro/coverage/integration.coverprofile", suite: "integration", suite_source: "manifest", command: "make integration-test-coverage" })
+    ]));
+    expect(graph.nodes.find((n) => n.external_id.endsWith("#Add"))?.properties.runtime_coverage_suites).toEqual(["integration", "unit"]);
+  });
+
   it("detects generated Go coverprofiles under .orangepro/coverage", () => {
     const root = repo({
       "svc/math.go": ["package svc", "func Add(a, b int) int {", "  return a + b", "}"].join("\n"),
@@ -67,7 +108,7 @@ describe("runtime coverage ingestion", () => {
     const graph = analyzeRepo(root, { readContent: true });
     expect(graph.nodes.find((n) => n.external_id === "sym:svc/math.go#Add")?.properties.runtime_covered).toBe(true);
     expect(graph.analysis.runtime_coverage?.artifacts).toEqual([
-      { path: ".orangepro/coverage/go-root.coverprofile", format: "go-coverprofile", files: 1, covered_ranges: 1 }
+      { path: ".orangepro/coverage/go-root.coverprofile", format: "go-coverprofile", suite: "unclassified", suite_source: "unclassified", files: 1, covered_ranges: 1 }
     ]);
   });
 
@@ -89,7 +130,7 @@ describe("runtime coverage ingestion", () => {
     const graph = analyzeRepo(root, { readContent: true });
     expect(graph.nodes.find((n) => n.external_id === "sym:pkg/calc.py#add")?.properties.runtime_covered).toBe(true);
     expect(graph.analysis.runtime_coverage?.artifacts).toEqual([
-      { path: ".orangepro/coverage/python-root.coverage.xml", format: "coverage-py", files: 1, covered_ranges: 1 }
+      { path: ".orangepro/coverage/python-root.coverage.xml", format: "coverage-py", suite: "unclassified", suite_source: "unclassified", files: 1, covered_ranges: 1 }
     ]);
     expect(graph.edges.filter((e) => e.relationship_type === "COVERS" || e.relationship_type === "TESTED_BY")).toEqual([]);
   });
@@ -186,14 +227,18 @@ describe("runtime coverage ingestion", () => {
       language: "go",
       format: "go-coverprofile",
       ingestible: true,
-      source: "existing"
+      source: "existing",
+      suite: "unclassified",
+      suite_source: "unclassified"
     });
     expect(detectCoverageArtifacts(root)).toContainEqual({
       path: "webapp/coverage/lcov.info",
       language: "tsjs",
       format: "lcov",
       ingestible: true,
-      source: "existing"
+      source: "existing",
+      suite: "unclassified",
+      suite_source: "unclassified"
     });
   });
 
@@ -259,7 +304,9 @@ describe("runtime coverage ingestion", () => {
       language: "python",
       format: "coverage-py",
       ingestible: true,
-      source: "generated"
+      source: "generated",
+      suite: "unclassified",
+      suite_source: "unclassified"
     });
   });
 
@@ -303,7 +350,9 @@ describe("runtime coverage ingestion", () => {
       language: "java",
       format: "jacoco",
       ingestible: true,
-      source: "existing"
+      source: "existing",
+      suite: "unclassified",
+      suite_source: "unclassified"
     });
   });
 
@@ -409,7 +458,9 @@ describe("runtime coverage ingestion", () => {
       language: "tsjs",
       format: "lcov",
       ingestible: true,
-      source: "existing"
+      source: "existing",
+      suite: "unclassified",
+      suite_source: "unclassified"
     });
   });
 
@@ -448,7 +499,7 @@ describe("runtime coverage ingestion", () => {
     const graph = analyzeRepo(root, { readContent: true });
     expect(graph.nodes.find((n) => n.external_id === "sym:svc/math.go#Add")?.properties.runtime_covered).toBe(true);
     expect(graph.analysis.runtime_coverage?.artifacts).toEqual([
-      { path: "coverage.out", format: "go-coverprofile", files: 1, covered_ranges: 1 }
+      { path: "coverage.out", format: "go-coverprofile", suite: "unclassified", suite_source: "unclassified", files: 1, covered_ranges: 1 }
     ]);
   });
 
@@ -526,7 +577,7 @@ describe("runtime coverage ingestion", () => {
     expect(graph.nodes.find((n) => n.external_id === "sym:webapp/channels/src/app.ts#saveUser")?.properties.runtime_covered).toBeUndefined();
     expect(graph.nodes.find((n) => n.external_id === "sym:other/src/app.ts#loadUser")?.properties.runtime_covered).toBeUndefined();
     expect(graph.analysis.runtime_coverage?.artifacts).toEqual([
-      { path: "webapp/channels/coverage/lcov.info", format: "lcov", files: 1, covered_ranges: 1 }
+      { path: "webapp/channels/coverage/lcov.info", format: "lcov", suite: "unclassified", suite_source: "unclassified", files: 1, covered_ranges: 1 }
     ]);
   });
 
