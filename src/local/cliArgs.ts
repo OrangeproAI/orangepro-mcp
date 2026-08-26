@@ -19,6 +19,8 @@ export interface ParsedArgs {
 export const VALUE_FLAGS = new Set([
   "agent-pass",
   "auto-limit",
+  "proof-limit",
+  "generate-limit",
   "base",
   "client",
   "coverage-timeout-ms",

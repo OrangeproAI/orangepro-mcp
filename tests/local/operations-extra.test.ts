@@ -182,7 +182,7 @@ describe("operation-level coverage", () => {
     scaffoldRiskTargets(root, 7);
     const res = await opStart(
       root,
-      { source: root, aiFlows: false, autoLimit: 1, promptVersion: "v5" },
+      { source: root, aiFlows: false, proofLimit: 1, generateLimit: 7, promptVersion: "v5" },
       {
         ...deps,
         env: {},
@@ -198,11 +198,50 @@ describe("operation-level coverage", () => {
     const graph = opGaps(root, { limit: 20 });
     expect(graph.top_risk_gaps?.length).toBeGreaterThanOrEqual(7);
     expect(res.warnings.some((w) => w.includes("provider returned no accepted tests")), res.warnings.join("\n")).toBe(false);
+    expect(res.auto_prove.attempted).toBeLessThanOrEqual(1);
+    expect(res.generation).toMatchObject({
+      status: "completed",
+      generated: 7,
+      runnable: 7,
+      drafts: 0,
+      requested: 7
+    });
 
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
     expect(html).toContain('"generatedTotal":7');
     expect(html).toContain("behavior0 preserves observable output");
     expect(html).toContain("behavior6 preserves observable output");
+    expect(html).toContain('"generationOutcome":{"status":"completed"');
+  });
+
+  it("opStart reports the exact no-provider terminal generation reason", async () => {
+    const root = temp();
+    opInit(root, { ...deps, env: {} });
+    scaffoldRiskTargets(root, 2);
+    const res = await opStart(root, { source: root, aiFlows: false, proofLimit: 1, generateLimit: 2 }, { ...deps, env: {} });
+
+    expect(res.generation.status).toBe("no_provider");
+    expect(res.generation.generated).toBe(0);
+    expect(res.generation.reason).toContain("No model provider configured");
+    expect(res.generation.reason).toContain('provider="deterministic"');
+    const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
+    expect(html).toContain('"generationOutcome":{"status":"no_provider"');
+    expect(html).toContain("No model provider configured");
+  });
+
+  it("opStart deterministic mode uses the compatible scaffold and emits drafts", async () => {
+    const root = temp();
+    opInit(root, deps);
+    scaffoldRiskTargets(root, 2);
+    const res = await opStart(
+      root,
+      { source: root, aiFlows: false, provider: "deterministic", proofLimit: 1, generateLimit: 2 },
+      { ...deps, env: {} }
+    );
+
+    expect(res.generation.status).not.toBe("no_results");
+    expect(res.generation.generated).toBeGreaterThan(0);
+    expect(res.warnings.some((warning) => warning.includes("Planning output contained no JSON array"))).toBe(false);
   });
 
   it("opExplain throws for an unknown test id", () => {

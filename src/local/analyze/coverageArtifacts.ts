@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { reportProgress } from "../util/progress.js";
+import { coverageSuiteForArtifact } from "./coverage.js";
 
 export type CoverageArtifactFormat =
   | "go-coverprofile"
@@ -19,7 +20,12 @@ export interface CoverageArtifactInfo {
   format: CoverageArtifactFormat;
   ingestible: boolean;
   source: "existing" | "generated";
+  suite: "unit" | "integration" | "unclassified";
+  suite_source: "manifest" | "inferred" | "unclassified";
+  command?: string;
 }
+
+type DetectedCoverageArtifact = Omit<CoverageArtifactInfo, "source" | "suite" | "suite_source" | "command">;
 
 export interface CoverageCommandSuggestion {
   language: string;
@@ -64,7 +70,7 @@ const GENERATED_COVERAGE_DIR = ".orangepro/coverage";
 const MAVEN_JACOCO_REPORT_GOAL = "org.jacoco:jacoco-maven-plugin:0.8.12:report";
 const IGNORE_DIRS = new Set([".git", "node_modules", "vendor", "target", "dist", "build", ".orangepro", ".venv", "venv", ".tox", "__pycache__"]);
 
-const KNOWN_ARTIFACTS: Array<Omit<CoverageArtifactInfo, "source">> = [
+const KNOWN_ARTIFACTS: DetectedCoverageArtifact[] = [
   { path: "coverage.out", language: "go", format: "go-coverprofile", ingestible: true },
   { path: "cover.out", language: "go", format: "go-coverprofile", ingestible: true },
   { path: "coverprofile.out", language: "go", format: "go-coverprofile", ingestible: true },
@@ -185,6 +191,12 @@ export function prepareRuntimeCoverage(root: string, opts: RuntimeCoveragePrepar
   }
 
   const artifacts = detectCoverageArtifacts(absRoot);
+  const unclassified = artifacts.filter((artifact) => artifact.ingestible && artifact.suite === "unclassified");
+  if (unclassified.length > 0) {
+    warnings.push(
+      `${unclassified.length} ingestible coverage artifact(s) have no unit/integration provenance. Add ${COVERAGE_SUITE_MANIFEST_HELP} so OrangePro reports the suites separately.`
+    );
+  }
   const suggested_commands = suggestCoverageCommands(absRoot);
   return {
     root: absRoot,
@@ -196,10 +208,13 @@ export function prepareRuntimeCoverage(root: string, opts: RuntimeCoveragePrepar
   };
 }
 
+const COVERAGE_SUITE_MANIFEST_HELP = ".orangepro/coverage-suites.json with an artifacts map, for example {\"coverage/unit.coverprofile\":{\"suite\":\"unit\",\"command\":\"make unit-test-coverage\"}}";
+
 export function detectCoverageArtifacts(root: string): CoverageArtifactInfo[] {
   const absRoot = path.resolve(root);
   const out = new Map<string, CoverageArtifactInfo>();
-  const add = (info: CoverageArtifactInfo): void => {
+  const add = (raw: Omit<CoverageArtifactInfo, "suite" | "suite_source" | "command">): void => {
+    const info: CoverageArtifactInfo = { ...raw, ...coverageSuiteForArtifact(absRoot, raw.path) };
     const abs = path.join(absRoot, info.path);
     if (!existsSync(abs)) return;
     try {
@@ -530,7 +545,7 @@ function packageManagerFor(dir: string, pkg: Record<string, unknown>): "npm" | "
   return "npm";
 }
 
-function generatedCoverageArtifacts(root: string): Array<Omit<CoverageArtifactInfo, "source">> {
+function generatedCoverageArtifacts(root: string): DetectedCoverageArtifact[] {
   const dir = path.join(root, GENERATED_COVERAGE_DIR);
   let entries: import("node:fs").Dirent[];
   try {
@@ -540,7 +555,7 @@ function generatedCoverageArtifacts(root: string): Array<Omit<CoverageArtifactIn
   }
   return entries
     .filter((e) => e.isFile())
-    .flatMap((e): Array<Omit<CoverageArtifactInfo, "source">> => {
+    .flatMap((e): DetectedCoverageArtifact[] => {
       const rel = `${GENERATED_COVERAGE_DIR}/${e.name}`;
       if (/\.(coverprofile|out|cov)$/i.test(e.name)) {
         return [{ path: rel, language: "go" as const, format: "go-coverprofile" as const, ingestible: true }];
@@ -584,8 +599,8 @@ function findExistingGoCoverprofiles(root: string): string[] {
   return out;
 }
 
-function findExistingRuntimeCoverageReports(root: string): Array<Omit<CoverageArtifactInfo, "source">> {
-  const out = new Map<string, Omit<CoverageArtifactInfo, "source">>();
+function findExistingRuntimeCoverageReports(root: string): DetectedCoverageArtifact[] {
+  const out = new Map<string, DetectedCoverageArtifact>();
   const visit = (dir: string, rel: string): void => {
     let entries: import("node:fs").Dirent[];
     try {
