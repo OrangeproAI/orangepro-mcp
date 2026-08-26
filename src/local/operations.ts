@@ -57,6 +57,7 @@ import { doctorGraph } from "./score/doctor.js";
 import { findGaps } from "./gaps/gaps.js";
 import { rankRiskGaps } from "./score/risk.js";
 import { generateTests } from "./generate/generator.js";
+import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
 import { AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT, RunHint, runnableRunHintsFor } from "./generate/runHints.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
@@ -329,6 +330,10 @@ export interface StartOptions extends ProviderOverride {
    *  Existing associated tests run first WITHOUT a key. With a key, start also
    *  generates report-visible test drafts for the local top risk rows. */
   autoLimit?: number;
+  /** Dynamic targeted-proof attempt budget. Preferred replacement for --auto-limit. */
+  proofLimit?: number;
+  /** Independent report-visible generated-test draft budget (default 20). */
+  generateLimit?: number;
   /** --no-auto: skip auto-prove and restore analyze-only behavior. */
   noAuto?: boolean;
   /** Opt-in v5 batched generation for the auto-prove generation lane. Default (undefined) → v2/deterministic, unchanged. */
@@ -363,10 +368,21 @@ export interface StartResult {
   gaps: GapsResult;
   /** Auto-prove summary (generate→prove on start). Present on every start run. */
   auto_prove: AutoProveResult;
+  generation: StartGenerationResult;
   next_actions: string[];
   agent_workflow: string[];
   grounding_contract: string[];
   warnings: string[];
+}
+
+export interface StartGenerationResult {
+  status: "disabled" | "no_provider" | "no_targets" | "no_results" | "completed" | "completed_with_blockers" | "failed";
+  requested: number;
+  generated: number;
+  runnable: number;
+  drafts: number;
+  blockers: Partial<Record<GeneratedDraftBlocker, number>>;
+  reason?: string;
 }
 
 export interface OperationDeps {
@@ -2008,10 +2024,13 @@ export async function opStart(
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
   const staticSnapshot = writeStartStaticSnapshot(root, opts.baseRef, warnings);
 
-  const providerConfigured = deps.aiProvider !== undefined || resolveProviderConfig(providerEnv, providerOpts) !== null;
+  const aiProviderConfigured = deps.aiProvider !== undefined || resolveProviderConfig(providerEnv, providerOpts) !== null;
+  const resolvedGenerationProvider = deps.aiProvider ?? resolveGenerationProvider(providerEnv, providerOpts);
+  const generationProviderConfigured = resolvedGenerationProvider !== null;
+  const deterministicGeneration = resolvedGenerationProvider?.providerName === "deterministic";
   let aiLinks: StartAiResult = { status: "skipped", reason: "AI candidate links disabled for this run." };
   if (opts.ai !== false) {
-    if (!providerConfigured) {
+    if (!aiProviderConfigured) {
       reportProgress("ai: skipped — no local provider key/base URL found", { current: 5, total: 8 });
       aiLinks = {
         status: "skipped",
@@ -2035,7 +2054,7 @@ export async function opStart(
 
   let aiFlows: StartAiFlowsResult = { status: "skipped", reason: "AI candidate flows disabled for this run." };
   if (opts.ai !== false && opts.aiFlows !== false) {
-    if (!providerConfigured) {
+    if (!aiProviderConfigured) {
       aiFlows = {
         status: "skipped",
         reason: "No model provider configured; set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_BASE_URL to auto-apply AI candidate flows."
@@ -2069,7 +2088,7 @@ export async function opStart(
     autoProveResult = await autoProve(
       root,
       {
-        autoLimit: opts.autoLimit,
+        autoLimit: opts.proofLimit ?? opts.autoLimit,
         noAuto: opts.noAuto,
         provider: providerOpts.provider,
         model: providerOpts.model,
@@ -2095,7 +2114,31 @@ export async function opStart(
     warnings.push(`auto-prove skipped: ${reason}`);
   }
 
-  if (!opts.noAuto && providerConfigured && opts.ai !== false) {
+  const generationLimit = Math.max(0, Math.min(50, Math.floor(opts.generateLimit ?? START_GENERATE_RISK_LIMIT)));
+  let generationResult: StartGenerationResult = {
+    status: "disabled",
+    requested: generationLimit,
+    generated: 0,
+    runnable: 0,
+    drafts: 0,
+    blockers: {},
+    reason: opts.noAuto
+      ? "Test generation was disabled by --no-auto."
+      : opts.ai === false
+        ? "Test generation was disabled by --no-ai."
+        : generationLimit === 0
+          ? "Test generation budget is 0 (--generate-limit 0)."
+          : undefined
+  };
+
+  if (!opts.noAuto && opts.ai !== false && generationLimit > 0 && !generationProviderConfigured) {
+    generationResult = {
+      ...generationResult,
+      status: "no_provider",
+      reason: NO_PROVIDER_MESSAGE
+    };
+    warnings.push(`generate: ${NO_PROVIDER_MESSAGE}`);
+  } else if (!opts.noAuto && generationProviderConfigured && opts.ai !== false && generationLimit > 0) {
     try {
       const graphForGeneration = loadGraph(workspacePaths(root).graphPath);
       const generatedTargets = new Set(
@@ -2103,14 +2146,20 @@ export async function opStart(
       );
       const targetIds = rankRiskGaps(graphForGeneration, {
         repoRoot: root,
-        limit: START_GENERATE_RISK_LIMIT,
+        limit: generationLimit,
         provenIds: provenSymbolIds(graphForGeneration, loadLedger(root))
       })
         .map((gap) => gap.id)
         .filter((id) => !generatedTargets.has(id));
-      if (targetIds.length) {
+      if (!targetIds.length) {
+        generationResult = {
+          ...generationResult,
+          status: "no_targets",
+          reason: "No eligible ungenerated risk targets were found."
+        };
+      } else {
         reportProgress(`generate: drafting tests for top ${targetIds.length} risk target(s)`, { current: 6, total: 8 });
-        let accepted = 0;
+        const generatedDrafts: GeneratedTest[] = [];
         for (let i = 0; i < targetIds.length; i += START_GENERATE_BATCH_LIMIT) {
           const batch = targetIds.slice(i, i + START_GENERATE_BATCH_LIMIT);
           const generated = await opGenerate(
@@ -2119,19 +2168,62 @@ export async function opStart(
               ...providerOpts,
               target_ids: batch,
               limit: batch.length,
-              prompt_version: opts.promptVersion ?? "v5"
+              // The offline deterministic stand-in emits the established v2 scaffold; v5 is
+              // a two-phase model planning protocol and must not be selected implicitly for it.
+              prompt_version: opts.promptVersion ?? (deterministicGeneration ? "v2" : "v5")
             },
             providerDeps
           );
-          accepted += generated.generated_tests.filter((t) => t.runnable !== false).length;
+          generatedDrafts.push(...generated.generated_tests);
           warnings.push(...generated.warnings.map((w) => `generate: ${w}`));
         }
-        if (accepted === 0) warnings.push("generate: provider returned no accepted tests for the top risk targets.");
+        const blockers: Partial<Record<GeneratedDraftBlocker, number>> = {};
+        for (const draft of generatedDrafts.filter((test) => test.runnable === false)) {
+          const blocker = classifyGeneratedDraftBlocker(draft.unresolved_reason);
+          blockers[blocker] = (blockers[blocker] ?? 0) + 1;
+        }
+        const runnable = generatedDrafts.filter((test) => test.runnable !== false).length;
+        generationResult = {
+          status: generatedDrafts.length === 0
+            ? "no_results"
+            : generatedDrafts.some((test) => test.runnable === false)
+              ? "completed_with_blockers"
+              : "completed",
+          requested: targetIds.length,
+          generated: generatedDrafts.length,
+          runnable,
+          drafts: generatedDrafts.length - runnable,
+          blockers,
+          ...(generatedDrafts.length === 0
+            ? { reason: "The provider returned no generated-test drafts for the selected risk targets." }
+            : {})
+        };
+        if (generatedDrafts.length === 0) warnings.push(`generate: ${generationResult.reason}`);
       }
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = redactSecrets(err instanceof Error ? err.message : String(err));
+      generationResult = {
+        ...generationResult,
+        status: "failed",
+        reason
+      };
       warnings.push(`generate skipped: ${reason}`);
     }
+  }
+
+  try {
+    const graphWithGeneration = loadGraph(workspacePaths(root).graphPath);
+    if (!graphWithGeneration.analysis) throw new Error("analysis metadata is missing after analyze");
+    saveGraph(workspacePaths(root).graphPath, {
+      ...graphWithGeneration,
+      updated_at: deps.clock(),
+      analysis: {
+        ...graphWithGeneration.analysis,
+        start_generation: generationResult
+      }
+    });
+  } catch (error) {
+    warnings.push(`generation outcome not persisted: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // G1: persist the distilled, already-redacted attempt classifications so
@@ -2263,6 +2355,7 @@ export async function opStart(
     changed,
     gaps,
     auto_prove: autoProveResult,
+    generation: generationResult,
     next_actions: nextActions,
     agent_workflow: AGENT_RUN_WORKFLOW,
     grounding_contract: GROUNDING_CONTRACT,

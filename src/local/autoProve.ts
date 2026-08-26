@@ -19,7 +19,7 @@ import { generateTests, readDeclaredDeps, unresolvedLocalImports } from "./gener
 import { GENERATED_DIR, runHintsFor } from "./generate/runHints.js";
 import { rankRiskGaps } from "./score/risk.js";
 import { resolveProviderConfig } from "./localConfig.js";
-import { buildProvider } from "./generate/providers.js";
+import { buildProvider, DeterministicProvider } from "./generate/providers.js";
 import { resolveContained } from "./reprove/paths.js";
 import { buildRtm } from "./rtm.js";
 import { loadLedger } from "./ledger.js";
@@ -973,10 +973,12 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     };
   }
 
-  // Key gate applies ONLY to the generation lane. No provider key ⇒ generation is skipped
-  // (no files, no fake proof) with explicit guidance; the existing-tests lane still counts.
-  const providerConfig = resolveProviderConfig(deps.env, { provider: opts.provider, model: opts.model });
-  if (!providerConfig) {
+  // Provider gate applies ONLY to the generation lane. Explicit deterministic mode is a
+  // valid offline provider; otherwise a real provider key/config is required.
+  const deterministic = opts.provider === "deterministic"
+    || /^(1|true|yes)$/i.test(String(deps.env.ORANGEPRO_ALLOW_DETERMINISTIC ?? ""));
+  const providerConfig = deterministic ? null : resolveProviderConfig(deps.env, { provider: opts.provider, model: opts.model });
+  if (!providerConfig && !deterministic) {
     const status: AutoProveResult["status"] = ex.proven > 0 ? "proven-run" : ex.attempted > 0 ? "ran-no-proof" : "skipped-no-key";
     return {
       ran: ex.attempted > 0,
@@ -991,7 +993,7 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     };
   }
 
-  const provider = buildProvider(providerConfig);
+  const provider = deterministic ? new DeterministicProvider() : buildProvider(providerConfig!);
   const generate = deps.generate ?? generateTests;
   const reader = fileReaderFor(sourceRoot);
 

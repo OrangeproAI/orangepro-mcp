@@ -499,11 +499,15 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
       expect(r.generatedCategories).toEqual([]);
     }
     expect(data.generatedTotal).toBe(0);
+    expect(data.generatedRunnableTotal).toBe(0);
+    expect(data.generatedDraftTotal).toBe(0);
     expect(data.shownCount).toBe(0);
     expect(html).toContain('"generatedTotal":0');
     // And none of the v6 demo's fabricated snippets survive the DATA swap.
     expect(html).not.toContain("expired token rejects at TokenService boundary");
     expect(html).not.toContain("TokenService.verify throws");
+    expect(data.scan.tests.integration + data.scan.tests.unit + data.scan.tests.unclassified).toBe(data.scan.tests.total);
+    expect(html).toContain("Unclassified");
   });
 
   it("links REAL generated tests to their risk row verbatim (name, type, body)", () => {
@@ -538,9 +542,11 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(withTests!.generatedTests[0].concern).toBe("integration");
     expect(withTests!.generatedTests[0].code).toContain("rejects invalid order");
     expect(data.generatedTotal).toBe(1);
+    expect(data.generatedRunnableTotal).toBe(1);
+    expect(data.generatedDraftTotal).toBe(0);
     expect(data.shownCount).toBe(1);
     expect(html).toContain("Generated tests");
-    expect(html).toContain("Flows with tests");
+    expect(html).toContain("Flows with generated output");
     expect(html).toContain('let activeRiskFilter=generatedRiskCount?"generated":"all"');
     expect(html).toContain("No generated tests");
     expect(html).toContain("high-risk flows left");
@@ -653,7 +659,33 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(intentHtml).toContain("Generated draft attached; not coverage or proof");
     expect(intentHtml).not.toContain("covered)");
     const html = renderBehaviorReport(intentOnly);
-    expect(html).toContain("Manual tests — env setup needed");
+    expect(html).toContain("Generated drafts — code withheld");
+    expect(intentOnly.generatedTotal).toBe(1);
+    expect(intentOnly.generatedRunnableTotal).toBe(0);
+    expect(intentOnly.generatedDraftTotal).toBe(1);
+    expect(row2!.todo).toContain("import path");
+    expect(row2!.todo).not.toContain("Install this repo's dependencies");
+    expect(html).toContain("grounded draft");
+    expect(html).not.toContain("1 runnable generated test");
+  });
+
+  it("labels generated-code compiler failures as draft repair work, not missing repo setup", () => {
+    const g = graph();
+    const sym = g.nodes.find((n) => n.kind === "CodeSymbol" && (n.title || "").length > 0)!;
+    g.generated_tests = [{
+      id: "gen:compile", run_id: "run:g", title: "invalid generated helper",
+      test_type: "unit", framework_hint: "go",
+      body: "Scenario: generated helper\nBlocked by: Go compile check failed: undefined: testLogger",
+      grounding: { entity_ids: [sym.external_id], source_refs: [], weak_relationships_used: [] },
+      weak_evidence_used: false, target_symbol_external_id: sym.external_id,
+      runnable: false,
+      unresolved_reason: "Go compile check failed: undefined: testLogger"
+    }];
+    const data = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
+    const row = data.risks.find((r) => r.generatedTests.length > 0)!;
+    expect(row.todo).toContain("generated code");
+    expect(row.todo).toContain("regenerate or repair");
+    expect(row.todo).not.toContain("Install this repo's dependencies");
   });
 
   it("category strip distinguishes generated drafts from unfilled applicable categories", () => {

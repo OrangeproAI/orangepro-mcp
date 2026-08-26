@@ -124,7 +124,7 @@ const HELP = `opro — OrangePro (local-first, BYOK, metadata-only artifacts)
 
 Usage:
   opro                                       # one-command start: analyze, optional AI links + flows, report, RTM, agent handoff
-  opro start [path] [--base <ref>] [--no-ai] [--no-ai-flows] [--generate-coverage] [--prompt-version v5] [--json]
+  opro start [path] [--base <ref>] [--no-ai] [--no-ai-flows] [--generate-coverage] [--proof-limit 5] [--generate-limit 20] [--prompt-version v5] [--json]
   opro roast [path] [--limit 5] [--json]     # keyless: find passing tests whose targeted mutant still survives
   opro init
   opro setup                                 # interactive: choose a default model provider + model (saved locally)
@@ -252,6 +252,8 @@ async function main(): Promise<number> {
           aiAll: asBool(flags["ai-all"], false),
           aiFlows: !asBool(flags["no-ai-flows"], false),
           autoLimit: numericFlag(flags["auto-limit"]),
+          proofLimit: numericFlag(flags["proof-limit"]),
+          generateLimit: numericFlag(flags["generate-limit"]),
           noAuto: asBool(flags["no-auto"], false),
           promptVersion: flags["prompt-version"] === "v5" ? "v5" : undefined,
           provider: typeof flags.provider === "string" ? flags.provider : undefined,
@@ -275,6 +277,9 @@ async function main(): Promise<number> {
           out("  Proof next:            no behavior is dynamically proven yet; run from a coding agent with a model key and follow the generated-test proof handoff.");
         }
         const ap = res.auto_prove;
+        const gen = res.generation;
+        out(`  Test generation:       ${gen.status} — ${gen.runnable}/${gen.generated} runnable, ${Math.max(0, gen.drafts - gen.runnable)} blocked draft(s)`);
+        if (gen.reason) out(`    generation reason:   ${gen.reason}`);
         if (ap.status === "skipped-no-key") {
           out(`  Dynamic proof:         skipped — ${ap.reason ?? "no provider key"}`);
         } else if (ap.status === "disabled") {
@@ -557,7 +562,8 @@ async function main(): Promise<number> {
         if (res.artifacts.length) {
           out("  found:");
           for (const a of res.artifacts) {
-            out(`    ${a.path} (${a.language}, ${a.format}${a.ingestible ? ", ingestible now" : ", detected only"})`);
+            out(`    ${a.path} (${a.language}, ${a.format}, suite=${a.suite} [${a.suite_source}]${a.ingestible ? ", ingestible now" : ", detected only"})`);
+            if (a.command) out(`      command: ${a.command}`);
           }
         } else {
           out("  found: none");

@@ -183,6 +183,21 @@ describe("autoProve — key gate", () => {
     expect(existsSync(generatedDir(W))).toBe(false);
     expect(opRtm(W, { format: "json" }).summary.proven).toBe(0);
   });
+
+  it("accepts explicit deterministic mode without a provider key", async () => {
+    const W = makeWorkspace();
+    const gen = fakeGenerate([fakeTest()]);
+    const res = await autoProve(
+      W,
+      { autoLimit: 1, provider: "deterministic" },
+      baseDeps(NO_ENV, { generate: gen, dynamicProofRunner: proofRunner("non_killing") })
+    );
+
+    expect(gen).toHaveBeenCalledOnce();
+    expect(res.status).toBe("ran-no-proof");
+    expect(res.attempted).toBe(1);
+    expect(res.reason).not.toBe(NO_KEY_MESSAGE);
+  });
 });
 
 describe("autoProve — proof outcomes", () => {

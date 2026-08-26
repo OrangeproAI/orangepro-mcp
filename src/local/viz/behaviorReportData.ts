@@ -6,6 +6,7 @@ import { buildRtm, type RtmRow } from "../rtm.js";
 import { inspectRiskInputHealth, isEntryPoint, rankRiskGaps, type RiskGap } from "../score/risk.js";
 import { ORANGEPRO_VERSION } from "../version.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
+import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "../generate/draftGuidance.js";
 
 export interface BehaviorReportData {
   repo: string;
@@ -47,7 +48,20 @@ export interface BehaviorReportData {
   scan: {
     services: Array<[name: string, behaviorCount: number]>;
     serviceTotal: number;
-    tests: { total: number; integration: number; unit: number };
+    tests: { total: number; integration: number; unit: number; unclassified: number };
+    runtimeCoverage: null | {
+      eligible: number;
+      unit: number;
+      integration: number;
+      overlap: number;
+      unclassified: number;
+      union: number;
+      unitPct: number;
+      integrationPct: number;
+      overlapPct: number;
+      unclassifiedPct: number;
+      unionPct: number;
+    };
     excluded: { count: string; text: string };
   };
   behaviorGroups: Array<{ key: string; count: number }>;
@@ -74,7 +88,7 @@ export interface BehaviorReportData {
      */
     applicableCategories: string[];
     generatedCategories: string[];
-    generatedTests: Array<{ name: string; concern?: string; technique?: string; bucket?: string; assertion?: string; code: string; runnable?: boolean }>;
+    generatedTests: Array<{ name: string; concern?: string; technique?: string; bucket?: string; assertion?: string; code: string; runnable?: boolean; blocker?: GeneratedDraftBlocker }>;
   }>;
   /** Verbatim "why 0 dynamic proof" explainer — populated ONLY when summary.proven === 0. Display copy; changes no classification. */
   zeroProofExplainer: { title: string; body: string[] } | null;
@@ -88,6 +102,12 @@ export interface BehaviorReportData {
     flows: { shown: number; prunedByCaps: number };
   };
   generatedTotal: number;
+  /** Generated tests that passed local runnability validation. */
+  generatedRunnableTotal: number;
+  /** Grounded English drafts whose generated code was withheld. */
+  generatedDraftTotal: number;
+  /** Terminal outcome of the report-visible generation lane for the latest start run. */
+  generationOutcome: NonNullable<LocalGraph["analysis"]>["start_generation"] | null;
   /** How many of those are rendered inline in risk cards (0 until linkage is wired). */
   shownCount: number;
 }
@@ -389,6 +409,7 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
   const integration = tests.filter((n) => n.properties.test_layer === "integration" || n.properties.test_layer === "api" || n.properties.test_layer === "e2e").length;
   const unit = tests.filter((n) => n.properties.test_layer === "unit" || n.properties.test_layer === "component").length;
   const denominator = graph.analysis?.denominator;
+  const runtime = graph.analysis?.runtime_coverage;
   const excludedCount =
     (denominator?.excluded_boilerplate ?? 0) +
     (denominator?.excluded_infra ?? 0) +
@@ -397,7 +418,22 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
   return {
     services: [...services.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 50),
     serviceTotal: services.size,
-    tests: { total: tests.length, integration, unit },
+    tests: { total: tests.length, integration, unit, unclassified: Math.max(0, tests.length - integration - unit) },
+    runtimeCoverage: runtime
+      ? {
+          eligible: runtime.total_eligible_symbols,
+          unit: runtime.by_suite?.unit ?? 0,
+          integration: runtime.by_suite?.integration ?? 0,
+          overlap: runtime.by_suite?.overlap ?? 0,
+          unclassified: runtime.by_suite?.unclassified ?? runtime.covered_symbols,
+          union: runtime.by_suite?.union ?? runtime.covered_symbols,
+          unitPct: runtime.by_suite?.unit_pct ?? 0,
+          integrationPct: runtime.by_suite?.integration_pct ?? 0,
+          overlapPct: runtime.by_suite?.overlap_pct ?? 0,
+          unclassifiedPct: runtime.by_suite?.unclassified_pct ?? runtime.covered_pct,
+          unionPct: runtime.by_suite?.union_pct ?? runtime.covered_pct
+        }
+      : null,
     excluded: {
       count: excludedCount > 0 ? String(excludedCount) : "0",
       text: "non-behavior symbols were excluded from the behavior count — generated code, framework internals, test-inferred flows, and infrastructure plumbing."
@@ -578,7 +614,8 @@ function riskGeneratedTests(
       .filter(Boolean)
       .join(" · "),
     code: t.body,
-    runnable: t.runnable !== false
+    runnable: t.runnable !== false,
+    ...(t.runnable === false ? { blocker: classifyGeneratedDraftBlocker(t.unresolved_reason) } : {})
   }));
 }
 
@@ -951,13 +988,29 @@ function riskTodo(
   risk: RiskGap,
   verb: string,
   path: string,
-  generatedTests: Array<{ runnable?: boolean }>
+  generatedTests: Array<{ runnable?: boolean; blocker?: GeneratedDraftBlocker }>
 ): string {
   if (generatedTests.length && generatedTests.every((t) => t.runnable !== false)) {
     return "Run the generated test below in your repo; follow its prove handoff so a mutation failure can mint Dynamically Proven.";
   }
   if (generatedTests.length) {
-    return "Install this repo's dependencies / set up the test runner, then re-run `opro start` to turn the English intents below into runnable tests.";
+    const blockers = new Set(generatedTests.map((t) => t.blocker ?? "unknown"));
+    if (blockers.size === 1) {
+      const blocker = [...blockers][0];
+      if (blocker === "generated_code") {
+        return "OrangePro withheld the generated code because compile validation found invalid or invented generated code. Review the blocker below, then regenerate or repair the draft; installing dependencies is not the fix.";
+      }
+      if (blocker === "unresolved_import") {
+        return "OrangePro withheld the generated code because an import path did not resolve. Verify that the import exists and is declared by this repo; install dependencies only when the repo expects it, then regenerate.";
+      }
+      if (blocker === "toolchain_or_runner") {
+        return "OrangePro could not validate the generated test because the named toolchain or test runner is unavailable. Install/configure it, then re-run `opro start`.";
+      }
+      if (blocker === "validation_timeout") {
+        return "OrangePro's generated-test validation timed out. Warm the dependency cache or raise the named validation timeout, then re-run `opro start`.";
+      }
+    }
+    return "OrangePro withheld generated code for the reasons shown below. Review each blocker, then repair or regenerate the drafts; do not assume repository dependencies are missing.";
   }
   const call =
     verb !== "BEHAVIOR"
@@ -1104,6 +1157,9 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
       }
     },
     generatedTotal: graph.generated_tests?.length ?? 0,
+    generatedRunnableTotal: (graph.generated_tests ?? []).filter((t) => t.runnable !== false).length,
+    generatedDraftTotal: (graph.generated_tests ?? []).filter((t) => t.runnable === false).length,
+    generationOutcome: graph.analysis?.start_generation ?? null,
     shownCount: risks.reduce((acc, r) => acc + r.generatedTests.length, 0)
   };
 }

@@ -370,8 +370,25 @@ body[data-mode="expert"] .simple-only{display:none!important}
       <div class="split2">
         <div><div class="v vb" id="test-int">—</div><div class="k">Integration</div></div>
         <div><div class="v vp" id="test-unit">—</div><div class="k">Unit</div></div>
+        <div><div class="v" id="test-unknown">—</div><div class="k">Unclassified</div></div>
       </div>
     </div>
+  </div>
+  <div class="card" id="runtime-suite-card" hidden style="margin-top:16px">
+    <p class="card-lbl">Runtime coverage by suite — inclusive symbol counts; unit + integration overlap is shown separately and must not be added.</p>
+    <div class="split2">
+      <div><div class="v vp" id="runtime-unit">—</div><div class="k">Unit</div></div>
+      <div><div class="v vb" id="runtime-integration">—</div><div class="k">Integration</div></div>
+      <div><div class="v" id="runtime-overlap">—</div><div class="k">Both</div></div>
+      <div><div class="v" id="runtime-unclassified">—</div><div class="k">Unclassified</div></div>
+      <div><div class="v vg" id="runtime-union">—</div><div class="k">Combined union</div></div>
+    </div>
+  </div>
+  <div class="card" id="generation-outcome-card" hidden style="margin-top:16px">
+    <p class="card-lbl">Latest automated test-generation run</p>
+    <div class="v" id="generation-outcome-status">—</div>
+    <p class="card-sub" id="generation-outcome-counts"></p>
+    <p class="card-sub" id="generation-outcome-reason"></p>
   </div>
 </section>
 
@@ -701,6 +718,23 @@ D.scan.services.forEach(([nm,ct])=>$("#svc-list").append(el("div","svc",\`<span 
 $("#test-total").textContent=D.scan.tests.total;
 $("#test-int").textContent=D.scan.tests.integration;
 $("#test-unit").textContent=D.scan.tests.unit;
+$("#test-unknown").textContent=D.scan.tests.unclassified;
+if(D.scan.runtimeCoverage){
+  const R=D.scan.runtimeCoverage;
+  $("#runtime-suite-card").hidden=false;
+  $("#runtime-unit").textContent=\`\${R.unit} (\${R.unitPct}%)\`;
+  $("#runtime-integration").textContent=\`\${R.integration} (\${R.integrationPct}%)\`;
+  $("#runtime-overlap").textContent=\`\${R.overlap} (\${R.overlapPct}%)\`;
+  $("#runtime-unclassified").textContent=\`\${R.unclassified} (\${R.unclassifiedPct}%)\`;
+  $("#runtime-union").textContent=\`\${R.union} (\${R.unionPct}%)\`;
+}
+if(D.generationOutcome){
+  const G=D.generationOutcome;
+  $("#generation-outcome-card").hidden=false;
+  $("#generation-outcome-status").textContent=String(G.status||"unknown").replaceAll("_"," ");
+  $("#generation-outcome-counts").textContent=G.generated+" draft(s): "+G.runnable+" runnable, "+Math.max(0,G.drafts-G.runnable)+" blocked; "+G.requested+" target(s) requested.";
+  $("#generation-outcome-reason").textContent=G.reason||"Generation completed; inspect each draft for its terminal validation result.";
+}
 
 // behaviors
 function humanizeSig(sig){
@@ -887,6 +921,10 @@ const riskTopBanner=el("div","platform-top-banner",
    <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
 riskList.before(riskTopBanner);
 const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
+const generatedOutputCopy=[
+  D.generatedRunnableTotal?\`\${D.generatedRunnableTotal} runnable generated test\${D.generatedRunnableTotal===1?"":"s"}\`:'',
+  D.generatedDraftTotal?\`\${D.generatedDraftTotal} grounded draft\${D.generatedDraftTotal===1?"":"s"} with code withheld\`:'',
+].filter(Boolean).join(' and ');
 let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){
   const hasGenerated=Boolean(r.generatedTests&&r.generatedTests.length);
@@ -897,7 +935,7 @@ function riskMatchesFilter(r){
 function renderRiskFilters(){
   const options=[
     ["all","All",D.risks.length],
-    ["generated","Flows with tests",generatedRiskCount],
+    ["generated","Flows with generated output",generatedRiskCount],
     ["missing","No generated tests",D.risks.filter(r=>!(r.generatedTests&&r.generatedTests.length)).length]
   ];
   riskTools.innerHTML=options.map(([key,label,count])=>\`<button class="risk-filter" type="button" data-risk-filter="\${key}" aria-pressed="\${key===activeRiskFilter}">\${label} <span class="gc">\${count}</span></button>\`).join("");
@@ -926,7 +964,7 @@ function riskCardHtml(r){
     // per-test chips whenever the generator produced unit tests.
     const allIntent=r.generatedTests.every(t=>t.runnable===false);
     const kinds=[...new Set(r.generatedTests.map(t=>t.concern).filter(Boolean))];
-    const kindLbl=allIntent?" (Manual tests — env setup needed)":kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
+    const kindLbl=allIntent?" (Generated drafts — code withheld)":kinds.length===1?" ("+kinds[0].replace(/_/g," ")+")":kinds.length>1?" (mixed)":"";
     testsHtml=\`<div class="gen-tests"><div class="gen-tests-lbl">Generated tests\${esc(kindLbl)}</div>\`;
     r.generatedTests.forEach(t=>{
       const cBadge=t.concern?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(t.concern.replace('_',' '))}</span>\`:'';
@@ -950,12 +988,12 @@ function renderRisks(){
     const remainingRiskFlows=Math.max(0,D.risks.length-generatedRiskCount);
     riskList.append(el("div","paywall",
       hiddenGeneratedFlows
-        ? \`<div class="paywall-num">\${hiddenGeneratedFlows} more flows with tests</div>
-           <div class="paywall-txt">OrangePro accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>
+        ? \`<div class="paywall-num">\${hiddenGeneratedFlows} more flows with generated output</div>
+           <div class="paywall-txt">OrangePro produced \${generatedOutputCopy} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Use the “Flows with generated output” filter to review them first.</div>
            <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">View all on OrangePro Platform &rarr;</a>\`
         : remainingRiskFlows
           ? \`<div class="paywall-num">\${remainingRiskFlows} high-risk flows left</div>
-             <div class="paywall-txt">The local MCP accepted \${D.generatedTotal} runnable generated test\${D.generatedTotal===1?"":"s"} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
+             <div class="paywall-txt">The local MCP produced \${generatedOutputCopy} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
              <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">Generate remaining tests on Platform &rarr;</a>\`
           : \`<div class="paywall-num">All generated tests are shown</div>
              <div class="paywall-txt">OrangePro generated tests for every high-risk flow in this report, and every generated test is visible here.</div>\`));
