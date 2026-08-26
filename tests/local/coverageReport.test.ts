@@ -186,18 +186,19 @@ describe("renderCoverageReport (Phase 5.2)", () => {
   it("renders runtime coverage separately from confirmed proof", () => {
     const g = makeGraph();
     g.analysis!.runtime_coverage = {
-      artifacts: [{ path: ".orangepro/coverage/go-root.coverprofile", format: "go-coverprofile", files: 1, covered_ranges: 2 }],
+      artifacts: [{ path: ".orangepro/coverage/go-root.coverprofile", format: "go-coverprofile", suite: "unclassified", suite_source: "unclassified", files: 1, covered_ranges: 2 }],
       total_eligible_symbols: 10,
       symbols_with_spans: 10,
       covered_symbols: 7,
       covered_pct: 70,
+      by_suite: { unit: 0, integration: 0, overlap: 0, unclassified: 7, union: 7, unit_pct: 0, integration_pct: 0, overlap_pct: 0, unclassified_pct: 70, union_pct: 70 },
       by_language: { go: { eligible: 10, symbols_with_spans: 10, covered: 7, covered_pct: 70 } }
     };
     const md = renderCoverageReport(g);
     expect(md).toContain("## Runtime coverage");
     expect(md).toContain("7 of 10 eligible symbols runtime-covered (70%)");
     expect(md).toContain("measured from local coverage-tool output, not name matching and not assertion-level proof");
-    expect(md).toContain("| .orangepro/coverage/go-root.coverprofile | go-coverprofile | 1 | 2 |");
+    expect(md).toContain("| .orangepro/coverage/go-root.coverprofile | unclassified | unclassified | - | go-coverprofile | 1 | 2 |");
   });
 
   it("states that actual runtime coverage is unavailable when no artifact was ingested", () => {

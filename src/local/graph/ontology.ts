@@ -391,6 +391,16 @@ export interface AnalysisMeta {
   confirmed_by_layer?: ConfirmedCoverageByLayer;
   /** Coverage-tool report ingestion: runtime-covered symbols, separate from exact test proof. */
   runtime_coverage?: RuntimeCoverageMeta;
+  /** Terminal outcome of the latest `opro start` test-generation lane. Display/diagnostic metadata only. */
+  start_generation?: {
+    status: "disabled" | "no_provider" | "no_targets" | "no_results" | "completed" | "completed_with_blockers" | "failed";
+    requested: number;
+    generated: number;
+    runnable: number;
+    drafts: number;
+    blockers: Partial<Record<"generated_code" | "unresolved_import" | "toolchain_or_runner" | "validation_timeout" | "unknown", number>>;
+    reason?: string;
+  };
   /** Deterministic Layer-1 code communities derived from structural calls/imports. Navigation only — never coverage evidence. */
   structural_clusters?: StructuralClustersMeta;
   /** Static behavior composition paths. Reachability only — never execution/proof/coverage evidence. */
@@ -592,6 +602,12 @@ export interface ConfirmedCoverageByLayer {
 export interface RuntimeCoverageArtifactMeta {
   path: string;
   format: "go-coverprofile" | "lcov" | "coverage-py" | "jacoco";
+  /** Test-suite provenance for this artifact. Unclassified is explicit, never silently treated as unit. */
+  suite: "unit" | "integration" | "unclassified";
+  /** Whether suite provenance came from the manifest, a conservative filename inference, or no classification. */
+  suite_source: "manifest" | "inferred" | "unclassified";
+  /** Optional repository command recorded by the coverage provenance manifest. */
+  command?: string;
   files: number;
   covered_ranges: number;
 }
@@ -609,6 +625,23 @@ export interface RuntimeCoverageLanguageMeta {
   covered_pct: number;
 }
 
+export interface RuntimeCoverageSuiteMeta {
+  /** Inclusive symbol count for each suite. Unit and integration may overlap. */
+  unit: number;
+  integration: number;
+  /** Symbols covered by both classified suites. */
+  overlap: number;
+  /** Symbols touched by at least one artifact without classified suite provenance. */
+  unclassified: number;
+  /** Union across every ingested coverage artifact; equals covered_symbols. */
+  union: number;
+  unit_pct: number;
+  integration_pct: number;
+  overlap_pct: number;
+  unclassified_pct: number;
+  union_pct: number;
+}
+
 /**
  * Runtime coverage imported from existing coverage-tool reports. This is NOT
  * exact test-to-symbol proof: it means the suite executed lines inside a symbol.
@@ -623,6 +656,8 @@ export interface RuntimeCoverageMeta {
   covered_symbols: number;
   covered_pct: number;
   by_language: Record<string, RuntimeCoverageLanguageMeta>;
+  /** Suite-aware runtime coverage. Counts are deliberately inclusive; never add unit + integration. */
+  by_suite: RuntimeCoverageSuiteMeta;
 }
 
 /**

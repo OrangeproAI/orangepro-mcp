@@ -264,6 +264,14 @@ local kit ingests Go coverprofiles, JS/TS `lcov.info`, Python coverage.py XML, a
 XML. These artifacts show executed lines inside symbols; they are not assertion-level proof and
 never promote Associated signal or No integration signal rows to Proven.
 
+For the highest-signal report in a repository with its own build/test workflow, bootstrap the
+repository first, run its native coverage target, optionally use `opro coverage .` to confirm the
+artifact is detected, and then run `opro start .`. The `coverage` command is discovery/generation
+only; `analyze` and `start` ingest detected artifacts while rebuilding the graph. Running
+`opro analyze .` immediately before `opro start .` is redundant. `opro start . --generate-coverage`
+is a convenience for conventional repositories; prefer the repository's native coverage command
+when it needs custom build tags, generated assets, services, or test-runner flags.
+
 ## Readiness score
 
 A 0–100 **readiness** signal (not a proof of lift), in bands: `thin` (0–39),
