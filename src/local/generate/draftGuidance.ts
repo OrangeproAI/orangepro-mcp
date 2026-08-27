@@ -18,7 +18,7 @@ export function classifyGeneratedDraftBlocker(reason: string | undefined): Gener
     return "unresolved_import";
   }
   if (
-    /syntax check failed|undefined:|unknown field|redeclared in this block|expected (?:declaration|operand|'[^']+'|"[^"]+"|[^ ]+),? found|literal not terminated|cannot assign/i.test(text)
+    /syntax check failed|undefined:|unknown field|redeclared in this block|expected (?:declaration|operand|'[^']+'|"[^"]+"|[^ ]+),? found|literal not terminated|cannot assign|cannot use .+ as |missing ['",].+argument list/i.test(text)
   ) return "generated_code";
   return "unknown";
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
-import { inspectRiskInputHealth, rankRiskGaps } from "../../src/local/score/risk.js";
+import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
 
 const dirs: string[] = [];
 
@@ -360,5 +360,23 @@ describe("risk report trust safeguards", () => {
     const gaps = rankRiskGaps(g, { limit: 3, maxPerFile: 3, maxPerTitle: 1 });
     expect(gaps.map((gap) => gap.title)).toEqual(expect.arrayContaining(["Invoke", "Execute"]));
     expect(gaps.filter((gap) => gap.title === "Invoke")).toHaveLength(1);
+  });
+
+  it("provides one canonical diversified priority portfolio for report and generation callers", () => {
+    const g = graph("/definitely/not/a/git/repo");
+    g.nodes = [
+      symbol("sym:src/a.ts#Invoke", "Invoke", "src/a.ts"),
+      symbol("sym:src/b.ts#Invoke", "Invoke", "src/b.ts"),
+      symbol("sym:src/hot.ts#one", "one", "src/hot.ts"),
+      symbol("sym:src/hot.ts#two", "two", "src/hot.ts"),
+      symbol("sym:src/hot.ts#three", "three", "src/hot.ts"),
+      symbol("sym:src/hot.ts#four", "four", "src/hot.ts"),
+      symbol("sym:src/c.ts#Execute", "Execute", "src/c.ts")
+    ];
+
+    const gaps = rankPriorityGaps(g, { limit: 7 });
+    expect(gaps).toEqual(rankRiskGaps(g, { limit: 7, maxPerFile: 3, maxPerTitle: 1 }));
+    expect(gaps.filter((gap) => gap.title === "Invoke")).toHaveLength(1);
+    expect(gaps.map((gap) => gap.title)).toContain("Execute");
   });
 });

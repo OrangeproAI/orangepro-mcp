@@ -3,9 +3,11 @@ import { classifyGeneratedDraftBlocker, generatedDraftRemediation } from "../../
 
 describe("generated draft guidance", () => {
   it.each([
-  ["Go compile check failed: undefined: testLogger", "generated_code"],
-  ["Go compile check failed: TestCapturePanic redeclared in this block", "generated_code"],
+    ["Go compile check failed: undefined: testLogger", "generated_code"],
+    ["Go compile check failed: TestCapturePanic redeclared in this block", "generated_code"],
     ["Go syntax check failed: expected '}', found EOF", "generated_code"],
+    ["Go compile check failed: cannot use logger (variable of type *mockLogger) as Logger", "generated_code"],
+    ["Go compile check failed: missing ',' before newline in argument list", "generated_code"],
     ["no required module provides package go.temporal.io/api/matchingservice/v1", "unresolved_import"],
     ["gofmt not found; cannot verify Go syntax", "toolchain_or_runner"],
     ["spawnSync go ETIMEDOUT", "validation_timeout"],

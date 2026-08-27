@@ -548,7 +548,9 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(html).toContain("Generated tests");
     expect(html).toContain("Flows with generated output");
     expect(html).toContain('let activeRiskFilter=generatedRiskCount?"generated":"all"');
-    expect(html).toContain("No generated tests");
+    expect(html).toContain("Flows without generated output");
+    expect(html).toContain("shown inline across");
+    expect(html).toContain('generatedRiskCount+"/"+D.risks.length');
     expect(html).toContain("high-risk flows left");
     expect(html).toContain("Generate remaining tests on Platform");
     expect(html).not.toContain("0 more tests generated");

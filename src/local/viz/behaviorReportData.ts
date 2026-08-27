@@ -3,7 +3,7 @@ import path from "node:path";
 import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
 import type { Ledger } from "../ledger.js";
 import { buildRtm, type RtmRow } from "../rtm.js";
-import { inspectRiskInputHealth, isEntryPoint, rankRiskGaps, type RiskGap } from "../score/risk.js";
+import { inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, type RiskGap } from "../score/risk.js";
 import { ORANGEPRO_VERSION } from "../version.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "../generate/draftGuidance.js";
@@ -1106,7 +1106,12 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   const flowIds = flowSymbolIds(graph);
   const summary = summaryFromRows(rows, flowIds);
   const repoRoot = opts.repoRoot ?? graph.workspace.root;
-  const riskGaps = rankRiskGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20, maxPerFile: 3, maxPerTitle: 1 });
+  const provenIds = new Set(
+    rows
+      .filter((row) => row.evidence_tier === "proven" && Boolean(row.code_symbol))
+      .map((row) => row.code_symbol!)
+  );
+  const riskGaps = rankPriorityGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20, provenIds });
   const riskHealth = inspectRiskInputHealth(repoRoot);
   const churnAvailable = riskHealth.churnAvailable && riskGaps.every((risk) => risk.churn_available !== false);
   const provenance: BehaviorReportData["provenance"] = {
