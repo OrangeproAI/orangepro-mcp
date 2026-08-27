@@ -209,6 +209,7 @@ describe("operation-level coverage", () => {
 
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
     expect(html).toContain('"generatedTotal":7');
+    expect(html).toContain('"shownCount":7');
     expect(html).toContain("behavior0 preserves observable output");
     expect(html).toContain("behavior6 preserves observable output");
     expect(html).toContain('"generationOutcome":{"status":"completed"');
