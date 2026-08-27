@@ -915,16 +915,20 @@ if(D.viewMeta){
   if(rm&&rm.scored>rm.shown)$("#risk-cap-note").textContent="Showing the top "+rm.shown+" of "+rm.scored.toLocaleString()+" scored behaviors — every behavior is scored; only the highest-risk are surfaced here. Full ranking: opro gaps --limit N, or .orangepro/graph.json.";
   if(fm&&fm.shown>0&&fm.prunedByCaps>0)$("#flow-cap-note").textContent="Showing "+fm.shown.toLocaleString()+" flows, endpoint-anchored first. "+fm.prunedByCaps.toLocaleString()+" additional branch expansions were pruned by depth/branch/global rendering caps — pruning affects display only, not scoring.";
 }
-// Platform CTA: top banner in risk panel
-const riskTopBanner=el("div","platform-top-banner",
-  \`<span class="platform-top-banner-text">Local scan shows <b>\${D.risks.length}</b> priority gaps. Full ranked list, incident correlation, and CI merge gate on Platform.</span>
-   <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
-riskList.before(riskTopBanner);
 const generatedRiskCount=D.risks.filter(r=>r.generatedTests&&r.generatedTests.length).length;
 const generatedOutputCopy=[
   D.generatedRunnableTotal?\`\${D.generatedRunnableTotal} runnable generated test\${D.generatedRunnableTotal===1?"":"s"}\`:'',
   D.generatedDraftTotal?\`\${D.generatedDraftTotal} grounded draft\${D.generatedDraftTotal===1?"":"s"} with code withheld\`:'',
 ].filter(Boolean).join(' and ');
+const generationSummary=D.generatedTotal
+  ?\` Generated output: <b>\${generatedOutputCopy}</b>; <b>\${D.shownCount}</b> shown inline across <b>\${generatedRiskCount} of \${D.risks.length}</b> priority flows.\`
+  :'';
+// Platform CTA: top banner in risk panel. Keep generated-output totals beside
+// the flow count so a user cannot mistake "5 flows" for "5 generated tests".
+const riskTopBanner=el("div","platform-top-banner",
+  \`<span class="platform-top-banner-text">Local scan shows <b>\${D.risks.length}</b> priority gaps.\${generationSummary} Full ranked list, incident correlation, and CI merge gate on Platform.</span>
+   <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
+riskList.before(riskTopBanner);
 let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){
   const hasGenerated=Boolean(r.generatedTests&&r.generatedTests.length);
@@ -935,8 +939,8 @@ function riskMatchesFilter(r){
 function renderRiskFilters(){
   const options=[
     ["all","All",D.risks.length],
-    ["generated","Flows with generated output",generatedRiskCount],
-    ["missing","No generated tests",D.risks.filter(r=>!(r.generatedTests&&r.generatedTests.length)).length]
+    ["generated","Flows with generated output",generatedRiskCount+"/"+D.risks.length],
+    ["missing","Flows without generated output",D.risks.filter(r=>!(r.generatedTests&&r.generatedTests.length)).length+"/"+D.risks.length]
   ];
   riskTools.innerHTML=options.map(([key,label,count])=>\`<button class="risk-filter" type="button" data-risk-filter="\${key}" aria-pressed="\${key===activeRiskFilter}">\${label} <span class="gc">\${count}</span></button>\`).join("");
 }

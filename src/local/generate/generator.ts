@@ -1515,7 +1515,12 @@ function commandAvailable(command: string): boolean {
 }
 
 function shortStaticDiag(message: string): string {
-  return message.replace(/\s+/g, " ").trim().slice(0, 240);
+  const compact = message.replace(/\s+/g, " ").trim();
+  if (compact.length <= 240) return compact;
+  // Compiler output starts with package/build boilerplate and puts the useful
+  // file:line diagnostic at the end. Preserve both ends so classification and
+  // remediation do not degrade to "unknown" on long package names.
+  return `${compact.slice(0, 72)} … ${compact.slice(-165)}`;
 }
 
 function escapeRegExp(value: string): string {
@@ -2194,6 +2199,7 @@ export async function generateTests(
   const framework = pickFramework(graph, opts, targets, fileReader);
   const runSelection = targetsForFramework(graph, targets, framework);
   let runTargets = runSelection.targets;
+  const explicitMulti = Boolean(opts.target_ids && opts.target_ids.length > 1);
   warnings.push(...runSelection.warnings);
   const systemPrompt = opts.systemPrompt ?? buildSystemPrompt();
   const promptVersion = inputMode === "graph_grounded" && opts.prompt_version === "v5" ? PROMPT_VERSION_V5 : PROMPT_VERSION;
@@ -2318,7 +2324,8 @@ export async function generateTests(
     }
   } else if (opts.prompt_version === "v5") {
     const declaredDeps = readDeclaredDeps(graph.workspace.root);
-    for (const behavior of runTargets) {
+    for (let targetIndex = 0; targetIndex < runTargets.length; targetIndex++) {
+      const behavior = runTargets[targetIndex];
       if (generated.length >= limit) break;
       const gc = gatherContext(graph, behavior, framework, fileReader);
       reportProgress(`Planning "${gc.ctx.behavior_title}" [v5]…`);
@@ -2417,7 +2424,13 @@ export async function generateTests(
         });
         continue;
       }
-      const selected = scenarios.slice(0, Math.max(1, limit - generated.length));
+      const remainingSlots = Math.max(1, limit - generated.length);
+      const remainingTargets = Math.max(1, runTargets.length - targetIndex);
+      // In explicit multi-target mode, reserve a fair share for every remaining
+      // target. Previously the first behavior could consume the entire batch
+      // with several scenarios, leaving later high-risk behaviors untouched.
+      const targetLimit = explicitMulti ? Math.max(1, Math.floor(remainingSlots / remainingTargets)) : remainingSlots;
+      const selected = scenarios.slice(0, targetLimit);
       const completions: string[] = [];
       try {
         reportProgress(`Generating "${gc.ctx.behavior_title}" [v5 batch: ${selected.length}]…`);
@@ -2624,7 +2637,6 @@ export async function generateTests(
     }
   } else {
     // Default: target-focused, bucket-diverse generation (one test per local bucket).
-    const explicitMulti = Boolean(opts.target_ids && opts.target_ids.length > 1);
     const plan = planGroundedBuckets(graph, runTargets, framework, fileReader, limit, explicitMulti, missing, warnings);
     // Repo dependency names (read once) — used by the runnable check to tell a missing
     // baseUrl-local import from a genuine external package the agent has installed.
