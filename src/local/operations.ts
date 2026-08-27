@@ -55,7 +55,7 @@ import { enrichFromContent } from "./enrich/index.js";
 import { scoreGraph } from "./score/score.js";
 import { doctorGraph } from "./score/doctor.js";
 import { findGaps } from "./gaps/gaps.js";
-import { rankRiskGaps } from "./score/risk.js";
+import { rankPriorityGaps, rankRiskGaps } from "./score/risk.js";
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
@@ -2144,7 +2144,7 @@ export async function opStart(
       const generatedTargets = new Set(
         (graphForGeneration.generated_tests ?? []).map((t) => t.target_symbol_external_id).filter((id): id is string => Boolean(id))
       );
-      const targetIds = rankRiskGaps(graphForGeneration, {
+      const targetIds = rankPriorityGaps(graphForGeneration, {
         repoRoot: root,
         limit: generationLimit,
         provenIds: provenSymbolIds(graphForGeneration, loadLedger(root))

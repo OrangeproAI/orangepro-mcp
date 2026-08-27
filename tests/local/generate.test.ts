@@ -212,6 +212,68 @@ describe("generateTests — well-grounded behavior", () => {
     expect(seen.some((req) => req.user.includes("HOW: Test at exact boundaries"))).toBe(true);
   });
 
+  it("reserves v5 batch capacity across explicit targets instead of letting the first target consume it", async () => {
+    const file = makeNode({
+      kind: "File",
+      external_id: "src/risky.py",
+      title: "risky.py",
+      properties: { role: "code", language: "python", file: "src/risky.py" },
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance: provenance("src/risky.py")
+    });
+    const symbols = ["first_behavior", "second_behavior"].map((title) => makeNode({
+      kind: "CodeSymbol",
+      external_id: `sym:src/risky.py#${title}`,
+      title,
+      properties: { file: "src/risky.py", symbol_kind: "function" },
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance: provenance("src/risky.py"),
+      behavior_source: "code_export",
+      denominator_eligible: true,
+      denominator_reason: "Testable code behavior."
+    }));
+    const provider: ModelProvider = {
+      providerName: "fake",
+      modelName: "v5-target-fairness",
+      complete: async (req) => {
+        if (req.system.includes("test gap identification")) {
+          return JSON.stringify([1, 2].map((id) => ({
+            id,
+            title: `scenario ${id}`,
+            concern: "boundary_limits",
+            technique: "boundary_value_analysis",
+            rationale: "boundary risk",
+            assertion_targets: [`scenario ${id} is handled`],
+            complexity: "basic",
+            risk_rank: id
+          })));
+        }
+        return [
+          "// ═══ SCENARIO 1 ═══",
+          "def test_scenario_1():",
+          "    assert 'scenario 1 is handled'"
+        ].join("\n");
+      }
+    };
+
+    const result = await generateTests(
+      makeGraph({ nodes: [...symbols, file] }),
+      { target_ids: symbols.map((symbol) => symbol.external_id), limit: 2, prompt_version: "v5" },
+      provider,
+      (rel) => rel === "src/risky.py" ? "def first_behavior(): pass\ndef second_behavior(): pass\n" : null,
+      CLOCK
+    );
+
+    expect(result.generated_tests).toHaveLength(2);
+    expect(new Set(result.generated_tests.map((test) => test.target_symbol_external_id))).toEqual(
+      new Set(symbols.map((symbol) => symbol.external_id))
+    );
+  });
+
   it("retries v5 scenarios individually when batch generation fails", async () => {
     const symbol = makeNode({
       kind: "CodeSymbol",
@@ -733,6 +795,8 @@ describe("generateTests — well-grounded behavior", () => {
         fakeGo,
         [
           "#!/usr/bin/env sh",
+          "echo 'FAIL go.temporal.io/server/service/history/workflow/very/long/package/name/that/pushes/the/actionable/compiler/diagnostic/past/the/old/fixed/prefix/truncation [build failed]' >&2",
+          "echo '# go.temporal.io/server/service/history/workflow/very/long/package/name/that/pushes/the/actionable/compiler/diagnostic/past/the/old/fixed/prefix/truncation' >&2",
           "echo './orangepro_compile_test.go:7:7: undefined: HandlerFunc' >&2",
           "exit 1"
         ].join("\n")

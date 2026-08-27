@@ -649,3 +649,15 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
     .slice(0, limit);
 }
+
+/**
+ * Canonical priority-gap portfolio shown to a local user and used for automatic
+ * generation. Keeping this policy in one function prevents `opro start` from
+ * generating for a different "top N" than behavior-coverage.html displays.
+ */
+export function rankPriorityGaps(
+  graph: LocalGraph,
+  opts: Omit<RiskGapOptions, "maxPerFile" | "maxPerTitle"> = {}
+): RiskGap[] {
+  return rankRiskGaps(graph, { ...opts, maxPerFile: 3, maxPerTitle: 1 });
+}
