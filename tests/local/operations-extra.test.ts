@@ -57,6 +57,8 @@ function scaffoldRiskTargets(root: string, count = 7): void {
 class StartV5Provider implements ModelProvider {
   readonly providerName = "fake";
   readonly modelName = "fake-v5";
+  planningCalls = 0;
+  generationCalls = 0;
 
   async complete(req: ModelCompletionRequest): Promise<string> {
     if (req.user.includes("BEHAVIOR_CANDIDATES:")) {
@@ -71,6 +73,7 @@ class StartV5Provider implements ModelProvider {
       /ASSERT:\s*\n\s*-\s*([A-Za-z0-9_]+)/.exec(req.user)?.[1] ??
       "behavior0";
     if (req.user.includes("Find missing test scenarios")) {
+      this.planningCalls++;
       return JSON.stringify([
         {
           id: 1,
@@ -81,18 +84,40 @@ class StartV5Provider implements ModelProvider {
           assertion_targets: [fn],
           complexity: "basic",
           risk_rank: 1
+        },
+        {
+          id: 2,
+          title: `${fn} handles the riskiest boundary`,
+          concern: "boundary_limits",
+          technique: "boundary_value_analysis",
+          rationale: "exercise the second most critical uncovered case",
+          assertion_targets: [fn],
+          complexity: "basic",
+          risk_rank: 2
         }
       ]);
     }
 
     if (req.user.includes("═══ SCENARIOS")) {
-      return [
+      this.generationCalls++;
+      const first = [
         "// ═══ SCENARIO 1 ═══",
         "import { expect, it } from \"vitest\";",
         `import { ${fn} } from "../src/risk";`,
         "",
         `it("${fn} preserves observable output", () => {`,
         `  expect(${fn}("value")).toBe("value${fn.replace("behavior", "")}");`,
+        "});"
+      ];
+      if (!req.user.includes("SCENARIO 2")) return first.join("\n");
+      return [
+        ...first,
+        "// ═══ SCENARIO 2 ═══",
+        "import { expect, it } from \"vitest\";",
+        `import { ${fn} } from "../src/risk";`,
+        "",
+        `it("${fn} handles the riskiest boundary", () => {`,
+        `  expect(${fn}("")).toBe("${fn.replace("behavior", "")}");`,
         "});"
       ].join("\n");
     }
@@ -204,13 +229,14 @@ describe("operation-level coverage", () => {
     const root = temp();
     opInit(root, deps);
     scaffoldRiskTargets(root, 7);
+    const provider = new StartV5Provider();
     const res = await opStart(
       root,
       { source: root, aiFlows: false, proofLimit: 1, generateLimit: 7, promptVersion: "v5" },
       {
         ...deps,
         env: {},
-        aiProvider: new StartV5Provider(),
+        aiProvider: provider,
         dynamicProofRunner: () => ({
           exitCode: 0,
           stderr: "",
@@ -223,22 +249,26 @@ describe("operation-level coverage", () => {
     expect(graph.top_risk_gaps?.length).toBeGreaterThanOrEqual(7);
     expect(res.warnings.some((w) => w.includes("provider returned no accepted tests")), res.warnings.join("\n")).toBe(false);
     expect(res.auto_prove.attempted).toBeLessThanOrEqual(1);
+    expect(provider.planningCalls).toBe(7);
+    expect(provider.generationCalls).toBe(7);
     expect(res.generation).toMatchObject({
       status: "completed",
-      generated: 7,
-      runnable: 7,
+      generated: 14,
+      runnable: 14,
       drafts: 0,
       requested: 7
     });
 
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
-    expect(html).toContain('"generatedTotal":7');
-    expect(html).toContain('"shownCount":7');
+    expect(html).toContain('"generatedTotal":14');
+    expect(html).toContain('"shownCount":14');
     expect(html).toContain("behavior0 preserves observable output");
     expect(html).toContain("behavior6 preserves observable output");
     expect(html).toContain('"generationOutcome":{"status":"completed"');
 
     const firstGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(firstGraph.generation_runs).toHaveLength(7);
+    expect(firstGraph.generation_runs.every((run: { generated_test_ids: string[] }) => run.generated_test_ids.length === 2)).toBe(true);
     const firstIds = firstGraph.generated_tests.map((test: { id: string }) => test.id);
     const rerun = await opStart(
       root,
@@ -257,7 +287,7 @@ describe("operation-level coverage", () => {
     const secondGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
     expect(rerun.generation.status).toBe("no_targets");
     expect(secondGraph.generated_tests.map((test: { id: string }) => test.id)).toEqual(firstIds);
-    expect(secondGraph.generated_tests).toHaveLength(7);
+    expect(secondGraph.generated_tests).toHaveLength(14);
   });
 
   it("opStart reports the exact no-provider terminal generation reason", async () => {

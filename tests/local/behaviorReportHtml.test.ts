@@ -487,7 +487,11 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(data.risks.length).toBeGreaterThan(0);
     expect(html).toContain(JSON.stringify(data.risks[0].path));
     for (const r of data.risks) {
-    if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(r.verb)) expect(r.verb).toBe("BEHAVIOR");
+      if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(r.verb)) expect(r.verb).toBe("FLOW");
+      expect(r.context).toContain("ORS ");
+      expect(r.context).not.toContain("weighted incoming reference");
+      expect(r.tags.some(([label]) => label.startsWith("ORS "))).toBe(true);
+      expect(r.tags.some(([label]) => label.includes("weighted refs"))).toBe(false);
     }
     // No generated tests in this graph ⇒ every risk row carries empty arrays and the
     // CTA band count is 0 (the template hides both sections when the data is empty).

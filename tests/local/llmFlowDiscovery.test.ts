@@ -732,12 +732,12 @@ describe("metadata-only lane", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Prompt slice — the two planning lines + deterministic-only flow_chain.
+// Prompt slice — bounded critical-scenario planning + deterministic-only flow_chain.
 // ─────────────────────────────────────────────────────────────────────────────
 describe("planning prompt absorption", () => {
-  it("system prompt contains exactly the two new lines", () => {
+  it("system prompt limits planning to the two most critical scenarios", () => {
     const prompt = buildPlanningSystemPromptV5();
-    expect(prompt).toContain("Find all gaps. No cap. If evidence justifies 3, output 3. If 30, output 30.");
+    expect(prompt).toContain("Return at most 2 scenarios: the two most critical missing tests justified by the evidence.");
     expect(prompt).toContain("When FLOW CHAIN exists, prioritize gaps at service boundaries.");
   });
 

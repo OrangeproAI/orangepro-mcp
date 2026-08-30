@@ -2202,14 +2202,15 @@ export async function opStart(
       } else {
         reportProgress(`generate: drafting tests for top ${targetIds.length} risk target(s)`, { current: 6, total: 8 });
         const generatedDrafts: GeneratedTest[] = [];
-        for (let i = 0; i < targetIds.length; i += START_GENERATE_BATCH_LIMIT) {
-          const batch = targetIds.slice(i, i + START_GENERATE_BATCH_LIMIT);
+        for (const targetId of targetIds) {
           const generated = await opGenerate(
             root,
             {
               ...providerOpts,
-              target_ids: batch,
-              limit: batch.length,
+              // One ranked flow per generation run. Give each flow room for its
+              // two highest-risk missing tests instead of sharing a batch budget.
+              target_ids: [targetId],
+              limit: 2,
               // The offline deterministic stand-in emits the established v2 scaffold; v5 is
               // a two-phase model planning protocol and must not be selected implicitly for it.
               prompt_version: opts.promptVersion ?? (deterministicGeneration ? "v2" : "v5")
@@ -2409,7 +2410,6 @@ const NO_PROVIDER_MESSAGE =
   'No model provider configured. Set OPENAI_API_KEY (or OLLAMA_BASE_URL / ANTHROPIC_API_KEY) in your shell environment or a .env.provider.local file to generate with your own model, or pass provider="deterministic" (or set ORANGEPRO_ALLOW_DETERMINISTIC=1) to use the offline deterministic stand-in. No tests were generated.';
 const START_RTM_LIMIT = 500;
 const START_GENERATE_RISK_LIMIT = 20;
-const START_GENERATE_BATCH_LIMIT = 5;
 
 const EMPTY_EVIDENCE_SUMMARY: EvidenceSummary = {
   tests: 0,
