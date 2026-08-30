@@ -30,6 +30,9 @@ describe("prompt v5", () => {
     expect(prompt).toContain("first character of your response must be [");
     expect(prompt).toContain("technique must be exactly one of");
     expect(prompt).toContain("boundary_value_analysis");
+    expect(prompt).toContain("Return at most 2 scenarios");
+    expect(prompt).toContain("two most critical");
+    expect(prompt).not.toContain("No cap");
 
     const repair = buildPlanningRepairSystemPromptV5();
     expect(repair).toContain("output [] exactly");

@@ -522,7 +522,7 @@ describe("buildBehaviorReportData — report trust metadata", () => {
     expect(data.risks[0]?.todo).not.toMatch(/payment|credential/i);
   });
 
-  it("labels fractional import attribution as weighted references", () => {
+  it("uses ORS instead of exposing fractional weighted-reference internals", () => {
     const g = graph();
     g.nodes = [
       codeSymbol("sym:src/shared.ts#alpha", "alpha", "src/shared.ts"),
@@ -542,7 +542,8 @@ describe("buildBehaviorReportData — report trust metadata", () => {
     g.candidate_edges = [];
 
     const data = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
-    expect(data.risks.some((risk) => (risk.context ?? "").includes("0.5 weighted incoming references"))).toBe(true);
-    expect(data.risks.every((risk) => !(risk.context ?? "").includes("callers"))).toBe(true);
+    expect(data.risks.every((risk) => (risk.context ?? "").includes(`ORS `))).toBe(true);
+    expect(data.risks.every((risk) => !(risk.context ?? "").includes("weighted incoming references"))).toBe(true);
+    expect(data.risks.every((risk) => risk.tags.some(([label]) => label.startsWith("ORS ")))).toBe(true);
   });
 });

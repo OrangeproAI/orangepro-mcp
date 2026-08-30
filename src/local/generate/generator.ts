@@ -2352,7 +2352,7 @@ export async function generateTests(
         continue;
       }
       try {
-        const result = parsePlannedScenariosStrict(rawPlan, 20);
+        const result = parsePlannedScenariosStrict(rawPlan, 2);
         scenarios = result.scenarios;
         if (result.dropped > 0) {
           warnings.push(`Dropped ${result.dropped} invalid v5 planned scenario(s) for "${gc.ctx.behavior_title}": ${result.dropSummary.join("; ")}.`);
@@ -2382,7 +2382,7 @@ export async function generateTests(
             maxTokens: 1600,
             temperature: 0
           });
-          const result = parsePlannedScenariosStrict(repaired, 20);
+          const result = parsePlannedScenariosStrict(repaired, 2);
           // Keep ONLY repaired scenarios that tie back to the ORIGINAL malformed text; drop any the
           // model invented. If none tie back, fail closed — never generate from an invented plan.
           const tiedBack = result.scenarios.filter((s) => scenarioTiesBackToRaw(s, rawPlan));
@@ -2431,6 +2431,36 @@ export async function generateTests(
       // with several scenarios, leaving later high-risk behaviors untouched.
       const targetLimit = explicitMulti ? Math.max(1, Math.floor(remainingSlots / remainingTargets)) : remainingSlots;
       const selected = scenarios.slice(0, targetLimit);
+      const manualDraftForScenario = (scenario: PlannedScenario, reason: string): GeneratedTest => {
+        const manualBody = sanitizeGeneratedBody([
+          `Scenario: ${scenario.title}`,
+          ...(scenario.steps && scenario.steps.length
+            ? ["Steps:", ...scenario.steps.map((st, n) => `  ${n + 1}. ${st}`)]
+            : []),
+          ...(scenario.test_data ? [`Test data: ${scenario.test_data}`] : []),
+          ...(scenario.assertion_targets.length ? [`Expected: ${scenario.assertion_targets.join("; ")}`] : []),
+          ...(scenario.rationale ? [`Why this test: ${scenario.rationale}`] : []),
+          "",
+          `Blocked by: ${reason.split(" — ")[0]}`,
+          `Fix: ${generatedDraftRemediation(reason)}`
+        ].join("\n"), gc.ctx.source_excerpts, "//").body;
+        return {
+          id: `${run_id}-t${generated.length + 1}`,
+          run_id,
+          title: `${gc.ctx.behavior_title} — ${scenario.title}`,
+          test_type: gc.ctx.test_layer,
+          framework_hint: framework,
+          body: manualBody,
+          bucket: bucketForV5Scenario(scenario),
+          prompt_version: PROMPT_VERSION_V5,
+          grounding: { entity_ids: gc.entityIds, source_refs: [], weak_relationships_used: [] },
+          weak_evidence_used: false,
+          target_symbol_external_id: behavior.external_id,
+          ...(fingerprintOf(behavior) ? { target_fingerprint: fingerprintOf(behavior) } : {}),
+          runnable: false,
+          unresolved_reason: reason
+        };
+      };
       const completions: string[] = [];
       try {
         reportProgress(`Generating "${gc.ctx.behavior_title}" [v5 batch: ${selected.length}]…`);
@@ -2462,6 +2492,8 @@ export async function generateTests(
       const scenarioById = new Map(selected.map((s) => [s.id, s]));
       const parsed = completions.flatMap(parseBatchGeneratedTests);
       const seenScenarioIds = new Set<number>();
+      const emittedScenarioIds = new Set<number>();
+      const failureReasonByScenarioId = new Map<number, string>();
       const relatedFiles = relatedFilePaths(graph, behavior).files;
       for (let i = 0; i < parsed.length && generated.length < limit; i++) {
         const parsedTest = parsed[i];
@@ -2492,23 +2524,27 @@ export async function generateTests(
           warnings.push(`Redacted ${sanitized.redactedLines} echoed source-excerpt line(s) from the v5 generated test for "${gc.ctx.behavior_title}".`);
         }
         if (!hasExecutableContent(sanitized.body, framework)) {
+          const reason = `V5 generated no executable code for scenario "${scenario.title}".`;
           warnings.push(`Dropped v5 generated test for "${gc.ctx.behavior_title}" / "${scenario.title}": no executable test code.`);
           missing.push({
             external_id: behavior.external_id,
             title: gc.ctx.behavior_title,
-            reason: `V5 generated no executable code for scenario "${scenario.title}".`,
+            reason,
             needed: ["a non-empty runnable test body"]
           });
+          failureReasonByScenarioId.set(scenario.id, reason);
           continue;
         }
         if (!generatedBodyAlignsWithScenario(sanitized.body, scenario)) {
+          const reason = `V5 generated test did not align with scenario "${scenario.title}".`;
           warnings.push(`Dropped v5 generated test for "${gc.ctx.behavior_title}" / "${scenario.title}": body did not reference the planned assertion target.`);
           missing.push({
             external_id: behavior.external_id,
             title: gc.ctx.behavior_title,
-            reason: `V5 generated test did not align with scenario "${scenario.title}".`,
+            reason,
             needed: ["a generated test body that asserts the planned scenario target"]
           });
+          failureReasonByScenarioId.set(scenario.id, reason);
           continue;
         }
         let cleanBody = sanitized.body;
@@ -2573,43 +2609,8 @@ export async function generateTests(
             reason,
             needed: ["a compiling generated test with a real assertion and resolvable subject import"]
           });
-          // Preserve the grounded INTENT in English, never the rejected code.
-          // The scenario fields were authored by a model that saw source
-          // excerpts — scrub the composed body with the same guard as code.
-          // The scenario plan (title / assertion targets / rationale) is the
-          // reviewable half of the draft; withholding the body entirely also
-          // removes any residual source-echo risk. runnable:false + the reason
-          // keep this honestly a draft — it ships with no run command and can
-          // never enter the proof-ready set.
-          const manualBody = sanitizeGeneratedBody([
-              `Scenario: ${scenario.title}`,
-              ...(scenario.steps && scenario.steps.length
-                ? ["Steps:", ...scenario.steps.map((st, n) => `  ${n + 1}. ${st}`)]
-                : []),
-              ...(scenario.test_data ? [`Test data: ${scenario.test_data}`] : []),
-              ...(scenario.assertion_targets.length ? [`Expected: ${scenario.assertion_targets.join("; ")}`] : []),
-              ...(scenario.rationale ? [`Why this test: ${scenario.rationale}`] : []),
-              "",
-              // Concise blocker: first clause only — the full remedy is one line.
-              `Blocked by: ${reason.split(" — ")[0]}`,
-              `Fix: ${generatedDraftRemediation(reason)}`
-            ].join("\n"), gc.ctx.source_excerpts, "//").body;
-          generated.push({
-            id: `${run_id}-t${generated.length + 1}`,
-            run_id,
-            title: `${gc.ctx.behavior_title} — ${scenario.title}`,
-            test_type: gc.ctx.test_layer,
-            framework_hint: framework,
-            body: manualBody,
-            bucket: bucketForV5Scenario(scenario),
-            prompt_version: PROMPT_VERSION_V5,
-            grounding: { entity_ids: gc.entityIds, source_refs: [], weak_relationships_used: [] },
-            weak_evidence_used: false,
-            target_symbol_external_id: behavior.external_id,
-            ...(fingerprintOf(behavior) ? { target_fingerprint: fingerprintOf(behavior) } : {}),
-            runnable: false,
-            unresolved_reason: reason
-          });
+          generated.push(manualDraftForScenario(scenario, reason));
+          emittedScenarioIds.add(scenario.id);
           continue;
         }
         generated.push({
@@ -2633,6 +2634,16 @@ export async function generateTests(
             : {}),
           runnable: true
         });
+        emittedScenarioIds.add(scenario.id);
+      }
+      // A valid plan is still useful when code generation is empty, malformed,
+      // or rejected. Retain that grounded scenario as an honest manual test so
+      // the report never loses the test idea merely because code was unusable.
+      for (const scenario of selected) {
+        if (generated.length >= limit || emittedScenarioIds.has(scenario.id)) continue;
+        const reason = failureReasonByScenarioId.get(scenario.id) ??
+          `No accepted codified test was returned for planned scenario "${scenario.title}".`;
+        generated.push(manualDraftForScenario(scenario, reason));
       }
     }
   } else {
