@@ -163,8 +163,7 @@ describe("operation-level coverage", () => {
     const gen = await opGenerate(root, { limit: 1, target_ids: ["sym:src/payments/card.ts#saveCard"] }, deps);
     expect(gen.generated_tests.length).toBeGreaterThan(0);
 
-    // The blocker bar: the report must reflect the persisted generated tests
-    // WITHOUT re-running analyze (which would rebuild the graph and drop them).
+    // The blocker bar: the report must reflect the persisted generated tests.
     const htmlPath = join(root, ".orangepro", "behavior-coverage.html");
     expect(existsSync(htmlPath)).toBe(true);
     const html = readFileSync(htmlPath, "utf8");
@@ -174,6 +173,31 @@ describe("operation-level coverage", () => {
     const bodyFragment = gen.generated_tests[0].body.split("\n").find((l) => l.trim().length > 8) ?? "";
     expect(bodyFragment.length).toBeGreaterThan(8);
     expect(html).toContain(JSON.stringify(bodyFragment).slice(1, -1).slice(0, 30));
+  });
+
+  it("opAnalyze preserves generated tests for unchanged targets and drops them after source changes", async () => {
+    const root = temp();
+    opInit(root, deps);
+    scaffold(root);
+    opAnalyze(root, { source: root }, deps);
+    const generated = await opGenerate(root, {
+      limit: 1,
+      target_ids: ["sym:src/payments/card.ts#saveCard"]
+    }, deps);
+    expect(generated.generated_tests).toHaveLength(1);
+    expect(generated.generated_tests[0].target_fingerprint).toMatch(/^sha256:/);
+
+    opAnalyze(root, { source: root }, deps);
+    const unchanged = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(unchanged.generated_tests).toEqual(generated.generated_tests);
+    expect(unchanged.generation_runs).toHaveLength(1);
+    expect(unchanged.generation_runs[0].generated_test_ids).toEqual([generated.generated_tests[0].id]);
+
+    writeFileSync(join(root, "src/payments/card.ts"), "export function saveCard(n: string) { return n.trim(); }\n");
+    opAnalyze(root, { source: root }, deps);
+    const changed = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(changed.generated_tests).toEqual([]);
+    expect(changed.generation_runs).toEqual([]);
   });
 
   it("opStart with a provider writes generated tests into the behavior report independently of the proof budget", async () => {
@@ -213,6 +237,27 @@ describe("operation-level coverage", () => {
     expect(html).toContain("behavior0 preserves observable output");
     expect(html).toContain("behavior6 preserves observable output");
     expect(html).toContain('"generationOutcome":{"status":"completed"');
+
+    const firstGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    const firstIds = firstGraph.generated_tests.map((test: { id: string }) => test.id);
+    const rerun = await opStart(
+      root,
+      { source: root, aiFlows: false, proofLimit: 1, generateLimit: 7, promptVersion: "v5" },
+      {
+        ...deps,
+        env: {},
+        aiProvider: new StartV5Provider(),
+        dynamicProofRunner: () => ({
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({ status: "associated_survived", proven: false, reason: "stubbed for persistence test" })
+        })
+      }
+    );
+    const secondGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(rerun.generation.status).toBe("no_targets");
+    expect(secondGraph.generated_tests.map((test: { id: string }) => test.id)).toEqual(firstIds);
+    expect(secondGraph.generated_tests).toHaveLength(7);
   });
 
   it("opStart reports the exact no-provider terminal generation reason", async () => {
