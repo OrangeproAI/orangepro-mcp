@@ -611,7 +611,7 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(html).not.toContain("npx orangepro prove");
   });
 
-  it("suppresses English intents when a runnable generated test exists for the same target, shows them (with bucket) only as the fallback", () => {
+  it("keeps both generated scenarios visible when one is runnable and one is a blocked draft", () => {
     const g = graph();
     const sym = g.nodes.find((n) => n.kind === "CodeSymbol" && (n.title || "").length > 0);
     expect(sym).toBeTruthy();
@@ -642,14 +642,16 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
       target_symbol_external_id: sym!.external_id
     };
 
-    // Case 1: runnable + intent for the SAME target → intent suppressed entirely.
+    // Case 1: runnable + intent for the SAME target → both remain visible.
     g.generated_tests = [intent, runnable];
     const withBoth = buildBehaviorReportData(g, provenLedger(g), { repoRoot: "/tmp/orders-api" });
     const row1 = withBoth.risks.find((r) => r.generatedTests.length > 0);
     expect(row1).toBeTruthy();
-    expect(row1!.generatedTests.every((t) => t.runnable !== false)).toBe(true);
-    expect(row1!.generatedTests.some((t) => t.name.includes("missing customer"))).toBe(false);
-    expect(row1!.generatedTests[0].bucket).toBe("happy_path"); // bucket chip data present
+    expect(row1!.generatedTests).toHaveLength(2);
+    expect(row1!.generatedTests.some((t) => t.runnable !== false)).toBe(true);
+    expect(row1!.generatedTests.some((t) => t.name.includes("missing customer"))).toBe(true);
+    expect(row1!.generatedTests.map((t) => t.bucket)).toEqual(["edge_case", "happy_path"]);
+    expect(row1!.todo).toContain("Both generated scenarios remain visible");
 
     // Case 2: intent only → shown, labeled, with its bucket.
     g.generated_tests = [intent];
