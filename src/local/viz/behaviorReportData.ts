@@ -595,12 +595,10 @@ function riskGeneratedTests(
     if (!isFirstRowForFile) return [];
     return fileOf(t.target_symbol_external_id) === gap.file ? [{ t, sameFile: true }] : [];
   });
-  // Mutually exclusive display: when ANY runnable generated test exists for
-  // this target, English intents are suppressed — intents are strictly the
-  // fallback for environments where runnable code was withheld. Never mix.
-  const runnableLinked = linked.filter(({ t }) => t.runnable !== false);
-  const shown = runnableLinked.length > 0 ? runnableLinked : linked;
-  return shown.slice(0, 2).map(({ t, sameFile }) => ({
+  // Keep the two generated scenarios visible even when only one survives
+  // compile validation. Hiding the manual sibling makes an unchanged rerun
+  // appear to have lost a generated test and obscures the real blocker.
+  return linked.slice(0, 2).map(({ t, sameFile }) => ({
     name: t.title,
     concern: t.test_type && t.test_type !== "unknown" ? t.test_type : undefined,
     bucket: t.bucket,
@@ -985,6 +983,12 @@ function riskTodo(
 ): string {
   if (generatedTests.length && generatedTests.every((t) => t.runnable !== false)) {
     return "Run the generated test below in your repo; follow its prove handoff so a mutation failure can mint Dynamically Proven.";
+  }
+  if (
+    generatedTests.some((t) => t.runnable !== false) &&
+    generatedTests.some((t) => t.runnable === false)
+  ) {
+    return "Run the validated generated test below, and review the second scenario's blocker before repairing or regenerating its draft. Both generated scenarios remain visible so an unchanged rerun does not appear to lose work.";
   }
   if (generatedTests.length) {
     const blockers = new Set(generatedTests.map((t) => t.blocker ?? "unknown"));
