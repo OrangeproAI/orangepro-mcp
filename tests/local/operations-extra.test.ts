@@ -15,6 +15,7 @@ import {
   opStart
 } from "../../src/local/operations.js";
 import { redactSecrets, containsSecret } from "../../src/local/util/redact.js";
+import { rankPriorityGaps } from "../../src/local/score/risk.js";
 import type { ModelCompletionRequest, ModelProvider } from "../../src/local/types.js";
 
 // Generation defaults to opt-in deterministic stand-in for offline determinism.
@@ -123,6 +124,31 @@ class StartV5Provider implements ModelProvider {
     }
 
     return "[]";
+  }
+}
+
+class OneScenarioAtATimeProvider implements ModelProvider {
+  readonly providerName = "fake";
+  readonly modelName = "fake-v5-one-at-a-time";
+  planningCalls = 0;
+
+  async complete(req: ModelCompletionRequest): Promise<string> {
+    if (!req.user.includes("Find missing test scenarios")) return "";
+    this.planningCalls++;
+    const fn = /^BEHAVIOR:\s*([A-Za-z0-9_]+)/m.exec(req.user)?.[1] ?? "behavior0";
+    const second = req.user.includes(`${fn} first critical scenario`);
+    return JSON.stringify([
+      {
+        id: 1,
+        title: `${fn} ${second ? "second" : "first"} critical scenario`,
+        concern: second ? "boundary_limits" : "contract",
+        technique: second ? "boundary_value_analysis" : "contract_verification",
+        rationale: "one accepted scenario per bounded planning call",
+        assertion_targets: [fn],
+        complexity: "basic",
+        risk_rank: 1
+      }
+    ]);
   }
 }
 
@@ -288,6 +314,112 @@ describe("operation-level coverage", () => {
     expect(rerun.generation.status).toBe("no_targets");
     expect(secondGraph.generated_tests.map((test: { id: string }) => test.id)).toEqual(firstIds);
     expect(secondGraph.generated_tests).toHaveLength(14);
+  });
+
+  it("opStart tops up partially generated current risk flows to two tests each", async () => {
+    const root = temp();
+    opInit(root, deps);
+    scaffoldRiskTargets(root, 24);
+    opAnalyze(root, { source: root }, deps);
+
+    const analyzedGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    const rankedIds = rankPriorityGaps(analyzedGraph, { repoRoot: root, limit: 24 }).map((gap) => gap.id);
+    expect(rankedIds).toHaveLength(24);
+
+    const seedProvider = new StartV5Provider();
+    const currentTopCounts = [
+      2,
+      ...Array<number>(8).fill(1),
+      ...Array<number>(8).fill(2),
+      ...Array<number>(3).fill(0)
+    ];
+    for (const [index, count] of currentTopCounts.entries()) {
+      if (count === 0) continue;
+      await opGenerate(
+        root,
+        { target_ids: [rankedIds[index]], limit: count, prompt_version: "v5" },
+        { ...deps, env: {}, aiProvider: seedProvider }
+      );
+    }
+    for (const targetId of rankedIds.slice(20, 22)) {
+      await opGenerate(
+        root,
+        { target_ids: [targetId], limit: 2, prompt_version: "v5" },
+        { ...deps, env: {}, aiProvider: seedProvider }
+      );
+    }
+
+    const seededGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(seededGraph.generated_tests).toHaveLength(30);
+    const seededHtml = readFileSync(join(root, ".orangepro", "behavior-coverage.html"), "utf8");
+    expect(seededHtml).toContain('"generatedTotal":30');
+    expect(Number(/"shownCount":(\d+)/.exec(seededHtml)?.[1])).toBe(26);
+
+    const topUpProvider = new StartV5Provider();
+    const res = await opStart(
+      root,
+      { source: root, aiFlows: false, proofLimit: 0, generateLimit: 20, promptVersion: "v5" },
+      { ...deps, env: {}, aiProvider: topUpProvider }
+    );
+
+    expect(res.generation).toMatchObject({
+      status: "completed",
+      requested: 11,
+      generated: 14
+    });
+    const finalGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(finalGraph.generated_tests).toHaveLength(44);
+    for (const targetId of rankedIds.slice(0, 20)) {
+      expect(finalGraph.generated_tests.filter(
+        (test: { target_symbol_external_id?: string }) => test.target_symbol_external_id === targetId
+      )).toHaveLength(2);
+    }
+    const finalHtml = readFileSync(res.behavior_coverage_path ?? "", "utf8");
+    expect(finalHtml).toContain('"generatedTotal":44');
+    expect(finalHtml).toContain('"shownCount":40');
+
+    const persistedIds = finalGraph.generated_tests.map((test: { id: string }) => test.id);
+    const rerunProvider = new StartV5Provider();
+    const rerun = await opStart(
+      root,
+      { source: root, aiFlows: false, proofLimit: 0, generateLimit: 20, promptVersion: "v5" },
+      { ...deps, env: {}, aiProvider: rerunProvider }
+    );
+    expect(rerun.generation).toMatchObject({ status: "no_targets", requested: 20, generated: 0 });
+    expect(rerunProvider.planningCalls).toBe(0);
+    const rerunGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(rerunGraph.generated_tests.map((test: { id: string }) => test.id)).toEqual(persistedIds);
+    const rerunHtml = readFileSync(rerun.behavior_coverage_path ?? "", "utf8");
+    expect(rerunHtml).toContain('"generatedTotal":44');
+    expect(rerunHtml).toContain('"shownCount":40');
+  }, 15_000);
+
+  it("opStart makes one bounded follow-up when the provider returns only one scenario", async () => {
+    const root = temp();
+    opInit(root, deps);
+    scaffoldRiskTargets(root, 2);
+    const provider = new OneScenarioAtATimeProvider();
+
+    const res = await opStart(
+      root,
+      { source: root, aiFlows: false, proofLimit: 0, generateLimit: 2, promptVersion: "v5" },
+      { ...deps, env: {}, aiProvider: provider }
+    );
+
+    expect(provider.planningCalls).toBe(4);
+    expect(res.generation).toMatchObject({
+      status: "completed_with_blockers",
+      requested: 2,
+      generated: 4,
+      drafts: 4
+    });
+    const graph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
+    expect(graph.generated_tests).toHaveLength(4);
+    const titleSet = new Set(graph.generated_tests.map((test: { title: string }) => test.title));
+    expect(titleSet.size).toBe(4);
+    const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
+    expect(html).toContain('"generatedTotal":4');
+    expect(html).toContain('"shownCount":4');
   });
 
   it("opStart reports the exact no-provider terminal generation reason", async () => {
