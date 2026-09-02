@@ -595,12 +595,10 @@ function riskGeneratedTests(
     if (!isFirstRowForFile) return [];
     return fileOf(t.target_symbol_external_id) === gap.file ? [{ t, sameFile: true }] : [];
   });
-  // Mutually exclusive display: when ANY runnable generated test exists for
-  // this target, English intents are suppressed — intents are strictly the
-  // fallback for environments where runnable code was withheld. Never mix.
-  const runnableLinked = linked.filter(({ t }) => t.runnable !== false);
-  const shown = runnableLinked.length > 0 ? runnableLinked : linked;
-  return shown.slice(0, 2).map(({ t, sameFile }) => ({
+  // Keep the two generated scenarios visible even when only one survives
+  // compile validation. Hiding the manual sibling makes an unchanged rerun
+  // appear to have lost a generated test and obscures the real blocker.
+  return linked.slice(0, 2).map(({ t, sameFile }) => ({
     name: t.title,
     concern: t.test_type && t.test_type !== "unknown" ? t.test_type : undefined,
     bucket: t.bucket,
@@ -617,12 +615,6 @@ function riskGeneratedTests(
     runnable: t.runnable !== false,
     ...(t.runnable === false ? { blocker: classifyGeneratedDraftBlocker(t.unresolved_reason) } : {})
   }));
-}
-
-/** Incoming refs are method-attributed and can be fractional when a file-level
- * reference is split across its symbols. Preserve that weighting honestly. */
-function fmtRefs(n: number): string {
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
 function displayTitle(title: string, file: string): string {
@@ -646,13 +638,12 @@ function riskContext(risk: RiskGap): string {
     : (risk.flow_position ?? 0) >= 3
       ? `${5 - (risk.flow_position ?? 0)} call${5 - (risk.flow_position ?? 0) === 1 ? "" : "s"} from the nearest entry point`
       : "deep in the call graph";
-  const refs = fmtRefs(risk.incoming_refs);
   const churn = risk.churn_available !== false
     ? `${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days`
     : "Git churn unavailable (provisional static-only ranking)";
   const parts = [
     `Sits at ${pos}${sens ? ` on ${sens} paths` : ""}.`,
-    `${refs} weighted incoming reference${risk.incoming_refs === 1 ? "" : "s"}, ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${churn} — and no test proves its behavior.`
+    `ORS ${risk.risk_score} (P${risk.probability ?? "?"} × I${risk.impact ?? "?"} × D${risk.detection_difficulty ?? "?"}) reflects flow position, change activity, complexity, impact, and test evidence; ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${churn} — and no test proves this flow.`
   ];
   return parts.join(" ");
 }
@@ -965,7 +956,7 @@ function riskApplicableConcerns(risk: RiskGap, verb: string): string[] {
   const sens = risk.data_sensitivity ?? 1;
   if (sens >= 9) out.add("authorization_safety");
   if (sens >= 6) out.add("data_integrity");
-  if (risk.entry_point || verb !== "BEHAVIOR") out.add("boundary_limits"); // external inputs cross here
+  if (risk.entry_point || verb !== "FLOW") out.add("boundary_limits"); // external inputs cross here
   if ((risk.flow_position ?? 0) >= 3 || (risk.fan_out ?? 0) >= 1) out.add("integration_flow");
   if ((risk.fan_out ?? 0) >= 1 && risk.git_churn > 0) out.add("state_lifecycle");
   if ((risk.fan_out ?? 0) >= 2) out.add("failure_recovery"); // downstream dependencies can fail
@@ -993,6 +984,12 @@ function riskTodo(
   if (generatedTests.length && generatedTests.every((t) => t.runnable !== false)) {
     return "Run the generated test below in your repo; follow its prove handoff so a mutation failure can mint Dynamically Proven.";
   }
+  if (
+    generatedTests.some((t) => t.runnable !== false) &&
+    generatedTests.some((t) => t.runnable === false)
+  ) {
+    return "Run the validated generated test below, and review the second scenario's blocker before repairing or regenerating its draft. Both generated scenarios remain visible so an unchanged rerun does not appear to lose work.";
+  }
   if (generatedTests.length) {
     const blockers = new Set(generatedTests.map((t) => t.blocker ?? "unknown"));
     if (blockers.size === 1) {
@@ -1013,7 +1010,7 @@ function riskTodo(
     return "OrangePro withheld generated code for the reasons shown below. Review each blocker, then repair or regenerate the drafts; do not assume repository dependencies are missing.";
   }
   const call =
-    verb !== "BEHAVIOR"
+    verb !== "FLOW"
       ? `issues ${verb} ${path}`
       : risk.entry_point
         ? `invokes ${displayTitle(risk.title, risk.file)} through its entry point`
@@ -1057,13 +1054,13 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
     const bucket = riskBucket(risk.risk_score, maxRiskScore);
     if (risk.churn_available === false) tags.push(["provisional rank", "info"]);
     else if (bucket) tags.push([`${bucket} risk`, "risk"]);
-    tags.push([`${fmtRefs(risk.incoming_refs)} weighted refs`, "info"]);
+    tags.push([`ORS ${risk.risk_score}`, "info"]);
     if (risk.entry_point) tags.push(["Entry point", "entry"]);
     return {
       rank: idx + 1,
       ...(() => {
         const generatedTests = riskGeneratedTests(graph, risk, riskIds, firstRowForFile.get(risk.file) === risk.id);
-        const verb = methodMatch?.[1]?.toUpperCase() ?? "BEHAVIOR";
+        const verb = methodMatch?.[1]?.toUpperCase() ?? "FLOW";
         const path = qualify(risk, methodMatch?.[2] ?? displayTitle(risk.title, risk.file));
         const generatedCategories = [...new Set([
           ...generatedTests.map((t) => (t.bucket ? BUCKET_TO_CONCERN[t.bucket] : undefined)),

@@ -935,8 +935,8 @@ function riskMatchesFilter(r){
 function renderRiskFilters(){
   const options=[
     ["all","All",D.risks.length],
-    ["generated","Flows with generated output",generatedRiskCount+"/"+D.risks.length],
-    ["missing","Flows without generated output",D.risks.filter(r=>!(r.generatedTests&&r.generatedTests.length)).length+"/"+D.risks.length]
+    ["generated","Flows with tests",generatedRiskCount],
+    ["missing","No generated tests",D.risks.filter(r=>!(r.generatedTests&&r.generatedTests.length)).length]
   ];
   riskTools.innerHTML=options.map(([key,label,count])=>`<button class="risk-filter" type="button" data-risk-filter="${key}" aria-pressed="${key===activeRiskFilter}">${label} <span class="gc">${count}</span></button>`).join("");
 }
@@ -989,7 +989,7 @@ function renderRisks(){
     riskList.append(el("div","paywall",
       hiddenGeneratedFlows
         ? `<div class="paywall-num">${hiddenGeneratedFlows} more flows with generated output</div>
-           <div class="paywall-txt">OrangePro produced ${generatedOutputCopy} across ${generatedRiskCount} high-risk flow${generatedRiskCount===1?"":"s"}. Use the “Flows with generated output” filter to review them first.</div>
+           <div class="paywall-txt">OrangePro produced ${generatedOutputCopy} across ${generatedRiskCount} high-risk flow${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>
            <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">View all on OrangePro Platform &rarr;</a>`
         : remainingRiskFlows
           ? `<div class="paywall-num">${remainingRiskFlows} high-risk flows left</div>

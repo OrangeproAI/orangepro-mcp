@@ -467,7 +467,7 @@ describe("generateTests — well-grounded behavior", () => {
     expect(result.warnings.join("\n")).toContain("Dropped duplicate v5 generated test");
   });
 
-  it("drops v5 generated bodies that do not align with the planned assertion target", async () => {
+  it("keeps the planned manual test when v5 code does not align with the scenario", async () => {
     const symbol = makeNode({
       kind: "CodeSymbol",
       external_id: "sym:src/orders.py#refund_order",
@@ -520,11 +520,19 @@ describe("generateTests — well-grounded behavior", () => {
       CLOCK
     );
 
-    expect(result.generated_tests).toEqual([]);
+    expect(result.generated_tests).toHaveLength(1);
+    expect(result.generated_tests[0]).toMatchObject({
+      title: "refund_order — refund keeps ledger balanced",
+      runnable: false,
+      target_symbol_external_id: symbol.external_id
+    });
+    expect(result.generated_tests[0].body).toContain("Scenario: refund keeps ledger balanced");
+    expect(result.generated_tests[0].body).toContain("Expected: ledger balance changes");
+    expect(result.generated_tests[0].unresolved_reason).toContain("did not align");
     expect(result.missing_evidence[0]?.reason).toContain("did not align");
   });
 
-  it("drops non-runnable v5 generations instead of counting them", async () => {
+  it("keeps the planned manual test when v5 returns no executable code", async () => {
     const symbol = makeNode({
       kind: "CodeSymbol",
       external_id: "sym:src/orders.py#cancel_order",
@@ -577,8 +585,11 @@ describe("generateTests — well-grounded behavior", () => {
       CLOCK
     );
 
-    expect(result.generated_tests).toEqual([]);
-    expect(result.run).toBeNull();
+    expect(result.generated_tests).toHaveLength(1);
+    expect(result.generated_tests[0].runnable).toBe(false);
+    expect(result.generated_tests[0].body).toContain("Scenario: rejects missing order");
+    expect(result.generated_tests[0].body).toContain("Expected: throws");
+    expect(result.run?.generated_test_ids).toEqual([result.generated_tests[0].id]);
     expect(result.missing_evidence[0]?.reason).toContain("no executable code");
   });
 
