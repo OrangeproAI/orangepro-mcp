@@ -2183,42 +2183,69 @@ export async function opStart(
   } else if (!opts.noAuto && generationProviderConfigured && opts.ai !== false && generationLimit > 0) {
     try {
       const graphForGeneration = loadGraph(workspacePaths(root).graphPath);
-      const generatedTargets = new Set(
-        (graphForGeneration.generated_tests ?? []).map((t) => t.target_symbol_external_id).filter((id): id is string => Boolean(id))
-      );
-      const targetIds = rankPriorityGaps(graphForGeneration, {
+      const generatedTestsByTarget = new Map<string, GeneratedTest[]>();
+      for (const test of graphForGeneration.generated_tests ?? []) {
+        const targetId = test.target_symbol_external_id;
+        if (!targetId || test.stale === true) continue;
+        const tests = generatedTestsByTarget.get(targetId) ?? [];
+        tests.push(test);
+        generatedTestsByTarget.set(targetId, tests);
+      }
+      const targetPlans = rankPriorityGaps(graphForGeneration, {
         repoRoot: root,
         limit: generationLimit,
         provenIds: provenSymbolIds(graphForGeneration, loadLedger(root))
       })
-        .map((gap) => gap.id)
-        .filter((id) => !generatedTargets.has(id));
-      if (!targetIds.length) {
+        .map((gap) => {
+          const existingTests = generatedTestsByTarget.get(gap.id) ?? [];
+          return {
+            id: gap.id,
+            existingTests,
+            deficit: Math.max(0, 2 - existingTests.length)
+          };
+        })
+        .filter((target) => target.deficit > 0);
+      if (!targetPlans.length) {
         generationResult = {
           ...generationResult,
           status: "no_targets",
-          reason: "No eligible ungenerated risk targets were found."
+          reason: "Every eligible priority flow already has two generated tests."
         };
       } else {
-        reportProgress(`generate: drafting tests for top ${targetIds.length} risk target(s)`, { current: 6, total: 8 });
+        reportProgress(`generate: filling test gaps for ${targetPlans.length} priority flow(s)`, { current: 6, total: 8 });
         const generatedDrafts: GeneratedTest[] = [];
-        for (const targetId of targetIds) {
-          const generated = await opGenerate(
-            root,
-            {
-              ...providerOpts,
-              // One ranked flow per generation run. Give each flow room for its
-              // two highest-risk missing tests instead of sharing a batch budget.
-              target_ids: [targetId],
-              limit: 2,
-              // The offline deterministic stand-in emits the established v2 scaffold; v5 is
-              // a two-phase model planning protocol and must not be selected implicitly for it.
-              prompt_version: opts.promptVersion ?? (deterministicGeneration ? "v2" : "v5")
-            },
-            providerDeps
-          );
-          generatedDrafts.push(...generated.generated_tests);
-          warnings.push(...generated.warnings.map((w) => `generate: ${w}`));
+        const incompleteTargets: string[] = [];
+        for (const target of targetPlans) {
+          let remaining = target.deficit;
+          const existingTitles = target.existingTests.map((test) => test.title);
+          // A provider can return one accepted scenario when two were requested.
+          // Make at most one bounded follow-up for the remaining slot, carrying
+          // prior titles so the planner cannot silently duplicate the first test.
+          for (let attempt = 0; attempt < 2 && remaining > 0; attempt++) {
+            const generated = await opGenerate(
+              root,
+              {
+                ...providerOpts,
+                target_ids: [target.id],
+                limit: remaining,
+                pin_unchanged: false,
+                existing_generated_test_titles: existingTitles,
+                // The offline deterministic stand-in emits the established v2 scaffold; v5 is
+                // a two-phase model planning protocol and must not be selected implicitly for it.
+                prompt_version: opts.promptVersion ?? (deterministicGeneration ? "v2" : "v5")
+              },
+              providerDeps
+            );
+            const freshForTarget = generated.generated_tests.filter(
+              (test) => test.target_symbol_external_id === target.id && !test.pinned
+            );
+            generatedDrafts.push(...freshForTarget);
+            warnings.push(...generated.warnings.map((w) => `generate: ${w}`));
+            if (freshForTarget.length === 0) break;
+            existingTitles.push(...freshForTarget.map((test) => test.title));
+            remaining = Math.max(0, remaining - freshForTarget.length);
+          }
+          if (remaining > 0) incompleteTargets.push(target.id);
         }
         const blockers: Partial<Record<GeneratedDraftBlocker, number>> = {};
         for (const draft of generatedDrafts.filter((test) => test.runnable === false)) {
@@ -2226,22 +2253,27 @@ export async function opStart(
           blockers[blocker] = (blockers[blocker] ?? 0) + 1;
         }
         const runnable = generatedDrafts.filter((test) => test.runnable !== false).length;
+        const shortfallReason = incompleteTargets.length
+          ? `${incompleteTargets.length} priority flow(s) remain below two generated tests because the provider returned no additional accepted distinct scenario.`
+          : undefined;
         generationResult = {
           status: generatedDrafts.length === 0
             ? "no_results"
-            : generatedDrafts.some((test) => test.runnable === false)
+            : generatedDrafts.some((test) => test.runnable === false) || incompleteTargets.length > 0
               ? "completed_with_blockers"
               : "completed",
-          requested: targetIds.length,
+          requested: targetPlans.length,
           generated: generatedDrafts.length,
           runnable,
           drafts: generatedDrafts.length - runnable,
           blockers,
           ...(generatedDrafts.length === 0
-            ? { reason: "The provider returned no generated-test drafts for the selected risk targets." }
+            ? { reason: shortfallReason ?? "The provider returned no generated-test drafts for the selected risk targets." }
+            : shortfallReason
+              ? { reason: shortfallReason }
             : {})
         };
-        if (generatedDrafts.length === 0) warnings.push(`generate: ${generationResult.reason}`);
+        if (generationResult.reason) warnings.push(`generate: ${generationResult.reason}`);
       }
     } catch (err) {
       const reason = redactSecrets(err instanceof Error ? err.message : String(err));
@@ -2470,6 +2502,7 @@ export async function opGenerate(
       limit: opts.limit,
       input_mode: opts.input_mode,
       prompt_version: opts.prompt_version,
+      existing_generated_test_titles: opts.existing_generated_test_titles,
       // Persisting lane: a runnable draft for an unchanged target is reused as-is
       // rather than re-bought from the model on every run.
       pin_unchanged: opts.pin_unchanged ?? true

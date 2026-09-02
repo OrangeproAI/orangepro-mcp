@@ -2205,7 +2205,12 @@ export async function generateTests(
   const promptVersion = inputMode === "graph_grounded" && opts.prompt_version === "v5" ? PROMPT_VERSION_V5 : PROMPT_VERSION;
 
   const created_at = clock();
-  const runSeed = shortHash(created_at + provider.modelName + runTargets.map((t) => t.external_id).join(","));
+  const runSeed = shortHash(
+    created_at +
+    provider.modelName +
+    runTargets.map((t) => t.external_id).join(",") +
+    JSON.stringify(opts.existing_generated_test_titles ?? [])
+  );
   const run_id = `local-gen-${runSeed}`;
 
   const generated: GeneratedTest[] = [];
@@ -2328,6 +2333,10 @@ export async function generateTests(
       const behavior = runTargets[targetIndex];
       if (generated.length >= limit) break;
       const gc = gatherContext(graph, behavior, framework, fileReader);
+      const existingGeneratedTitles = dedupe(opts.existing_generated_test_titles ?? []);
+      if (existingGeneratedTitles.length) {
+        gc.ctx.existing_tests = dedupe([...gc.ctx.existing_tests, ...existingGeneratedTitles]);
+      }
       reportProgress(`Planning "${gc.ctx.behavior_title}" [v5]…`);
       let scenarios: PlannedScenario[] = [];
       // Transport first: a network/timeout failure is NOT malformed JSON, so it does
@@ -2413,6 +2422,19 @@ export async function generateTests(
             needed: ["valid JSON planned scenarios"]
           });
           continue;
+        }
+      }
+      if (existingGeneratedTitles.length) {
+        const normalizedExistingTitles = new Set(existingGeneratedTitles.map((title) => title.trim().toLowerCase()));
+        const beforeDuplicateFilter = scenarios.length;
+        scenarios = scenarios.filter((scenario) => {
+          const scenarioTitle = scenario.title.trim().toLowerCase();
+          const fullTitle = `${gc.ctx.behavior_title} — ${scenario.title}`.trim().toLowerCase();
+          return !normalizedExistingTitles.has(scenarioTitle) && !normalizedExistingTitles.has(fullTitle);
+        });
+        const duplicateCount = beforeDuplicateFilter - scenarios.length;
+        if (duplicateCount > 0) {
+          warnings.push(`Dropped ${duplicateCount} already-generated v5 scenario(s) for "${gc.ctx.behavior_title}" during top-up.`);
         }
       }
       if (scenarios.length === 0) {
