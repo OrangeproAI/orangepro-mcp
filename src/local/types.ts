@@ -158,6 +158,12 @@ export interface GenerateOptions {
   /** Override the shared system prompt (used by the A/B compare view). */
   systemPrompt?: string;
   /**
+   * Internal top-up context: persisted generated scenarios that the planner must
+   * treat as already covered. Titles are prompt context and a duplicate guard;
+   * they do not change coverage or proof state.
+   */
+  existing_generated_test_titles?: string[];
+  /**
    * Reuse a previously runnable draft when the target's code fingerprint is
    * unchanged, instead of paying for a fresh generation. Opt-in: the A/B compare
    * view must always call the model for BOTH arms, so it leaves this off.
