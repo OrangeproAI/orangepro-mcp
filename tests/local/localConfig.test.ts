@@ -50,9 +50,15 @@ describe("local provider env files", () => {
     expect(cfg?.apiKey).toBe("env-key");
   });
 
-  it("defaults OpenAI generation to the stronger public-demo model", () => {
+  it("defaults OpenAI generation to GPT-5.3 Codex", () => {
     const cfg = resolveProviderConfig({ OPENAI_API_KEY: "env-key" });
 
-    expect(cfg).toMatchObject({ provider: "openai", model: "gpt-4.1" });
+    expect(cfg).toMatchObject({ provider: "openai", model: "gpt-5.3-codex" });
+  });
+
+  it("defaults Anthropic generation to Claude Sonnet", () => {
+    const cfg = resolveProviderConfig({ ANTHROPIC_API_KEY: "env-key" });
+
+    expect(cfg).toMatchObject({ provider: "anthropic", model: "claude-sonnet-4-6" });
   });
 });
