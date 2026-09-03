@@ -11,8 +11,10 @@ function cfg(model: string): ProviderConfig {
 /** Fake fetch that records each request body and replays a queue of responses. */
 function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
   const calls: Record<string, unknown>[] = [];
+  const urls: string[] = [];
   const queue = [...responses];
-  const fn = (async (_url: string, init: { body: string }) => {
+  const fn = (async (url: string, init: { body: string }) => {
+    urls.push(url);
     calls.push(JSON.parse(init.body));
     const next = queue.shift();
     if (!next) throw new Error("fakeFetch: no more responses queued");
@@ -23,7 +25,7 @@ function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
       text: async () => text
     };
   }) as unknown as typeof fetch;
-  return { fn, calls };
+  return { fn, calls, urls };
 }
 
 const UNSUPPORTED_MAX_TOKENS = {
@@ -182,6 +184,50 @@ describe("AnthropicProvider completion truncation", () => {
 });
 
 describe("OpenAICompatibleProvider parameter compatibility", () => {
+  it("uses the Responses API for gpt-5.3-codex and aggregates output text", async () => {
+    const f = fakeFetch([{
+      status: 200,
+      body: {
+        status: "completed",
+        output: [
+          { type: "reasoning", content: [] },
+          { type: "message", content: [{ type: "output_text", text: "GENERATED" }] }
+        ]
+      }
+    }]);
+
+    const out = await new OpenAICompatibleProvider(cfg("gpt-5.3-codex"), f.fn).complete({
+      system: "s",
+      user: "u",
+      maxTokens: 1000
+    });
+
+    expect(out).toBe("GENERATED");
+    expect(f.urls).toEqual(["https://api.openai.com/v1/responses"]);
+    expect(f.calls[0]).toMatchObject({
+      model: "gpt-5.3-codex",
+      instructions: "s",
+      input: "u",
+      max_output_tokens: 1000
+    });
+    expect(f.calls[0]).not.toHaveProperty("messages");
+    expect(f.calls[0]).not.toHaveProperty("temperature");
+  });
+
+  it("retries a truncated Responses API result once with a larger output budget", async () => {
+    const f = fakeFetch([
+      { status: 200, body: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] } },
+      { status: 200, body: { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "GENERATED" }] }] } }
+    ]);
+
+    const out = await new OpenAICompatibleProvider(cfg("gpt-5.3-codex"), f.fn).complete({ system: "s", user: "u" });
+
+    expect(out).toBe("GENERATED");
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[0].max_output_tokens).toBe(4000);
+    expect(f.calls[1].max_output_tokens).toBe(16000);
+  });
+
   it("older model: sends max_tokens + temperature (unchanged behavior)", async () => {
     const f = fakeFetch([{ status: 200, body: OK }]);
     const out = await new OpenAICompatibleProvider(cfg("gpt-4.1"), f.fn).complete({ system: "s", user: "u" });
