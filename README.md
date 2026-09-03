@@ -347,6 +347,7 @@ Analysis, scoring, and proof need no model key. Generation does.
 | Ollama (local, no key) | `OLLAMA_BASE_URL` (optional: `OLLAMA_MODEL`) |
 
 Auto-detect order: OpenAI → Ollama → Anthropic. Override with `--provider` and `--model`.
+The defaults are `gpt-5.3-codex` for OpenAI and `claude-sonnet-4-6` for Anthropic.
 
 Run `opro setup` to configure interactively. Keys stay in your environment — never written to graph, config, or artifacts.
 
