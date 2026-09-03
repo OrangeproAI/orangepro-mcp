@@ -271,6 +271,7 @@ async function main(): Promise<number> {
           out(`    open with:    open ${res.behavior_coverage_path}`);
         }
         if (res.coverage_report_path) out(`  coverage report: ${res.coverage_report_path}`);
+        if (res.generation_diagnostics_path) out(`  generation diagnostics: ${res.generation_diagnostics_path}`);
         out(`  RTM:            ${res.rtm.rtm_path}${res.rtm.rows.length < res.rtm.summary.total ? ` (capped ${res.rtm.rows.length}/${res.rtm.summary.total} rows)` : ""}`);
         out(`  Dynamically Proven:    ${res.rtm.summary.proven}/${res.rtm.summary.total} (static map covers all ${res.rtm.summary.total}; dynamic proof verifies the top ${res.auto_prove.attempted || "few"})`);
         if (res.rtm.summary.total > 0 && res.rtm.summary.proven === 0) {

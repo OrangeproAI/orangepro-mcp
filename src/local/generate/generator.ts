@@ -2337,122 +2337,6 @@ export async function generateTests(
       if (existingGeneratedTitles.length) {
         gc.ctx.existing_tests = dedupe([...gc.ctx.existing_tests, ...existingGeneratedTitles]);
       }
-      reportProgress(`Planning "${gc.ctx.behavior_title}" [v5]…`);
-      let scenarios: PlannedScenario[] = [];
-      // Transport first: a network/timeout failure is NOT malformed JSON, so it does
-      // not warrant a repair pass — fail closed and emit no test.
-      let rawPlan: string;
-      try {
-        rawPlan = await provider.complete({
-          system: opts.systemPrompt ?? buildPlanningSystemPromptV5(),
-          user: buildPlanningUserPromptV5(gc.ctx),
-          maxTokens: 1600,
-          temperature: 0
-        });
-      } catch (callErr) {
-        const msg = redactSecrets(callErr instanceof Error ? callErr.message : String(callErr));
-        warnings.push(`V5 planning call failed for "${gc.ctx.behavior_title}": ${msg} — no test emitted.`);
-        missing.push({
-          external_id: behavior.external_id,
-          title: gc.ctx.behavior_title,
-          reason: `V5 planning call failed: ${msg}`,
-          needed: ["a reachable model provider"]
-        });
-        continue;
-      }
-      try {
-        const result = parsePlannedScenariosStrict(rawPlan, 2);
-        scenarios = result.scenarios;
-        if (result.dropped > 0) {
-          warnings.push(`Dropped ${result.dropped} invalid v5 planned scenario(s) for "${gc.ctx.behavior_title}": ${result.dropSummary.join("; ")}.`);
-        }
-      } catch (parseErr) {
-        // Malformed/unvalidated planning JSON. Make ONE transient repair call — the
-        // malformed output is sent to the model but NEVER persisted, and the parse
-        // error is redacted before it reaches any warning/log.
-        const parseMsg = redactSecrets(parseErr instanceof Error ? parseErr.message : String(parseErr));
-        // Repair only RECOVERS scenarios already present in the malformed output — it must NEVER
-        // invent a fresh plan from garbage. Pre-gate on recoverable JSON-array structure; without it,
-        // fail closed with no repair call ("no JSON array" / total garbage → no invented plan).
-        if (!hasRepairableScenarioStructure(rawPlan)) {
-          warnings.push(`V5 planning for "${gc.ctx.behavior_title}" produced no recoverable scenario array (${parseMsg}) — failing closed, no repair, no test emitted.`);
-          missing.push({
-            external_id: behavior.external_id,
-            title: gc.ctx.behavior_title,
-            reason: `V5 planning JSON had no recoverable scenario array (repair would invent): ${parseMsg}`,
-            needed: ["valid JSON planned scenarios"]
-          });
-          continue;
-        }
-        try {
-          const repaired = await provider.complete({
-            system: buildPlanningRepairSystemPromptV5(),
-            user: buildPlanningRepairUserPromptV5(rawPlan),
-            maxTokens: 1600,
-            temperature: 0
-          });
-          const result = parsePlannedScenariosStrict(repaired, 2);
-          // Keep ONLY repaired scenarios that tie back to the ORIGINAL malformed text; drop any the
-          // model invented. If none tie back, fail closed — never generate from an invented plan.
-          const tiedBack = result.scenarios.filter((s) => scenarioTiesBackToRaw(s, rawPlan));
-          const invented = result.scenarios.length - tiedBack.length;
-          if (tiedBack.length === 0) {
-            warnings.push(`V5 planning repair for "${gc.ctx.behavior_title}" recovered no scenario tied to the original output (${invented} invented dropped) — failing closed, no test emitted.`);
-            missing.push({
-              external_id: behavior.external_id,
-              title: gc.ctx.behavior_title,
-              reason: "V5 planning repair produced only invented scenarios not tied to the original output.",
-              needed: ["valid JSON planned scenarios"]
-            });
-            continue;
-          }
-          scenarios = tiedBack;
-          warnings.push(`V5 planning output for "${gc.ctx.behavior_title}" was malformed (${parseMsg}); one repair call recovered ${tiedBack.length} tied-back scenario(s)${invented ? `, dropped ${invented} not tied to the original` : ""}.`);
-          if (result.dropped > 0) {
-            warnings.push(`Dropped ${result.dropped} invalid v5 planned scenario(s) after repair for "${gc.ctx.behavior_title}": ${result.dropSummary.join("; ")}.`);
-          }
-        } catch (repairErr) {
-          // Fail closed: never generate from malformed/unvalidated scenario data.
-          const repairMsg = redactSecrets(repairErr instanceof Error ? repairErr.message : String(repairErr));
-          warnings.push(`V5 planning failed for "${gc.ctx.behavior_title}": malformed JSON and repair failed (${repairMsg}) — no test emitted.`);
-          missing.push({
-            external_id: behavior.external_id,
-            title: gc.ctx.behavior_title,
-            reason: `V5 planning JSON was malformed and could not be repaired: ${repairMsg}`,
-            needed: ["valid JSON planned scenarios"]
-          });
-          continue;
-        }
-      }
-      if (existingGeneratedTitles.length) {
-        const normalizedExistingTitles = new Set(existingGeneratedTitles.map((title) => title.trim().toLowerCase()));
-        const beforeDuplicateFilter = scenarios.length;
-        scenarios = scenarios.filter((scenario) => {
-          const scenarioTitle = scenario.title.trim().toLowerCase();
-          const fullTitle = `${gc.ctx.behavior_title} — ${scenario.title}`.trim().toLowerCase();
-          return !normalizedExistingTitles.has(scenarioTitle) && !normalizedExistingTitles.has(fullTitle);
-        });
-        const duplicateCount = beforeDuplicateFilter - scenarios.length;
-        if (duplicateCount > 0) {
-          warnings.push(`Dropped ${duplicateCount} already-generated v5 scenario(s) for "${gc.ctx.behavior_title}" during top-up.`);
-        }
-      }
-      if (scenarios.length === 0) {
-        missing.push({
-          external_id: behavior.external_id,
-          title: gc.ctx.behavior_title,
-          reason: "V5 planning returned no missing scenarios.",
-          needed: ["a distinct uncovered scenario"]
-        });
-        continue;
-      }
-      const remainingSlots = Math.max(1, limit - generated.length);
-      const remainingTargets = Math.max(1, runTargets.length - targetIndex);
-      // In explicit multi-target mode, reserve a fair share for every remaining
-      // target. Previously the first behavior could consume the entire batch
-      // with several scenarios, leaving later high-risk behaviors untouched.
-      const targetLimit = explicitMulti ? Math.max(1, Math.floor(remainingSlots / remainingTargets)) : remainingSlots;
-      const selected = scenarios.slice(0, targetLimit);
       const manualDraftForScenario = (scenario: PlannedScenario, reason: string): GeneratedTest => {
         const manualBody = sanitizeGeneratedBody([
           `Scenario: ${scenario.title}`,
@@ -2483,6 +2367,181 @@ export async function generateTests(
           unresolved_reason: reason
         };
       };
+      const emitManualPlanningFallback = (planningReason: string): void => {
+        if (!opts.manual_planning_fallback) return;
+        const normalizedExistingTitles = new Set(existingGeneratedTitles.map((title) => title.trim().toLowerCase()));
+        const candidates: PlannedScenario[] = [
+          {
+            id: 1,
+            title: "Validate the observable contract through the nearest public entry point",
+            concern: "contract",
+            technique: "contract_verification",
+            rationale: "Preserve a reviewable contract test intent when the model planner returns no accepted scenario.",
+            assertion_targets: ["The documented result, state change, and externally visible side effects are correct"],
+            steps: [
+              "Arrange valid inputs and the minimum required collaborators for this flow",
+              "Exercise the flow through its nearest public entry point",
+              "Assert the observable result, state transition, and side effects"
+            ],
+            complexity: "intermediate",
+            risk_rank: 1
+          },
+          {
+            id: 2,
+            title: "Reject invalid or boundary input without partial side effects",
+            concern: "failure_recovery",
+            technique: "error_guessing",
+            rationale: "Preserve a reviewable failure-path intent for a priority flow even when model planning fails.",
+            assertion_targets: ["The failure is explicit and no partial state or unintended side effect remains"],
+            steps: [
+              "Arrange an invalid, missing, or boundary input relevant to this flow",
+              "Exercise the same public entry path",
+              "Assert a clear failure outcome and verify that partial side effects were not retained"
+            ],
+            complexity: "intermediate",
+            risk_rank: 2
+          }
+        ];
+        const remaining = Math.max(0, limit - generated.length);
+        const selectedFallbacks = candidates.filter((scenario) => {
+          const scenarioTitle = scenario.title.trim().toLowerCase();
+          const fullTitle = `${gc.ctx.behavior_title} — ${scenario.title}`.trim().toLowerCase();
+          return !normalizedExistingTitles.has(scenarioTitle) && !normalizedExistingTitles.has(fullTitle);
+        }).slice(0, remaining);
+        const reason = `${planningReason} Manual fallback retained because this was the final bounded planning attempt; it is not runnable generated code.`;
+        for (const scenario of selectedFallbacks) generated.push(manualDraftForScenario(scenario, reason));
+        if (selectedFallbacks.length) {
+          warnings.push(`Retained ${selectedFallbacks.length} manual planning fallback(s) for "${gc.ctx.behavior_title}" after the final bounded planning attempt failed.`);
+        }
+      };
+      reportProgress(`Planning "${gc.ctx.behavior_title}" [v5]…`);
+      let scenarios: PlannedScenario[] = [];
+      let emptyScenarioReason = "V5 planning returned no missing scenarios.";
+      // Transport first: a network/timeout failure is NOT malformed JSON, so it does
+      // not warrant a repair pass — fail closed and emit no test.
+      let rawPlan: string;
+      try {
+        rawPlan = await provider.complete({
+          system: opts.systemPrompt ?? buildPlanningSystemPromptV5(),
+          user: buildPlanningUserPromptV5(gc.ctx),
+          maxTokens: 1600,
+          temperature: 0
+        });
+      } catch (callErr) {
+        const msg = redactSecrets(callErr instanceof Error ? callErr.message : String(callErr));
+        warnings.push(`V5 planning call failed for "${gc.ctx.behavior_title}": ${msg} — no test emitted.`);
+        missing.push({
+          external_id: behavior.external_id,
+          title: gc.ctx.behavior_title,
+          reason: `V5 planning call failed: ${msg}`,
+          needed: ["a reachable model provider"]
+        });
+        emitManualPlanningFallback(`V5 planning call failed: ${msg}.`);
+        continue;
+      }
+      try {
+        const result = parsePlannedScenariosStrict(rawPlan, 2);
+        scenarios = result.scenarios;
+        if (result.dropped > 0) {
+          warnings.push(`Dropped ${result.dropped} invalid v5 planned scenario(s) for "${gc.ctx.behavior_title}": ${result.dropSummary.join("; ")}.`);
+          if (result.scenarios.length === 0) {
+            emptyScenarioReason = `V5 planning returned only invalid scenarios: ${result.dropSummary.join("; ")}.`;
+          }
+        }
+      } catch (parseErr) {
+        // Malformed/unvalidated planning JSON. Make ONE transient repair call — the
+        // malformed output is sent to the model but NEVER persisted, and the parse
+        // error is redacted before it reaches any warning/log.
+        const parseMsg = redactSecrets(parseErr instanceof Error ? parseErr.message : String(parseErr));
+        // Repair only RECOVERS scenarios already present in the malformed output — it must NEVER
+        // invent a fresh plan from garbage. Pre-gate on recoverable JSON-array structure; without it,
+        // fail closed with no repair call ("no JSON array" / total garbage → no invented plan).
+        if (!hasRepairableScenarioStructure(rawPlan)) {
+          warnings.push(`V5 planning for "${gc.ctx.behavior_title}" produced no recoverable scenario array (${parseMsg}) — failing closed, no repair, no test emitted.`);
+          missing.push({
+            external_id: behavior.external_id,
+            title: gc.ctx.behavior_title,
+            reason: `V5 planning JSON had no recoverable scenario array (repair would invent): ${parseMsg}`,
+            needed: ["valid JSON planned scenarios"]
+          });
+          emitManualPlanningFallback(`V5 planning JSON had no recoverable scenario array: ${parseMsg}.`);
+          continue;
+        }
+        try {
+          const repaired = await provider.complete({
+            system: buildPlanningRepairSystemPromptV5(),
+            user: buildPlanningRepairUserPromptV5(rawPlan),
+            maxTokens: 1600,
+            temperature: 0
+          });
+          const result = parsePlannedScenariosStrict(repaired, 2);
+          // Keep ONLY repaired scenarios that tie back to the ORIGINAL malformed text; drop any the
+          // model invented. If none tie back, fail closed — never generate from an invented plan.
+          const tiedBack = result.scenarios.filter((s) => scenarioTiesBackToRaw(s, rawPlan));
+          const invented = result.scenarios.length - tiedBack.length;
+          if (tiedBack.length === 0) {
+            warnings.push(`V5 planning repair for "${gc.ctx.behavior_title}" recovered no scenario tied to the original output (${invented} invented dropped) — failing closed, no test emitted.`);
+            missing.push({
+              external_id: behavior.external_id,
+              title: gc.ctx.behavior_title,
+              reason: "V5 planning repair produced only invented scenarios not tied to the original output.",
+              needed: ["valid JSON planned scenarios"]
+            });
+            emitManualPlanningFallback("V5 planning repair produced no scenario tied to the original response.");
+            continue;
+          }
+          scenarios = tiedBack;
+          warnings.push(`V5 planning output for "${gc.ctx.behavior_title}" was malformed (${parseMsg}); one repair call recovered ${tiedBack.length} tied-back scenario(s)${invented ? `, dropped ${invented} not tied to the original` : ""}.`);
+          if (result.dropped > 0) {
+            warnings.push(`Dropped ${result.dropped} invalid v5 planned scenario(s) after repair for "${gc.ctx.behavior_title}": ${result.dropSummary.join("; ")}.`);
+          }
+        } catch (repairErr) {
+          // Fail closed: never generate from malformed/unvalidated scenario data.
+          const repairMsg = redactSecrets(repairErr instanceof Error ? repairErr.message : String(repairErr));
+          warnings.push(`V5 planning failed for "${gc.ctx.behavior_title}": malformed JSON and repair failed (${repairMsg}) — no test emitted.`);
+          missing.push({
+            external_id: behavior.external_id,
+            title: gc.ctx.behavior_title,
+            reason: `V5 planning JSON was malformed and could not be repaired: ${repairMsg}`,
+            needed: ["valid JSON planned scenarios"]
+          });
+          emitManualPlanningFallback(`V5 planning JSON was malformed and repair failed: ${repairMsg}.`);
+          continue;
+        }
+      }
+      if (existingGeneratedTitles.length) {
+        const normalizedExistingTitles = new Set(existingGeneratedTitles.map((title) => title.trim().toLowerCase()));
+        const beforeDuplicateFilter = scenarios.length;
+        scenarios = scenarios.filter((scenario) => {
+          const scenarioTitle = scenario.title.trim().toLowerCase();
+          const fullTitle = `${gc.ctx.behavior_title} — ${scenario.title}`.trim().toLowerCase();
+          return !normalizedExistingTitles.has(scenarioTitle) && !normalizedExistingTitles.has(fullTitle);
+        });
+        const duplicateCount = beforeDuplicateFilter - scenarios.length;
+        if (duplicateCount > 0) {
+          warnings.push(`Dropped ${duplicateCount} already-generated v5 scenario(s) for "${gc.ctx.behavior_title}" during top-up.`);
+          if (scenarios.length === 0) {
+            emptyScenarioReason = "V5 planning returned only scenarios already generated for this flow.";
+          }
+        }
+      }
+      if (scenarios.length === 0) {
+        missing.push({
+          external_id: behavior.external_id,
+          title: gc.ctx.behavior_title,
+          reason: emptyScenarioReason,
+          needed: ["a distinct uncovered scenario"]
+        });
+        emitManualPlanningFallback(emptyScenarioReason);
+        continue;
+      }
+      const remainingSlots = Math.max(1, limit - generated.length);
+      const remainingTargets = Math.max(1, runTargets.length - targetIndex);
+      // In explicit multi-target mode, reserve a fair share for every remaining
+      // target. Previously the first behavior could consume the entire batch
+      // with several scenarios, leaving later high-risk behaviors untouched.
+      const targetLimit = explicitMulti ? Math.max(1, Math.floor(remainingSlots / remainingTargets)) : remainingSlots;
+      const selected = scenarios.slice(0, targetLimit);
       const completions: string[] = [];
       try {
         reportProgress(`Generating "${gc.ctx.behavior_title}" [v5 batch: ${selected.length}]…`);
