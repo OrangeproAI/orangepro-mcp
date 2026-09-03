@@ -48,6 +48,7 @@ describe("provider timeouts", () => {
   it("reasoning models get the 10-minute ceiling; others keep the 60s default", () => {
     expect(providerTimeoutMs("gpt-5")).toBe(600_000);
     expect(providerTimeoutMs("o3-mini")).toBe(600_000);
+    expect(providerTimeoutMs("claude-sonnet-5")).toBe(600_000);
     expect(providerTimeoutMs("gpt-4.1")).toBe(60_000);
   });
 
@@ -136,6 +137,47 @@ describe("AnthropicProvider completion truncation", () => {
       new AnthropicProvider(anthropicCfg, f.fn).complete({ system: "s", user: "u", maxTokens: 1000 })
     ).rejects.toThrow(/truncated.*token limit/i);
     expect(f.calls).toHaveLength(2);
+  });
+
+  it("uses Sonnet 5 without rejected sampling parameters and reserves reasoning room", async () => {
+    const f = fakeFetch([
+      { status: 200, body: { content: [{ text: "GENERATED" }], stop_reason: "end_turn" } }
+    ]);
+    const cfg: ProviderConfig = {
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: "test-key"
+    };
+
+    const out = await new AnthropicProvider(cfg, f.fn).complete({
+      system: "s",
+      user: "u",
+      temperature: 0,
+      maxTokens: 1600
+    });
+
+    expect(out).toBe("GENERATED");
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]).not.toHaveProperty("temperature");
+    expect(f.calls[0].max_tokens).toBe(4000);
+  });
+
+  it("keeps Sonnet 4.6 request behavior unchanged as the explicit fallback", async () => {
+    const f = fakeFetch([
+      { status: 200, body: { content: [{ text: "GENERATED" }], stop_reason: "end_turn" } }
+    ]);
+    const cfg: ProviderConfig = {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: "test-key"
+    };
+
+    await new AnthropicProvider(cfg, f.fn).complete({ system: "s", user: "u", temperature: 0, maxTokens: 1600 });
+
+    expect(f.calls[0].temperature).toBe(0);
+    expect(f.calls[0].max_tokens).toBe(1600);
   });
 });
 

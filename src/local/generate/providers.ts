@@ -40,7 +40,7 @@ async function postJson(
     // timeout message — the #1 cause is a reasoning model thinking past the cap.
     if ((e as { name?: string })?.name === "AbortError") {
       throw new Error(
-        `Model call timed out after ${Math.round(timeoutMs / 1000)}s. Reasoning models (gpt-5/o-series) can spend ` +
+        `Model call timed out after ${Math.round(timeoutMs / 1000)}s. Reasoning or adaptive-thinking models can spend ` +
           `minutes on hidden reasoning before responding; retry, or try a smaller --limit or a different model.`
       );
     }
@@ -55,6 +55,7 @@ async function postJson(
 // `temperature`. Used only to SEED the request; the adapter still self-corrects
 // from the API's own error, so this list need not be exhaustive or current.
 const REASONING_MODEL = /(?:gpt-5|^o[0-9]|[-/]o[0-9])/i;
+const ANTHROPIC_ADAPTIVE_MODEL = /^claude-(?:sonnet-[5-9](?:-|$)|opus-(?:4-(?:7|8)|[5-9])(?:-|$)|fable-[5-9](?:-|$))/i;
 
 /**
  * Reasoning models spend minutes on hidden reasoning before the (non-streaming)
@@ -66,7 +67,9 @@ const REASONING_TIMEOUT_MS = 600_000;
 
 /** Per-call timeout: generous for reasoning models, default for the rest. */
 export function providerTimeoutMs(model: string): number {
-  return REASONING_MODEL.test(model) ? REASONING_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+  return REASONING_MODEL.test(model) || ANTHROPIC_ADAPTIVE_MODEL.test(model)
+    ? REASONING_TIMEOUT_MS
+    : DEFAULT_TIMEOUT_MS;
 }
 
 /**
@@ -189,20 +192,23 @@ export class AnthropicProvider implements ModelProvider {
     return this.cfg.model;
   }
   async complete(req: ModelCompletionRequest): Promise<string> {
-    let maxTokens = req.maxTokens ?? 900;
+    const adaptive = ANTHROPIC_ADAPTIVE_MODEL.test(this.cfg.model);
+    let maxTokens = req.maxTokens ?? (adaptive ? 4000 : 900);
+    if (adaptive) maxTokens = Math.max(maxTokens, 4000);
     let retriedLength = false;
     for (;;) {
+      const body: Record<string, unknown> = {
+        model: this.cfg.model,
+        max_tokens: maxTokens,
+        system: req.system,
+        messages: [{ role: "user", content: req.user }]
+      };
+      if (!adaptive) body.temperature = req.temperature ?? 0.2;
       const data = (await postJson(
         this.fetchImpl,
         `${this.cfg.baseUrl}/messages`,
         { "x-api-key": this.cfg.apiKey ?? "", "anthropic-version": "2023-06-01" },
-        {
-          model: this.cfg.model,
-          max_tokens: maxTokens,
-          temperature: req.temperature ?? 0.2,
-          system: req.system,
-          messages: [{ role: "user", content: req.user }]
-        },
+        body,
         providerTimeoutMs(this.cfg.model)
       )) as { content?: Array<{ text?: string }>; stop_reason?: string };
       if (data.stop_reason === "max_tokens" && !retriedLength) {
