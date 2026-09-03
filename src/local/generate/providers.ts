@@ -55,6 +55,7 @@ async function postJson(
 // `temperature`. Used only to SEED the request; the adapter still self-corrects
 // from the API's own error, so this list need not be exhaustive or current.
 const REASONING_MODEL = /(?:gpt-5|^o[0-9]|[-/]o[0-9])/i;
+const RESPONSES_API_MODEL = /^gpt-5\.3-codex(?:-|$)/i;
 const ANTHROPIC_ADAPTIVE_MODEL = /^claude-(?:sonnet-[5-9](?:-|$)|opus-(?:4-(?:7|8)|[5-9])(?:-|$)|fable-[5-9](?:-|$))/i;
 
 /**
@@ -107,6 +108,42 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const modern = REASONING_MODEL.test(this.cfg.model);
     // Reasoning models spend tokens on hidden reasoning, so give them more room.
     let maxTokens = req.maxTokens ?? (modern ? 4000 : 900);
+    if (RESPONSES_API_MODEL.test(this.cfg.model)) {
+      let retriedLength = false;
+      for (;;) {
+        const data = (await postJson(
+          this.fetchImpl,
+          `${this.cfg.baseUrl}/responses`,
+          { Authorization: `Bearer ${this.cfg.apiKey ?? ""}` },
+          {
+            model: this.cfg.model,
+            instructions: req.system,
+            input: req.user,
+            max_output_tokens: maxTokens,
+            store: false
+          },
+          providerTimeoutMs(this.cfg.model)
+        )) as {
+          status?: string;
+          incomplete_details?: { reason?: string };
+          output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+        };
+        const truncated = data.status === "incomplete" && data.incomplete_details?.reason === "max_output_tokens";
+        if (truncated && !retriedLength) {
+          retriedLength = true;
+          maxTokens *= 4;
+          continue;
+        }
+        if (truncated) {
+          throw new Error("Model output was truncated at the token limit after one retry; no generated code was accepted.");
+        }
+        return (data.output ?? [])
+          .flatMap((item) => item.type === "message" ? (item.content ?? []) : [])
+          .filter((content) => content.type === "output_text")
+          .map((content) => content.text ?? "")
+          .join("");
+      }
+    }
     // Seed from the model name, then self-correct from the API's explicit directive.
     let tokenParam: "max_tokens" | "max_completion_tokens" = modern ? "max_completion_tokens" : "max_tokens";
     let sendTemperature = !modern;
