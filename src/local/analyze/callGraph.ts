@@ -33,6 +33,10 @@ export interface RawCall {
   qualifier?: string;
   /** For `injected`: explicit class/type name of the injected field. */
   injectedType?: string;
+  /** Go only: the receiver variable of the enclosing method (`t` in `func (t *task) Run()`). */
+  receiverVar?: string;
+  /** Go only: the receiver's base type name (`task`). Lets `t.m()` resolve to `task.m` deterministically. */
+  receiverType?: string;
 }
 
 export interface MedusaGeneratedService {

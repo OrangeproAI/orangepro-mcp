@@ -1,3 +1,4 @@
+import { loadRiskConfig } from "../score/riskConfig.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
@@ -21,6 +22,8 @@ export interface BehaviorReportData {
     churn: "available" | "unavailable";
     churnWindow: string;
     toolVersion: string;
+    /** sha256 prefix of the per-repo risk config; part of the determinism claim. */
+    configHash?: string;
     inputFingerprint: string;
     reason?: string;
   };
@@ -641,8 +644,12 @@ function riskContext(risk: RiskGap): string {
   const churn = risk.churn_available !== false
     ? `${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days`
     : "Git churn unavailable (provisional static-only ranking)";
+  // Consequence signals and config overrides are stated on the row, so a reader can
+  // disagree with a weight without doubting the fact — and a tuned report is visible.
+  const flagged = (risk.reasons ?? []).filter((r) => r.startsWith("reaches a destructive") || r.startsWith("scheduled/queue-triggered") || r.startsWith("config override"));
   const parts = [
     `Sits at ${pos}${sens ? ` on ${sens} paths` : ""}.`,
+    ...flagged.map((r) => `${r[0].toUpperCase()}${r.slice(1)}.`),
     `ORS ${risk.risk_score} (P${risk.probability ?? "?"} × I${risk.impact ?? "?"} × D${risk.detection_difficulty ?? "?"}) reflects flow position, change activity, complexity, impact, and test evidence; ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${churn} — and no test proves this flow.`
   ];
   return parts.join(" ");
@@ -656,6 +663,8 @@ export interface ReportBaseline {
   summary: BehaviorReportData["summary"];
   riskPaths: string[]; // top-20 in rank order
   generatedTotal: number;
+  /** Risk config hash — part of the determinism claim (same commit + version + config). */
+  configHash?: string;
 }
 
 export interface ReportDelta {
@@ -669,6 +678,8 @@ export interface ReportDelta {
   newRisks: string[];      // entered the top-20
   droppedRisks: string[];  // left the top-20
   generatedDelta: number;
+  /** The per-repo risk config changed since the baseline. */
+  configChanged?: boolean;
 }
 
 /** Pure delta between a persisted baseline and the current report data.
@@ -691,14 +702,15 @@ export function computeReportDelta(prev: ReportBaseline, cur: BehaviorReportData
     droppedRisks,
     generatedDelta: cur.generatedTotal - prev.generatedTotal
   };
+  d.configChanged = Boolean(prev.configHash && cur.provenance?.configHash && prev.configHash !== cur.provenance.configHash);
   d.changed =
     d.totalDelta !== 0 || d.provenDelta !== 0 || d.associatedDelta !== 0 || d.candidateDelta !== 0 ||
-    d.noneDelta !== 0 || d.generatedDelta !== 0 || newRisks.length > 0 || droppedRisks.length > 0;
+    d.noneDelta !== 0 || d.generatedDelta !== 0 || newRisks.length > 0 || droppedRisks.length > 0 || d.configChanged;
   return d;
 }
 
 export function reportBaselineOf(cur: BehaviorReportData, ts: string): ReportBaseline {
-  return { ts, summary: cur.summary, riskPaths: cur.risks.map((r) => r.path), generatedTotal: cur.generatedTotal };
+  return { ts, summary: cur.summary, riskPaths: cur.risks.map((r) => r.path), generatedTotal: cur.generatedTotal, configHash: cur.provenance?.configHash };
 }
 
 /** Deterministic system-map model: trigger lanes → deepest services reached,
@@ -1119,6 +1131,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     churn: churnAvailable ? "available" : "unavailable",
     churnWindow: riskHealth.churnWindow,
     toolVersion: ORANGEPRO_VERSION,
+    configHash: loadRiskConfig(repoRoot).hash,
     inputFingerprint: createHash("sha256")
       .update(JSON.stringify({ root: graph.workspace.root_hash, commit: riskHealth.commit, history: riskHealth.history, churn: churnAvailable, window: riskHealth.churnWindow, version: ORANGEPRO_VERSION }))
       .digest("hex")

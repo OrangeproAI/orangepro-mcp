@@ -36,6 +36,9 @@ export interface TreeSitterRawCall {
   qualifier?: string;
   via: "free" | "qualified";
   shadowed: string[];
+  /** Go only: receiver variable + base type of the enclosing method (`t` / `task` in `func (t *task) Run()`). */
+  receiverVar?: string;
+  receiverType?: string;
 }
 
 export interface TreeSitterGoProofCall extends TreeSitterRawCall {
@@ -452,6 +455,12 @@ function functionName(node: Node, language: string): string | undefined {
  * behavior). NOT used for test-name extraction — suite test names must stay bare
  * (`^Test` gate at extractGoProofCalls).
  */
+function goReceiverVarName(node: Node): string | undefined {
+  const param = node.childForFieldName("receiver")?.namedChild(0);
+  const name = param?.childForFieldName("name");
+  return name?.type === "identifier" ? name.text : undefined;
+}
+
 function goReceiverBaseName(node: Node): string | undefined {
   const param = node.childForFieldName("receiver")?.namedChild(0);
   let t = param?.childForFieldName("type") ?? undefined;
@@ -1489,6 +1498,7 @@ export function extractTreeSitterStructure(content: string, language: string): T
   if (!tree) return { imports: [], calls: [] };
   const root = tree.rootNode;
   const calls: TreeSitterRawCall[] = [];
+  const callerReceivers = new Map<string, { receiverVar: string; receiverType: string }>();
   const isCallableNode = (node: Node): boolean =>
     (language === "java" && node.type === "method_declaration") ||
     (language === "python" && node.type === "function_definition") ||
@@ -1512,7 +1522,11 @@ export function extractTreeSitterStructure(content: string, language: string): T
         // qualified caller so Layer-1 edges keep matching the emitted symbol.
         if (name && language === "go" && node.type === "method_declaration") {
           const recv = goReceiverBaseName(node);
-          if (recv) name = `${recv}.${name}`;
+          if (recv) {
+            name = `${recv}.${name}`;
+            const rv = goReceiverVarName(node);
+            if (rv) callerReceivers.set(name, { receiverVar: rv, receiverType: recv });
+          }
         }
         if (name) {
           nextCaller = name;
@@ -1523,7 +1537,7 @@ export function extractTreeSitterStructure(content: string, language: string): T
     }
     const parts = callParts(node, language);
     if (nextCaller && parts) {
-      calls.push({ caller: nextCaller, ...parts, shadowed: [...nextShadowed] });
+      calls.push({ caller: nextCaller, ...parts, shadowed: [...nextShadowed], ...(callerReceivers.get(nextCaller) ?? {}) });
     }
     for (const child of namedChildren(node)) visit(child, nextCaller, nextShadowed, nextInsideFunction);
   };
