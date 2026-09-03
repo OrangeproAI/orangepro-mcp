@@ -27,7 +27,8 @@ export const SUPPORTED_MODELS: Record<ProviderName, ModelOption[]> = {
     { model: "gpt-4.1-mini", note: "cheap — smoke tests only" }
   ],
   anthropic: [
-    { model: "claude-sonnet-4-6", note: "default and recommended" },
+    { model: "claude-sonnet-5", note: "default and recommended" },
+    { model: "claude-sonnet-4-6", note: "previous Sonnet fallback" },
     { model: "claude-opus-4-8", note: "deepest reasoning" },
     { model: "claude-haiku-4-5", note: "fast, cheap" }
   ],

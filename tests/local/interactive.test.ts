@@ -31,8 +31,8 @@ describe("selectProviderAndModel", () => {
   it("anthropic curated model", async () => {
     const { choose, ask } = scripted([1, 0]);
     const sel = await selectProviderAndModel(NO_ENV, choose, ask);
-    expect(SUPPORTED_MODELS.anthropic[0].model).toBe("claude-sonnet-4-6");
-    expect(sel).toEqual({ provider: "anthropic", model: "claude-sonnet-4-6" });
+    expect(SUPPORTED_MODELS.anthropic[0].model).toBe("claude-sonnet-5");
+    expect(sel).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
   });
 
   it("deterministic needs no model", async () => {

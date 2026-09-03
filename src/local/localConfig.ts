@@ -133,7 +133,7 @@ export function resolveProviderConfig(
     if (!env.ANTHROPIC_API_KEY) return null;
     return {
       provider: "anthropic",
-      model: override.model || env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
+      model: override.model || env.ANTHROPIC_MODEL || "claude-sonnet-5",
       baseUrl: (env.ANTHROPIC_BASE_URL || "https://api.anthropic.com/v1").replace(/\/+$/, ""),
       apiKey: env.ANTHROPIC_API_KEY
     };

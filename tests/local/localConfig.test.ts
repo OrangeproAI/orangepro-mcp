@@ -56,9 +56,9 @@ describe("local provider env files", () => {
     expect(cfg).toMatchObject({ provider: "openai", model: "gpt-5.3-codex" });
   });
 
-  it("defaults Anthropic generation to Claude Sonnet", () => {
+  it("defaults Anthropic generation to Claude Sonnet 5", () => {
     const cfg = resolveProviderConfig({ ANTHROPIC_API_KEY: "env-key" });
 
-    expect(cfg).toMatchObject({ provider: "anthropic", model: "claude-sonnet-4-6" });
+    expect(cfg).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5" });
   });
 });
