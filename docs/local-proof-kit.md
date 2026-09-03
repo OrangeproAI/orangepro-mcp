@@ -124,6 +124,15 @@ generated test is still marked Proven only when it genuinely kills the null-sent
 via the **unchanged** dynamic-proof oracle. The default path is unchanged (no key required
 for v2/deterministic; existing behavior and CI are untouched).
 
+For v5 generation started through `opro start`, each priority flow gets two bounded
+planning attempts. If the configured model still returns no accepted distinct scenario,
+the report retains deterministic contract and failure-path **manual intents** for the
+missing slots. These are explicitly non-runnable, are never presented as model-generated
+code or proof, and include the redacted planning failure that caused the fallback.
+`.orangepro/generation-diagnostics.json` records each flow's requested slots, attempts,
+accepted model plans, manual fallbacks, and redacted rejection reasons. It never stores
+raw prompts, raw model responses, source code, or provider keys.
+
 Exercise the live v5 loop against a tiny fixture with a keyed smoke:
 
 ```bash

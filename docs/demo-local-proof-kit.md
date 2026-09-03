@@ -22,8 +22,8 @@ npm run build
 node scripts/demo-local-proof-kit.mjs --repo /path/to/any/repo --provider deterministic
 
 # With a real model (BYOK) — set a key, then let it auto-detect, or be explicit:
-OPENAI_API_KEY=sk-... node scripts/demo-local-proof-kit.mjs --repo /path/to/any/repo --model gpt-4.1
-ANTHROPIC_API_KEY=sk-ant-... node scripts/demo-local-proof-kit.mjs --repo /path/to/any/repo --provider anthropic --model claude-sonnet-4-6
+OPENAI_API_KEY=sk-... node scripts/demo-local-proof-kit.mjs --repo /path/to/any/repo --model gpt-5.3-codex
+ANTHROPIC_API_KEY=sk-ant-... node scripts/demo-local-proof-kit.mjs --repo /path/to/any/repo --provider anthropic --model claude-sonnet-5
 ```
 
 Flags: `--repo <path>` (target checkout), `--provider openai|anthropic|ollama|deterministic`,

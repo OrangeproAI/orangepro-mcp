@@ -140,7 +140,7 @@ Usage:
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
-  opro record --target-symbol sym:file#Symbol [--test path] [--agent-pass true|false] [--evidence-ids id1,id2] [--provider openai] [--model gpt-4.1] [--prompt-version v1] [--json]
+  opro record --target-symbol sym:file#Symbol [--test path] [--agent-pass true|false] [--evidence-ids id1,id2] [--provider openai] [--model gpt-5.3-codex] [--prompt-version v1] [--json]
     # record writes static reprove diagnostics only; public Proven requires \`opro prove\`
   opro prove --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--target-file path] [--method name] [--replacement-mode return-json|promise-json] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--json]
     # runs the dynamic targeted-proof oracle and writes a metadata-only ledger certificate only when baseline-green → mutant assertion-fail closes
@@ -271,6 +271,7 @@ async function main(): Promise<number> {
           out(`    open with:    open ${res.behavior_coverage_path}`);
         }
         if (res.coverage_report_path) out(`  coverage report: ${res.coverage_report_path}`);
+        if (res.generation_diagnostics_path) out(`  generation diagnostics: ${res.generation_diagnostics_path}`);
         out(`  RTM:            ${res.rtm.rtm_path}${res.rtm.rows.length < res.rtm.summary.total ? ` (capped ${res.rtm.rows.length}/${res.rtm.summary.total} rows)` : ""}`);
         out(`  Dynamically Proven:    ${res.rtm.summary.proven}/${res.rtm.summary.total} (static map covers all ${res.rtm.summary.total}; dynamic proof verifies the top ${res.auto_prove.attempted || "few"})`);
         if (res.rtm.summary.total > 0 && res.rtm.summary.proven === 0) {
