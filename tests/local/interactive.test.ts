@@ -16,7 +16,8 @@ describe("selectProviderAndModel", () => {
   it("picks a curated model (openai → first)", async () => {
     const { choose, ask } = scripted([0, 0]);
     const sel = await selectProviderAndModel(NO_ENV, choose, ask);
-    expect(sel).toEqual({ provider: "openai", model: SUPPORTED_MODELS.openai[0].model });
+    expect(SUPPORTED_MODELS.openai[0].model).toBe("gpt-5.3-codex");
+    expect(sel).toEqual({ provider: "openai", model: "gpt-5.3-codex" });
   });
 
   it("supports a custom model id", async () => {
@@ -30,7 +31,8 @@ describe("selectProviderAndModel", () => {
   it("anthropic curated model", async () => {
     const { choose, ask } = scripted([1, 0]);
     const sel = await selectProviderAndModel(NO_ENV, choose, ask);
-    expect(sel).toEqual({ provider: "anthropic", model: SUPPORTED_MODELS.anthropic[0].model });
+    expect(SUPPORTED_MODELS.anthropic[0].model).toBe("claude-sonnet-5");
+    expect(sel).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
   });
 
   it("deterministic needs no model", async () => {

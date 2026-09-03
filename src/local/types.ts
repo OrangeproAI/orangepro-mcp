@@ -164,6 +164,12 @@ export interface GenerateOptions {
    */
   existing_generated_test_titles?: string[];
   /**
+   * Internal start-orchestration fallback: after a prior planning attempt
+   * returned no accepted scenario, retain deterministic manual intents instead
+   * of leaving a priority flow with no test card. Never treated as runnable.
+   */
+  manual_planning_fallback?: boolean;
+  /**
    * Reuse a previously runnable draft when the target's code fingerprint is
    * unchanged, instead of paying for a fresh generation. Opt-in: the A/B compare
    * view must always call the model for BOTH arms, so it leaves this off.

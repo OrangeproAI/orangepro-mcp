@@ -20,13 +20,15 @@ export interface ModelOption {
  */
 export const SUPPORTED_MODELS: Record<ProviderName, ModelOption[]> = {
   openai: [
-    { model: "gpt-4.1", note: "strong general (recommended)" },
+    { model: "gpt-5.3-codex", note: "coding and test generation (recommended)" },
+    { model: "gpt-4.1", note: "strong non-reasoning model" },
     { model: "gpt-4o", note: "fast, multimodal" },
     { model: "gpt-5", note: "reasoning — uses max_completion_tokens" },
     { model: "gpt-4.1-mini", note: "cheap — smoke tests only" }
   ],
   anthropic: [
-    { model: "claude-sonnet-4-6", note: "recommended" },
+    { model: "claude-sonnet-5", note: "default and recommended" },
+    { model: "claude-sonnet-4-6", note: "previous Sonnet fallback" },
     { model: "claude-opus-4-8", note: "deepest reasoning" },
     { model: "claude-haiku-4-5", note: "fast, cheap" }
   ],

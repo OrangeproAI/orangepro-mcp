@@ -123,7 +123,7 @@ export function resolveProviderConfig(
     if (!env.OPENAI_API_KEY) return null;
     return {
       provider: "openai",
-      model: override.model || env.OPENAI_MODEL || "gpt-4.1",
+      model: override.model || env.OPENAI_MODEL || "gpt-5.3-codex",
       baseUrl: (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
       apiKey: env.OPENAI_API_KEY
     };
@@ -133,7 +133,7 @@ export function resolveProviderConfig(
     if (!env.ANTHROPIC_API_KEY) return null;
     return {
       provider: "anthropic",
-      model: override.model || env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
+      model: override.model || env.ANTHROPIC_MODEL || "claude-sonnet-5",
       baseUrl: (env.ANTHROPIC_BASE_URL || "https://api.anthropic.com/v1").replace(/\/+$/, ""),
       apiKey: env.ANTHROPIC_API_KEY
     };
