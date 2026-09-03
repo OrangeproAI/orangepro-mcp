@@ -363,6 +363,8 @@ export interface StartResult {
   graph_html_path?: string;
   behavior_coverage_path?: string;
   coverage_report_path?: string;
+  /** Redacted per-flow/per-attempt generation diagnostics for the latest start run. */
+  generation_diagnostics_path?: string;
   rtm: RtmOperationResult;
   changed: ChangedResult;
   gaps: GapsResult;
@@ -383,6 +385,41 @@ export interface StartGenerationResult {
   drafts: number;
   blockers: Partial<Record<GeneratedDraftBlocker, number>>;
   reason?: string;
+}
+
+export interface StartGenerationAttemptDiagnostic {
+  attempt: number;
+  provider: string;
+  model: string;
+  requested_slots: number;
+  persisted_test_intents: number;
+  model_planned_tests: number;
+  runnable_tests: number;
+  manual_fallbacks: number;
+  missing_evidence: Array<{ reason: string; needed: string[] }>;
+  warnings: string[];
+}
+
+export interface StartGenerationFlowDiagnostic {
+  target_symbol_external_id: string;
+  title: string;
+  existing_tests_before_run: number;
+  requested_slots: number;
+  attempts: StartGenerationAttemptDiagnostic[];
+  final_tests: number;
+  remaining_shortfall: number;
+}
+
+export interface StartGenerationDiagnostics {
+  schema_version: 1;
+  started_at: string;
+  completed_at: string;
+  expected_flows: number;
+  expected_tests_per_flow: 2;
+  persisted_test_intents_this_run: number;
+  model_planned_tests_this_run: number;
+  manual_fallbacks_this_run: number;
+  flows: StartGenerationFlowDiagnostic[];
 }
 
 export interface OperationDeps {
@@ -2172,6 +2209,7 @@ export async function opStart(
           ? "Test generation budget is 0 (--generate-limit 0)."
           : undefined
   };
+  let generationDiagnosticsPath: string | undefined;
 
   if (!opts.noAuto && opts.ai !== false && generationLimit > 0 && !generationProviderConfigured) {
     generationResult = {
@@ -2191,11 +2229,12 @@ export async function opStart(
         tests.push(test);
         generatedTestsByTarget.set(targetId, tests);
       }
-      const targetPlans = rankPriorityGaps(graphForGeneration, {
+      const rankedGenerationGaps = rankPriorityGaps(graphForGeneration, {
         repoRoot: root,
         limit: generationLimit,
         provenIds: provenSymbolIds(graphForGeneration, loadLedger(root))
-      })
+      });
+      const targetPlans = rankedGenerationGaps
         .map((gap) => {
           const existingTests = generatedTestsByTarget.get(gap.id) ?? [];
           return {
@@ -2215,9 +2254,20 @@ export async function opStart(
         reportProgress(`generate: filling test gaps for ${targetPlans.length} priority flow(s)`, { current: 6, total: 8 });
         const generatedDrafts: GeneratedTest[] = [];
         const incompleteTargets: string[] = [];
+        const diagnosticsStartedAt = deps.clock();
+        const flowDiagnostics: StartGenerationFlowDiagnostic[] = [];
         for (const target of targetPlans) {
           let remaining = target.deficit;
           const existingTitles = target.existingTests.map((test) => test.title);
+          const flowDiagnostic: StartGenerationFlowDiagnostic = {
+            target_symbol_external_id: target.id,
+            title: graphForGeneration.nodes.find((node) => node.external_id === target.id)?.title ?? target.id,
+            existing_tests_before_run: target.existingTests.length,
+            requested_slots: target.deficit,
+            attempts: [],
+            final_tests: target.existingTests.length,
+            remaining_shortfall: target.deficit
+          };
           // A provider can return one accepted scenario when two were requested.
           // Make at most one bounded follow-up for the remaining slot, carrying
           // prior titles so the planner cannot silently duplicate the first test.
@@ -2230,6 +2280,7 @@ export async function opStart(
                 limit: remaining,
                 pin_unchanged: false,
                 existing_generated_test_titles: existingTitles,
+                manual_planning_fallback: attempt === 1,
                 // The offline deterministic stand-in emits the established v2 scaffold; v5 is
                 // a two-phase model planning protocol and must not be selected implicitly for it.
                 prompt_version: opts.promptVersion ?? (deterministicGeneration ? "v2" : "v5")
@@ -2239,13 +2290,34 @@ export async function opStart(
             const freshForTarget = generated.generated_tests.filter(
               (test) => test.target_symbol_external_id === target.id && !test.pinned
             );
+            const manualFallbacks = freshForTarget.filter((test) =>
+              test.runnable === false && test.unresolved_reason?.includes("Manual fallback retained")
+            ).length;
+            flowDiagnostic.attempts.push({
+              attempt: attempt + 1,
+              provider: generated.model_provider,
+              model: generated.model_name,
+              requested_slots: remaining,
+              persisted_test_intents: freshForTarget.length,
+              model_planned_tests: freshForTarget.length - manualFallbacks,
+              runnable_tests: freshForTarget.filter((test) => test.runnable !== false).length,
+              manual_fallbacks: manualFallbacks,
+              missing_evidence: generated.missing_evidence.map((item) => ({
+                reason: redactSecrets(item.reason).slice(0, 2_000),
+                needed: item.needed.map((needed) => redactSecrets(needed).slice(0, 500))
+              })),
+              warnings: generated.warnings.map((warning) => redactSecrets(warning).slice(0, 2_000))
+            });
             generatedDrafts.push(...freshForTarget);
             warnings.push(...generated.warnings.map((w) => `generate: ${w}`));
-            if (freshForTarget.length === 0) break;
+            if (freshForTarget.length === 0) continue;
             existingTitles.push(...freshForTarget.map((test) => test.title));
             remaining = Math.max(0, remaining - freshForTarget.length);
           }
           if (remaining > 0) incompleteTargets.push(target.id);
+          flowDiagnostic.final_tests = target.existingTests.length + target.deficit - remaining;
+          flowDiagnostic.remaining_shortfall = remaining;
+          flowDiagnostics.push(flowDiagnostic);
         }
         const blockers: Partial<Record<GeneratedDraftBlocker, number>> = {};
         for (const draft of generatedDrafts.filter((test) => test.runnable === false)) {
@@ -2274,6 +2346,28 @@ export async function opStart(
             : {})
         };
         if (generationResult.reason) warnings.push(`generate: ${generationResult.reason}`);
+        const diagnostics: StartGenerationDiagnostics = {
+          schema_version: 1,
+          started_at: diagnosticsStartedAt,
+          completed_at: deps.clock(),
+          expected_flows: rankedGenerationGaps.length,
+          expected_tests_per_flow: 2,
+          persisted_test_intents_this_run: generatedDrafts.length,
+          model_planned_tests_this_run: generatedDrafts.filter((test) =>
+            !test.unresolved_reason?.includes("Manual fallback retained")
+          ).length,
+          manual_fallbacks_this_run: generatedDrafts.filter((test) =>
+            test.unresolved_reason?.includes("Manual fallback retained")
+          ).length,
+          flows: flowDiagnostics
+        };
+        generationDiagnosticsPath = join(root, WORKSPACE_DIR, "generation-diagnostics.json");
+        try {
+          writeFileAtomic(generationDiagnosticsPath, JSON.stringify(diagnostics, null, 2) + "\n");
+        } catch (error) {
+          generationDiagnosticsPath = undefined;
+          warnings.push(`generation diagnostics not written: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        }
       }
     } catch (err) {
       const reason = redactSecrets(err instanceof Error ? err.message : String(err));
@@ -2426,6 +2520,7 @@ export async function opStart(
     ai_linked: aiLinked,
     behavior_coverage_path: coverageHtml,
     coverage_report_path: coverageReport,
+    generation_diagnostics_path: generationDiagnosticsPath,
     rtm,
     changed,
     gaps,
@@ -2503,6 +2598,7 @@ export async function opGenerate(
       input_mode: opts.input_mode,
       prompt_version: opts.prompt_version,
       existing_generated_test_titles: opts.existing_generated_test_titles,
+      manual_planning_fallback: opts.manual_planning_fallback,
       // Persisting lane: a runnable draft for an unchanged target is reused as-is
       // rather than re-bought from the model on every run.
       pin_unchanged: opts.pin_unchanged ?? true
