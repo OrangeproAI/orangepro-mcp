@@ -1,3 +1,4 @@
+import { loadRiskConfig } from "../../src/local/score/riskConfig.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -378,5 +379,116 @@ describe("risk report trust safeguards", () => {
     expect(gaps).toEqual(rankRiskGaps(g, { limit: 7, maxPerFile: 3, maxPerTitle: 1 }));
     expect(gaps.filter((gap) => gap.title === "Invoke")).toHaveLength(1);
     expect(gaps.map((gap) => gap.title)).toContain("Execute");
+  });
+});
+
+describe("rankRiskGaps — irreversibility floor, scheduled silence, ranking hygiene (graph facts only)", () => {
+  const withExt = (n: LocalGraph["nodes"][number], external_callees: string[]) => ({ ...n, properties: { ...n.properties, external_callees } });
+
+  it("a scheduled entry that reaches a destructive EXTERNAL sink outranks an equal peer that does not", () => {
+    const g = graph();
+    const runA = symbol("sym:service/worker/scanner/task.go#task.Run", "task.Run", "service/worker/scanner/task.go");
+    const hf = withExt(symbol("sym:service/worker/scanner/task.go#task.handleFailures", "task.handleFailures", "service/worker/scanner/task.go"), ["t.adminClient.DeleteWorkflowExecution", "t.logger.Error"]);
+    const runB = symbol("sym:service/worker/report/task.go#task.Run", "task.Run", "service/worker/report/task.go");
+    const fmt = withExt(symbol("sym:service/worker/report/task.go#task.format", "task.format", "service/worker/report/task.go"), ["t.logger.Info"]);
+    g.nodes = [runA, hf, runB, fmt];
+    g.edges = [edge(runA.external_id, hf.external_id, "CALLS"), edge(runB.external_id, fmt.external_id, "CALLS")];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const ia = ranked.findIndex((r) => r.id === runA.external_id);
+    const ib = ranked.findIndex((r) => r.id === runB.external_id);
+    expect(ia).toBeGreaterThanOrEqual(0);
+    expect(ia).toBeLessThan(ib);
+  });
+
+  it("NEGATIVE: an in-repo method merely NAMED delete is not a sink (only external destructive callees count)", () => {
+    const g = graph();
+    const runA = symbol("sym:service/worker/scanner/task.go#task.Run", "task.Run", "service/worker/scanner/task.go");
+    const del = symbol("sym:service/worker/scanner/tree.go#Node.delete", "Node.delete", "service/worker/scanner/tree.go");
+    const runB = symbol("sym:service/worker/report/task.go#task.Run", "task.Run", "service/worker/report/task.go");
+    g.nodes = [runA, del, runB];
+    g.edges = [edge(runA.external_id, del.external_id, "CALLS")];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const a = ranked.find((r) => r.id === runA.external_id)!;
+    const b = ranked.find((r) => r.id === runB.external_id)!;
+    expect(a.impact).toBe(b.impact);
+  });
+
+  it("NEGATIVE: a destructive sink behind a PROVEN scheduled entry gets no silence multiplier", () => {
+    const g = graph();
+    const run = symbol("sym:service/worker/scanner/task.go#task.Run", "task.Run", "service/worker/scanner/task.go");
+    const hf = withExt(symbol("sym:service/worker/scanner/task.go#task.handleFailures", "task.handleFailures", "service/worker/scanner/task.go"), ["t.store.DeleteRow"]);
+    g.nodes = [run, hf, testCase("test:scanner_test.go")];
+    g.edges = [edge(run.external_id, hf.external_id, "CALLS"), edge(run.external_id, "test:scanner_test.go", "TESTED_BY")];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const r = ranked.find((x) => x.id === run.external_id);
+    // statically linked → detection 5, never 5 × 1.25
+    expect(r === undefined || (r.detection_difficulty ?? 0) <= 5).toBe(true);
+  });
+
+  it("HYGIENE: test-support paths, declaration one-liners, and trivial accessors never take a risk slot", () => {
+    const g = graph();
+    const helper = symbol("sym:common/testing/testcontext/ctx.go#getOrCreateContextState", "testcontext.getOrCreateContextState", "common/testing/testcontext/ctx.go");
+    const decl = { ...symbol("sym:service/history/consts/const.go#staleStateError", "consts.staleStateError", "service/history/consts/const.go"), properties: { file: "service/history/consts/const.go", symbol_kind: "class", start_line: 10, end_line: 11 } };
+    const getter = { ...symbol("sym:common/ns/ns.go#Namespace.GetName", "Namespace.GetName", "common/ns/ns.go"), properties: { file: "common/ns/ns.go", symbol_kind: "method", start_line: 1, end_line: 3 } };
+    const real = symbol("sym:service/history/handler.go#Handler.Invoke", "Handler.Invoke", "service/history/handler.go");
+    g.nodes = [helper, decl, getter, real];
+    const ids = rankRiskGaps(g, { limit: 10, repoRoot: "" }).map((r) => r.id);
+    expect(ids).toContain(real.external_id);
+    expect(ids).not.toContain(helper.external_id);
+    expect(ids).not.toContain(decl.external_id);
+    expect(ids).not.toContain(getter.external_id);
+  });
+});
+
+describe("per-repo risk config (riskConfig.ts) — classification + overrides with reasons, never weights", () => {
+  const withConfig = (json: unknown): string => {
+    const root = mkdtempSync(join(tmpdir(), "oprocfg-"));
+    mkdirSync(join(root, ".orangepro"));
+    writeFileSync(join(root, ".orangepro", "config.json"), JSON.stringify(json));
+    return root;
+  };
+
+  it("defaults are deterministic and the hash is stable across key order", () => {
+    const a = loadRiskConfig("");
+    const b = loadRiskConfig("/nonexistent/repo");
+    expect(a.hash).toBe(b.hash);
+    expect(a.config.tuning).toEqual({ irreversibility_floor: true, silence_multiplier: true });
+  });
+
+  it("an override WITHOUT a reason is ignored with a warning (a tuned report must never pass as clean)", () => {
+    const root = withConfig({ overrides: [{ symbol: "sym:a.go#X", action: "suppress" }] });
+    const l = loadRiskConfig(root);
+    expect(l.config.overrides).toEqual([]);
+    expect(l.warnings.some((w) => w.includes("reason"))).toBe(true);
+  });
+
+  it("suppress removes a symbol from ranking; a sensitivity_ignore glob zeroes name-derived sensitivity; the hash changes", () => {
+    const root = withConfig({
+      classification: { sensitivity_ignore: ["*CapturePanic*"] },
+      overrides: [{ symbol: "sym:src/noise.go#noise.Run", action: "suppress", reason: "generated shim, not product behavior" }]
+    });
+    const g = graph(root);
+    const noise = symbol("sym:src/noise.go#noise.Run", "noise.Run", "src/noise.go");
+    const cap = symbol("sym:common/log/panic.go#log.CapturePanic", "log.CapturePanic", "common/log/panic.go");
+    const real = symbol("sym:src/handler.go#Handler.Invoke", "Handler.Invoke", "src/handler.go");
+    g.nodes = [noise, cap, real];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: root });
+    const ids = ranked.map((r) => r.id);
+    expect(ids).not.toContain(noise.external_id);
+    expect(ranked.find((r) => r.id === cap.external_id)?.data_sensitivity ?? 0).toBe(0);
+    expect(loadRiskConfig(root).hash).not.toBe(loadRiskConfig("").hash);
+  });
+
+  it("pin guarantees visibility beyond the limit without changing anyone's rank, and the reason is on the row", () => {
+    const root = withConfig({ overrides: [{ symbol: "sym:src/z.go#Z.Run", action: "pin", reason: "ops asked to watch this until Q4 migration lands" }] });
+    const g = graph(root);
+    const nodes = Array.from({ length: 6 }, (_, i) => symbol(`sym:src/s${i}.go#S${i}.Do`, `S${i}.Do`, `src/s${i}.go`));
+    const z = symbol("sym:src/z.go#Z.Run", "Z.Run", "src/z.go");
+    g.nodes = [...nodes, z];
+    const ranked = rankRiskGaps(g, { limit: 3, repoRoot: root });
+    const zRow = ranked.find((r) => r.id === z.external_id);
+    expect(zRow).toBeDefined();
+    expect(zRow!.reasons.some((r) => r.includes("config override (pin)"))).toBe(true);
+    expect(ranked.slice(0, 3).map((r) => r.id)).not.toContain(z.external_id);
   });
 });

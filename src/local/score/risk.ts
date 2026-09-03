@@ -1,3 +1,4 @@
+import { loadRiskConfig, globToRegExp, type RiskOverride } from "./riskConfig.js";
 import { execFileSync } from "node:child_process";
 import { LocalGraph, GraphNode } from "../graph/ontology.js";
 
@@ -16,6 +17,8 @@ export interface RiskGap {
   probability?: number;
   impact?: number;
   detection_difficulty?: number;
+  /** Config override applied to this row (rendered so a tuned report never passes as clean). */
+  override?: { action: RiskOverride["action"]; reason: string };
   /** Structural context used by the model. */
   fan_out?: number;
   route_weight?: number;
@@ -381,6 +384,30 @@ interface RawScores {
   p: number;
   i: number;
   d: number;
+  reachesDestructiveSink?: boolean;
+  scheduledEntry?: boolean;
+  sensitivityIgnored?: boolean;
+}
+
+/** Calls that make a defect irreversible: deletes, drops, purges. Matched on the
+ *  LAST segment of a call name, so `t.adminClient.DeleteWorkflowExecution` and a
+ *  local `purgeAll` both count; `deleteButtonLabel` (no call) does not. */
+const DESTRUCTIVE_CALL_RE = /^(delete|drop|purge|truncate|remove|forcedelete|destroy)[A-Za-z0-9_]*$/i;
+const SCHEDULED_ENTRY_NAME_RE = /(^|\.)(Run|Execute|Handle|Process|Tick|Scan)$/;
+const SCHEDULED_ENTRY_PATH_RE = /(^|\/)(jobs?|workers?|scanners?|scavengers?|cron|schedulers?|processors?|consumers?|reconcil\w*)(\/|$)/i;
+
+/** A time- or queue-triggered entry: nothing calls it synchronously, nobody waits
+ *  for a response, so a failure is far less likely to be NOTICED. Graph facts only. */
+export function isScheduledEntry(node: GraphNode): boolean {
+  return SCHEDULED_ENTRY_NAME_RE.test(node.title || "") && SCHEDULED_ENTRY_PATH_RE.test(symbolFile(node));
+}
+
+export interface RiskSignals {
+  /** Reaches (<=3 CALLS hops) a destructive sink: a retained external callee or a symbol named like one. */
+  reachesDestructiveSink: boolean;
+  scheduledEntry: boolean;
+  /** Config said this symbol's name-derived sensitivity is a false positive. */
+  sensitivityIgnored?: boolean;
 }
 
 function computeRawORS(
@@ -391,7 +418,8 @@ function computeRawORS(
   fanOut: number,
   detectionTier: "associated" | "candidate" | "none",
   firstCommitTs: number,
-  nowSec: number
+  nowSec: number,
+  signals: RiskSignals = { reachesDestructiveSink: false, scheduledEntry: false }
 ): RawScores {
   const isNew = firstCommitTs > 0 && nowSec - firstCommitTs < NEW_CODE_SECONDS;
   const complexity = complexityProxy(node);
@@ -400,11 +428,15 @@ function computeRawORS(
   const routeWeight = deriveRouteWeight(node);
   const flowDepth = getFlowDepth(node, depthCtx);
   const flowPosition = Math.max(0, 5 - flowDepth);
-  const dataSensitivity = deriveDataSensitivity(node);
+  const dataSensitivity = signals.sensitivityIgnored ? 0 : deriveDataSensitivity(node);
+  // Irreversibility is impact: a bug on a path that reaches a delete/purge cannot be
+  // rolled back. Bounded, additive, graph-derived (Fix C, signal 1).
   const rawI = incomingRefs * 0.3 + routeWeight * 0.3 + flowPosition * 0.2 + dataSensitivity * 0.2;
-
-  const d = DETECTION_MAP[detectionTier];
-  return { p: rawP, i: rawI, d };
+  // Silence lowers detectability: an unproven behavior that runs on a timer or a
+  // queue fails where no request surfaces it (Fix C, signal 2). Proven stays proven.
+  const silentFactor = signals.scheduledEntry && detectionTier !== "associated" ? 1.25 : 1;
+  const d = DETECTION_MAP[detectionTier] * silentFactor;
+  return { p: rawP, i: rawI, d, reachesDestructiveSink: signals.reachesDestructiveSink, scheduledEntry: signals.scheduledEntry, sensitivityIgnored: signals.sensitivityIgnored };
 }
 
 function staticTestLinkedIds(graph: LocalGraph, candidateIds: Set<string>): Set<string> {
@@ -437,7 +469,26 @@ function candidateSignalIds(graph: LocalGraph, candidateIds: Set<string>): Set<s
 export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): RiskGap[] {
   const limit = opts.limit ?? 20;
   const confirmed = confirmedBehaviorIds(graph, opts.provenIds);
-  const symbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && !confirmed.has(n.external_id));
+  // Fix D: ranking hygiene. Test-support code, bare constants/variables, and trivial
+  // accessors stay in the behavior DENOMINATOR but never compete for a risk slot.
+  const TEST_SUPPORT_PATH_RE = /(^|\/)(testing|testutils?|testhelpers?|fixtures?|mocks?|fakes?)(\/|$)/i;
+  const extraTestSupportRef: RegExp[] = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.classification.test_support_paths.map(globToRegExp);
+  const ACCESSOR_RE = /(^|\.)(Get|Set|Is|Has)[A-Z][A-Za-z0-9]*$/;
+  const rankEligible = (n: GraphNode): boolean => {
+    const props = (n.properties ?? {}) as { symbol_kind?: string; start_line?: number; end_line?: number };
+    if (TEST_SUPPORT_PATH_RE.test(symbolFile(n))) return false;
+    if (extraTestSupportRef.some((re) => re.test(symbolFile(n)))) return false;
+    if (props.symbol_kind === "constant" || props.symbol_kind === "variable") return false;
+    // Go `var x = ...` / `const` / `type` one-liners are minted as "class" with a
+    // 0–2 line span and no body to test: declarations, not behaviors.
+    if (props.symbol_kind === "class" && ((props.end_line ?? 0) - (props.start_line ?? 0)) <= 2) return false;
+    const span = (props.end_line ?? 0) - (props.start_line ?? 0);
+    if (ACCESSOR_RE.test(n.title || "") && span <= 3) return false;
+    return true;
+  };
+  const suppressedRef = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.overrides.filter((o) => o.action === "suppress");
+  const isSuppressed = (id: string): boolean => suppressedRef.some((o) => o.symbol === id || globToRegExp(o.symbol).test(id));
+  const symbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && !confirmed.has(n.external_id) && rankEligible(n) && !isSuppressed(n.external_id));
   const symbolIds = new Set(symbols.map((s) => s.external_id));
   const symbolsByFile = new Map<string, GraphNode[]>();
   for (const s of symbols) {
@@ -448,6 +499,13 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   }
   const files = [...new Set(symbols.map(symbolFile))];
   const repoRoot = opts.repoRoot ?? graph.workspace.root;
+  const loadedCfg = loadRiskConfig(repoRoot);
+  const cfg = loadedCfg.config;
+  const overrideFor = (id: string): RiskOverride | undefined => cfg.overrides.find((o) => o.symbol === id || globToRegExp(o.symbol).test(id));
+  const extraTestSupport = cfg.classification.test_support_paths.map(globToRegExp);
+  const extraScheduled = cfg.classification.scheduled_entry_paths.map(globToRegExp);
+  const extraSinks = cfg.classification.destructive_sinks.map(globToRegExp);
+  const sensitivityIgnore = cfg.classification.sensitivity_ignore.map(globToRegExp);
   const inputHealth = inspectRiskInputHealth(repoRoot, opts.churnWindow);
   const churnWindow = inputHealth.churnWindow;
   const churnResult = inputHealth.churnAvailable ? gitChurn(repoRoot, files, churnWindow) : { values: new Map<string, number>(), complete: false };
@@ -502,6 +560,31 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     fanOutTargets.set(e.from_external_id, set);
   }
   const fanOut = new Map(symbols.map((s) => [s.external_id, fanOutTargets.get(s.external_id)?.size ?? 0]));
+  // Fix C signals: destructive reach via CALLS (<=3 hops) to a sink; sinks are symbols
+  // whose own name, or a retained external callee, is a destructive call.
+  const nodeById = new Map(graph.nodes.map((n) => [n.external_id, n]));
+  const lastSeg = (name: string): string => name.split(".").pop() ?? name;
+  // A sink is a destructive call on an EXTERNAL surface — a persistence store, an
+  // admin/service client, a database handle. In-repo methods named `delete` are
+  // not sinks by name alone (CHASM's `Node.delete` is a tree op, not a data loss).
+  const SINK_QUALIFIER_RE = /(client|store|manager|persistence|db|admin|repo|repository|dao|storage|bucket|index)/i;
+  const isSink = (id: string): boolean => {
+    const n = nodeById.get(id);
+    if (!n) return false;
+    const ext = (n.properties as { external_callees?: string[] } | undefined)?.external_callees ?? [];
+    return ext.some((c) => (DESTRUCTIVE_CALL_RE.test(lastSeg(c)) && SINK_QUALIFIER_RE.test(c.slice(0, c.lastIndexOf(".")))) || extraSinks.some((re) => re.test(lastSeg(c))));
+  };
+  const reachesSinkFrom = (id: string, depth: number, seen: Set<string>): boolean => {
+    if (isSink(id)) return true;
+    if (depth === 0) return false;
+    for (const t of fanOutTargets.get(id) ?? []) {
+      if (seen.has(t)) continue;
+      seen.add(t);
+      if (reachesSinkFrom(t, depth - 1, seen)) return true;
+    }
+    return false;
+  };
+  const reachesSink = new Map(symbols.map((s) => [s.external_id, reachesSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
   const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
   const candidateLinked = candidateSignalIds(graph, symbolIds);
@@ -536,11 +619,20 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     const git_churn = symbolChurn(s);
     const fan_out = fanOut.get(s.external_id) ?? 0;
     const ts = firstCommitTs.get(file) ?? 0;
-    return computeRawORS(s, depthCtx, incoming_refs, git_churn, fan_out, detectionFor(s.external_id), ts, nowSec);
+    return computeRawORS(s, depthCtx, incoming_refs, git_churn, fan_out, detectionFor(s.external_id), ts, nowSec, {
+      reachesDestructiveSink: cfg.tuning.irreversibility_floor && (reachesSink.get(s.external_id) ?? false),
+      scheduledEntry: cfg.tuning.silence_multiplier && (isScheduledEntry(s) || (SCHEDULED_ENTRY_NAME_RE.test(s.title || "") && extraScheduled.some((re) => re.test(symbolFile(s))))),
+      sensitivityIgnored: sensitivityIgnore.some((re) => re.test(s.title || "") || re.test(s.external_id)) || overrideFor(s.external_id)?.action === "reclassify" && overrideFor(s.external_id)?.sensitivity === "none"
+    });
   });
 
+  const pinnedIds = new Set(symbols.filter((s) => overrideFor(s.external_id)?.action === "pin").map((s) => s.external_id));
   const pScores = normalizeScores(rawScores.map((r) => r.p));
-  const iScores = normalizeScores(rawScores.map((r) => r.i));
+  const iScoresRaw = normalizeScores(rawScores.map((r) => r.i));
+  // Fix C: a path that can reach a delete/purge has irreversible consequences no
+  // matter how few callers it has. Impact FLOORS at 5/10 for such paths (a floor,
+  // not an increment — an additive bump vanishes under hub-dominated normalization).
+  const iScores = iScoresRaw.map((v, idx) => (rawScores[idx].reachesDestructiveSink ? Math.max(v, 5) : v));
 
   const ranked = symbols
     .map((s, idx) => {
@@ -550,7 +642,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const fan_out = fanOut.get(s.external_id) ?? 0;
       const isEntry = entryPoint.get(s.external_id) ?? false;
       const route_weight = deriveRouteWeight(s);
-      const data_sensitivity = deriveDataSensitivity(s);
+      const data_sensitivity = rawScores[idx].sensitivityIgnored ? 0 : deriveDataSensitivity(s);
       const flow_position = Math.max(0, 5 - getFlowDepth(s, depthCtx));
       const complexity_proxy = complexityProxy(s);
       const firstTs = firstCommitTs.get(file) ?? 0;
@@ -580,7 +672,14 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       if (is_new_code) reasons.push("new code (< 30 days)");
       if (disconnected) reasons.push("no callers and no callees — structurally disconnected, score dampened");
       if (detectionTier === "candidate") reasons.push("lexical candidate test match only — unconfirmed");
+      // Reason chips for the two consequence signals — a reader can disagree with the
+      // weight without doubting the fact, and the fact is what's shown.
+      if (rawScores[idx].reachesDestructiveSink) reasons.push("reaches a destructive external call (delete/purge) within 2 hops — impact floored at 5");
+      if (rawScores[idx].scheduledEntry) reasons.push("scheduled/queue-triggered entry with no proof — failures surface nowhere, detection ×1.25");
+      const override = overrideFor(s.external_id);
+      if (override && override.action !== "suppress") reasons.push(`config override (${override.action}): ${override.reason}`);
       return {
+        ...(override && override.action !== "suppress" ? { override: { action: override.action, reason: override.reason } } : {}),
         id: s.external_id,
         title: s.title || s.external_id,
         file,
@@ -607,7 +706,13 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // The default API is the true global ranking because reports call this list
   // "top risks". Callers may explicitly request a diversified portfolio, but
   // that presentation policy must never silently redefine rank.
-  if (opts.maxPerFile === undefined) return ranked.slice(0, limit);
+  const withPins = (list: RiskGap[]): RiskGap[] => {
+    if (pinnedIds.size === 0) return list;
+    const have = new Set(list.map((r) => r.id));
+    const extra = ranked.filter((r) => pinnedIds.has(r.id) && !have.has(r.id));
+    return extra.length ? [...list, ...extra] : list;
+  };
+  if (opts.maxPerFile === undefined) return withPins(ranked.slice(0, limit));
   const maxPerFile = Math.max(1, opts.maxPerFile);
   const perFile = new Map<string, number>();
   // Multi-program repos flood identical titles (76 x main) across files; the
@@ -645,9 +750,9 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // Guarantee: the surfaced list is ALWAYS highest-risk-first, even when the
   // per-file diversity backfill re-admits overflow items (which otherwise land
   // appended after lower-scored rows).
-  return surfaced
+  return withPins(surfaced
     .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
-    .slice(0, limit);
+    .slice(0, limit));
 }
 
 /**

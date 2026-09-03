@@ -1385,6 +1385,10 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
               }
             }
             // A non-imported (local/param) qualifier is NOT anchored — no edge.
+            // Retain the callee NAME as a fact on the caller (Fix B): `t.adminClient.
+            // DeleteWorkflowExecution` is invisible as an edge (external interface) but
+            // is exactly the kind of sink risk scoring must be able to see. Names only —
+            // no node, no edge, no evidence claim.
           }
         } else if (c.via === "injected" && c.injectedType) {
           const typeBinding = typeImports?.get(c.injectedType) ?? imports?.get(c.injectedType);
@@ -1862,6 +1866,26 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         addImportBinding(rel, i.local, { ...(targetRel ? { targetRel } : {}), ...(targetDir ? { targetDir } : {}) }, i.imported, i.kind);
       }
     }
+    // Go package-level method index (dir → "Recv.M" → file) for receiver calls that
+    // land in a sibling file of the same package.
+    const goPkgMethods = new Map<string, Map<string, string>>();
+    for (const [f, syms] of symbolsByFile) {
+      if (!f.endsWith(".go") || f.endsWith("_test.go")) continue;
+      const dir = f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
+      let m = goPkgMethods.get(dir);
+      if (!m) { m = new Map(); goPkgMethods.set(dir, m); }
+      for (const sname of syms) if (sname.includes(".")) m.set(sname, f);
+    }
+    const goPackageMethodFile = (rel: string, member: string): string | undefined => {
+      const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+      return goPkgMethods.get(dir)?.get(member);
+    };
+    const externalCalleesByCaller = new Map<string, Set<string>>();
+    const recordExternalCallee = (callerId: string, name: string): void => {
+      let set = externalCalleesByCaller.get(callerId);
+      if (!set) { set = new Set(); externalCalleesByCaller.set(callerId, set); }
+      if (set.size < 32) set.add(name);
+    };
     for (const [rel, { language, structure }] of nonTsStructureByFile) {
       const localSyms = symbolsByFile.get(rel);
       if (!localSyms) continue;
@@ -1894,7 +1918,24 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           const rootQualifier = c.qualifier.split(".")[0];
           if (shadowed.has(rootQualifier)) continue;
           const b = imports?.get(rootQualifier);
-          if (language === "go" && b?.kind === "module" && b.targetDir) {
+          if (language === "go" && c.receiverVar && c.receiverType && c.qualifier === c.receiverVar) {
+            // Go receiver-method call: inside `func (t *task) Run()`, `t.validate()` calls
+            // `task.validate`. The receiver's type is DECLARED in the method signature, so
+            // this is exact resolution: same file first, then the same package (methods of
+            // one type may span files; Go forbids duplicate method names on a type, so a
+            // package-level hit is unambiguous).
+            const member = `${c.receiverType}.${c.callee}`;
+            if (localSyms.has(member)) emitCall(callerId, `sym:${rel}#${member}`, rel);
+            else {
+              const pkgRel = goPackageMethodFile(rel, member);
+              if (pkgRel) emitCall(callerId, `sym:${pkgRel}#${member}`, rel);
+            }
+          } else if (language === "go" && !b && c.receiverVar && rootQualifier === c.receiverVar) {
+            // `t.client.Delete(...)`: a call through a receiver FIELD to an external or
+            // interface method — no resolvable node. Retain the callee NAME on the caller
+            // (Fix B) so scoring can see sinks like `DeleteWorkflowExecution`. Names only.
+            recordExternalCallee(callerId, `${c.qualifier}.${c.callee}`);
+          } else if (language === "go" && b?.kind === "module" && b.targetDir) {
             const targetRel = uniqueGoPackageSymbol(b.targetDir, c.callee);
             if (targetRel) emitCall(callerId, `sym:${targetRel}#${c.callee}`, rel);
           } else if (language === "rust") {
@@ -1912,6 +1953,15 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             emitCall(callerId, `sym:${b.targetRel}#${c.callee}`, rel);
           }
         }
+      }
+    }
+    // Fix B: persist retained callee names on their caller symbols (names only).
+    if (externalCalleesByCaller.size > 0) {
+      const byId = new Map(nodes.map((n) => [n.external_id, n] as const));
+      for (const [callerId, names] of externalCalleesByCaller) {
+        const n = byId.get(callerId);
+        if (!n) continue;
+        n.properties = { ...(n.properties ?? {}), external_callees: [...names].sort() };
       }
     }
     const seenGoProof = new Set<string>();

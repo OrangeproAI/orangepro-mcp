@@ -186,6 +186,33 @@ describe("non-TS structural imports/calls", () => {
     expect(edgeStrings(root, "CALLS")).toContain("sym:web/web.go#Show -> sym:service/service.go#Load");
   });
 
+  it("Go: receiver-method calls resolve to the receiver type's methods, same file and same package; unresolved external callees are retained by name", () => {
+    const root = repo({
+      "go.mod": "module github.com/acme/app\n",
+      "scan/task.go": [
+        "package scan",
+        "type task struct{ client Admin }",
+        "type Admin interface{ DeleteWorkflowExecution(id string) error }",
+        "func (t *task) Run() error { return t.validate() }",
+        "func (t *task) validate() error { return t.handleFailures() }"
+      ].join("\n"),
+      "scan/failures.go": [
+        "package scan",
+        "func (t *task) handleFailures() error { return t.client.DeleteWorkflowExecution(\"id\") }"
+      ].join("\n")
+    });
+    const calls = edgeStrings(root, "CALLS");
+    // A: same-file receiver call
+    expect(calls).toContain("sym:scan/task.go#task.Run -> sym:scan/task.go#task.validate");
+    // A: same-package (sibling file) receiver call
+    expect(calls).toContain("sym:scan/task.go#task.validate -> sym:scan/failures.go#task.handleFailures");
+    // B: the external interface call is retained as a NAME on the caller, never as an edge
+    expect(calls.some((e) => e.includes("DeleteWorkflowExecution"))).toBe(false);
+    const g = analyzeRepo(root, { readContent: true });
+    const hf = g.nodes.find((n) => n.external_id === "sym:scan/failures.go#task.handleFailures");
+    expect(hf?.properties?.external_callees).toEqual(["t.client.DeleteWorkflowExecution"]);
+  });
+
   it("Go: multi-file package imports skip file-level IMPORTS but still resolve unique package calls", () => {
     const root = repo({
       "go.mod": "module github.com/acme/app\n",
