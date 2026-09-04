@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 export interface RiskOverride {
   /** Symbol external_id or a glob on it: "sym:common/log/*#CapturePanic". */
@@ -64,38 +65,46 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${esc}$`);
 }
 
+/** User-level defaults: ~/.orangepro/config.json (override with ORANGEPRO_USER_CONFIG for tests/CI).
+ *  Applied FIRST; the analyzed repo's .orangepro/config.json wins on every key it sets.
+ *  The hash covers the merged result, so provenance still tells the truth. */
+export function userConfigPath(): string {
+  return process.env.ORANGEPRO_USER_CONFIG ?? join(homedir(), ".orangepro", "config.json");
+}
+
+function applyFile(cfg: RiskConfig, file: string, warnings: string[], label: string): void {
+  if (!existsSync(file)) return;
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    const cls = (raw.classification ?? {}) as Record<string, unknown>;
+    for (const k of ["test_support_paths", "scheduled_entry_paths", "destructive_sinks", "sensitivity_ignore", "rank_exclude_paths"] as const) {
+      if (Array.isArray(cls[k])) cfg.classification[k] = asStringArray(cls[k]);
+    }
+    const tun = (raw.tuning ?? {}) as Record<string, unknown>;
+    if (typeof tun.irreversibility_floor === "boolean") cfg.tuning.irreversibility_floor = tun.irreversibility_floor;
+    if (typeof tun.silence_multiplier === "boolean") cfg.tuning.silence_multiplier = tun.silence_multiplier;
+    for (const o of Array.isArray(raw.overrides) ? raw.overrides : []) {
+      const ov = o as Partial<RiskOverride>;
+      if (typeof ov.symbol !== "string" || !["suppress", "pin", "reclassify"].includes(ov.action ?? "")) {
+        warnings.push(`config (${label}): override ignored (needs symbol + action): ${JSON.stringify(o).slice(0, 80)}`);
+        continue;
+      }
+      if (typeof ov.reason !== "string" || ov.reason.trim().length < 8) {
+        warnings.push(`config (${label}): override for ${ov.symbol} ignored — a reason (≥8 chars) is required so it can be shown on the report.`);
+        continue;
+      }
+      cfg.overrides.push({ symbol: ov.symbol, action: ov.action as RiskOverride["action"], sensitivity: ov.sensitivity, reason: ov.reason.trim() });
+    }
+  } catch (err) {
+    warnings.push(`config (${label}): unreadable for risk settings (${(err as Error).message}); skipped.`);
+  }
+}
+
 export function loadRiskConfig(repoRoot: string): LoadedRiskConfig {
   const warnings: string[] = [];
   const cfg: RiskConfig = JSON.parse(JSON.stringify(DEFAULT_RISK_CONFIG)) as RiskConfig;
-  const file = join(repoRoot, ".orangepro", "config.json");
-  if (repoRoot && existsSync(file)) {
-    try {
-      const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-      const cls = (raw.classification ?? {}) as Record<string, unknown>;
-      cfg.classification.test_support_paths = asStringArray(cls.test_support_paths);
-      cfg.classification.scheduled_entry_paths = asStringArray(cls.scheduled_entry_paths);
-      cfg.classification.destructive_sinks = asStringArray(cls.destructive_sinks);
-      cfg.classification.sensitivity_ignore = asStringArray(cls.sensitivity_ignore);
-      cfg.classification.rank_exclude_paths = asStringArray(cls.rank_exclude_paths);
-      const tun = (raw.tuning ?? {}) as Record<string, unknown>;
-      if (typeof tun.irreversibility_floor === "boolean") cfg.tuning.irreversibility_floor = tun.irreversibility_floor;
-      if (typeof tun.silence_multiplier === "boolean") cfg.tuning.silence_multiplier = tun.silence_multiplier;
-      for (const o of Array.isArray(raw.overrides) ? raw.overrides : []) {
-        const ov = o as Partial<RiskOverride>;
-        if (typeof ov.symbol !== "string" || !["suppress", "pin", "reclassify"].includes(ov.action ?? "")) {
-          warnings.push(`config: override ignored (needs symbol + action): ${JSON.stringify(o).slice(0, 80)}`);
-          continue;
-        }
-        if (typeof ov.reason !== "string" || ov.reason.trim().length < 8) {
-          warnings.push(`config: override for ${ov.symbol} ignored — a reason (≥8 chars) is required so it can be shown on the report.`);
-          continue;
-        }
-        cfg.overrides.push({ symbol: ov.symbol, action: ov.action as RiskOverride["action"], sensitivity: ov.sensitivity, reason: ov.reason.trim() });
-      }
-    } catch (err) {
-      warnings.push(`config: .orangepro/config.json unreadable for risk settings (${(err as Error).message}); defaults used.`);
-    }
-  }
+  applyFile(cfg, userConfigPath(), warnings, "user defaults");
+  if (repoRoot) applyFile(cfg, join(repoRoot, ".orangepro", "config.json"), warnings, "repo");
   const canonical = JSON.stringify(cfg, Object.keys(cfg).sort());
   const hash = createHash("sha256").update(JSON.stringify(cfg)).digest("hex").slice(0, 12);
   void canonical;
