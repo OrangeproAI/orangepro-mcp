@@ -492,3 +492,38 @@ describe("per-repo risk config (riskConfig.ts) — classification + overrides wi
     expect(ranked.slice(0, 3).map((r) => r.id)).not.toContain(z.external_id);
   });
 });
+
+describe("round two — sink through a receiver field, body-shape hygiene, rank_exclude_paths", () => {
+  const withProps = (n: LocalGraph["nodes"][number], extra: Record<string, unknown>) => ({ ...n, properties: { ...n.properties, ...extra } });
+
+  it("a destructive callee reached through ANY receiver field is a sink (no qualifier-name vocabulary)", () => {
+    const g = graph();
+    const ins = symbol("sym:pkg/cqrs/cqrs.go#wrapper.InsertQueueSnapshot", "wrapper.InsertQueueSnapshot", "pkg/cqrs/cqrs.go");
+    const insExt = withProps(ins, { external_callees: ["w.q.DeleteOldQueueSnapshots", "w.log.Info"] });
+    const peer = withProps(symbol("sym:pkg/cqrs/other.go#wrapper.ListRuns", "wrapper.ListRuns", "pkg/cqrs/other.go"), { external_callees: ["w.q.GetRuns"] });
+    g.nodes = [insExt, peer];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const a = ranked.find((r) => r.id === ins.external_id)!;
+    const b = ranked.find((r) => r.id === peer.external_id)!;
+    expect(a.sink_callee).toBe("w.q.DeleteOldQueueSnapshots");
+    expect(b.sink_callee).toBeUndefined();
+    expect(a.impact).toBeGreaterThanOrEqual(5);
+  });
+
+
+  it("rank_exclude_paths removes a scope from the RANKING only", () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+    const { tmpdir } = require("node:os") as typeof import("node:os");
+    const { join } = require("node:path") as typeof import("node:path");
+    const root = mkdtempSync(join(tmpdir(), "oprorx-"));
+    mkdirSync(join(root, ".orangepro"));
+    writeFileSync(join(root, ".orangepro", "config.json"), JSON.stringify({ classification: { rank_exclude_paths: ["ui/**"] } }));
+    const g = graph(root);
+    const ui = symbol("sym:ui/apps/dashboard/billing.tsx#InfraDashboard.getInfraPlanBillingAction", "InfraDashboard.getInfraPlanBillingAction", "ui/apps/dashboard/billing.tsx");
+    const be = symbol("sym:pkg/execution/executor.go#executor.schedule", "executor.schedule", "pkg/execution/executor.go");
+    g.nodes = [ui, be];
+    const ids = rankRiskGaps(g, { limit: 10, repoRoot: root }).map((r) => r.id);
+    expect(ids).toContain(be.external_id);
+    expect(ids).not.toContain(ui.external_id);
+  });
+});
