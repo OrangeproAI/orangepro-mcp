@@ -173,6 +173,19 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 /* RISKS */
 .risk-card{background:var(--s1);border:1px solid var(--bd);border-radius:9px;padding:14px 16px;margin-bottom:10px}
 .risk-tools{display:flex;align-items:center;gap:8px;margin:0 0 12px;flex-wrap:wrap}
+/* WORKLISTS — two views of one ranking */
+.wl-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:0 0 14px}
+.wl-card{background:var(--s1);border:1px solid var(--bd);border-radius:9px;padding:12px 14px}
+.wl-title{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin:0 0 2px}
+.wl-title.wl-change{color:var(--amber)} .wl-title.wl-irrev{color:var(--red)}
+.wl-sub{font-size:11px;color:var(--muted);margin:0 0 8px;line-height:1.45}
+.wl-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--bd);font-family:var(--mono);font-size:11px;cursor:pointer}
+.wl-row:last-child{border-bottom:0}
+.wl-row:hover .wl-path{color:var(--ink)}
+.wl-path{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wl-meta{color:var(--faint);flex-shrink:0;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wl-empty{font-size:11.5px;color:var(--faint);padding:6px 0}
+@media(max-width:800px){.wl-grid{grid-template-columns:1fr}}
 .risk-filter{appearance:none;border:1px solid var(--bd);background:var(--s1);color:var(--muted);border-radius:20px;padding:5px 10px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
 .risk-filter:hover{border-color:var(--bd2);color:var(--ink2)}
 .risk-filter[aria-pressed="true"]{border-color:var(--orange);background:var(--obg);color:var(--orange)}
@@ -427,6 +440,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
   <p class="bridge expert-only">This is the <b>priority-gap worklist</b>, ranked by blast radius and test weakness. It is separate from the coverage-status cards above: <b>Reachable · no test signal</b> is one strict coverage bucket, not the number of priority gaps.</p>
   <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
   <div class="risk-tools" id="risk-tools"></div>
+  <div id="worklists"></div>
   <div id="risk-list"></div>
 </section>
 
@@ -1012,6 +1026,24 @@ riskTools.addEventListener("click",e=>{
 });
 renderRiskFilters();
 renderRisks();
+// ── Worklists: two views of ONE ranking. A single P×I×D top-20 cannot hold
+// "changing fast" and "irreversible but stable" together; both are shown here.
+(function(){
+  const W=D.worklists, host=$("#worklists");
+  if(!W||!host)return;
+  const topPaths=new Set(D.risks.map(r=>r.path));
+  const row=(path,meta)=>{
+    const inTop=topPaths.has(path);
+    return \`<div class="wl-row" data-path="\${esc(path).replace(/"/g,'&quot;')}" title="\${inTop?'in the ranked list below — click to jump':'ranked, but below the top-20 cut'}"><span class="wl-path">\${esc(path)}</span><span class="wl-meta">\${esc(meta)}</span></div>\`;
+  };
+  const cf=(W.changeFrontier||[]).map(r=>row(r.path,"changes "+(r.probability>=7?"a lot":r.probability>=4?"often":"some"))).join("")||'<div class="wl-empty">nothing changing fast and unproven</div>';
+  const ir=(W.irreversible||[]).map(r=>row(r.path,"→ "+(r.sink||"").split(".").pop())).join("")||'<div class="wl-empty">no unproven path reaches a delete</div>';
+  host.innerHTML=\`<div class="wl-grid">
+    <div class="wl-card"><p class="wl-title wl-change">Changing fast · unproven</p><p class="wl-sub">Where the code moves most with nothing proving it. The place a bug is most likely to have just arrived.</p>\${cf}</div>
+    <div class="wl-card"><p class="wl-title wl-irrev">Can destroy data · unproven</p><p class="wl-sub">Paths that reach a delete or purge with nothing proving they do the right thing. Rarely changing — which is why nobody looks.</p>\${ir}</div>
+  </div>\`;
+  host.addEventListener("click",e=>{const r=e.target.closest("[data-path]");if(r&&topPaths.has(r.getAttribute("data-path")))scrollToRisk(r.getAttribute("data-path"));});
+})();
 // toggle test expand
 document.addEventListener('click',e=>{
   const h=e.target.closest('.gen-test-head');

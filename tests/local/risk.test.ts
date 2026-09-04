@@ -527,3 +527,29 @@ describe("round two — sink through a receiver field, body-shape hygiene, rank_
     expect(ids).not.toContain(ui.external_id);
   });
 });
+
+describe("user-level risk config defaults (~/.orangepro/config.json, overridable per repo)", () => {
+  it("applies user defaults first, lets the repo file win, and hashes the merged result", () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+    const { tmpdir } = require("node:os") as typeof import("node:os");
+    const { join } = require("node:path") as typeof import("node:path");
+    const home = mkdtempSync(join(tmpdir(), "oprohome-"));
+    writeFileSync(join(home, "config.json"), JSON.stringify({ tuning: { irreversibility_floor: false }, classification: { rank_exclude_paths: ["ui/**"] } }));
+    const prev = process.env.ORANGEPRO_USER_CONFIG;
+    process.env.ORANGEPRO_USER_CONFIG = join(home, "config.json");
+    try {
+      const a = loadRiskConfig("");
+      expect(a.config.tuning.irreversibility_floor).toBe(false);
+      expect(a.config.classification.rank_exclude_paths).toEqual(["ui/**"]);
+      const repo = mkdtempSync(join(tmpdir(), "oprorepo-"));
+      mkdirSync(join(repo, ".orangepro"));
+      writeFileSync(join(repo, ".orangepro", "config.json"), JSON.stringify({ tuning: { irreversibility_floor: true } }));
+      const b = loadRiskConfig(repo);
+      expect(b.config.tuning.irreversibility_floor).toBe(true);
+      expect(b.config.classification.rank_exclude_paths).toEqual(["ui/**"]);
+      expect(a.hash).not.toBe(b.hash);
+    } finally {
+      if (prev === undefined) delete process.env.ORANGEPRO_USER_CONFIG; else process.env.ORANGEPRO_USER_CONFIG = prev;
+    }
+  });
+});
