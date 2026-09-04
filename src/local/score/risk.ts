@@ -19,6 +19,11 @@ export interface RiskGap {
   detection_difficulty?: number;
   /** Config override applied to this row (rendered so a tuned report never passes as clean). */
   override?: { action: RiskOverride["action"]; reason: string };
+  /** The destructive callee this path reaches (≤2 calls), when it does — shown by name on the row. */
+  sink_callee?: string;
+  scheduled_entry?: boolean;
+  /** Evidence tier behind D: associated | candidate | none. */
+  detection_tier?: "associated" | "candidate" | "none";
   /** Structural context used by the model. */
   fan_out?: number;
   route_weight?: number;
@@ -392,8 +397,15 @@ interface RawScores {
 /** Calls that make a defect irreversible: deletes, drops, purges. Matched on the
  *  LAST segment of a call name, so `t.adminClient.DeleteWorkflowExecution` and a
  *  local `purgeAll` both count; `deleteButtonLabel` (no call) does not. */
-const DESTRUCTIVE_CALL_RE = /^(delete|drop|purge|truncate|remove|forcedelete|destroy)[A-Za-z0-9_]*$/i;
-const SCHEDULED_ENTRY_NAME_RE = /(^|\.)(Run|Execute|Handle|Process|Tick|Scan)$/;
+// `truncate` dropped (time.Truncate is common; DB truncation is rare in app code);
+// `remove` kept but not for listener/handler/attribute/child tails — those detach,
+// they don't destroy data.
+const DESTRUCTIVE_CALL_RE = /^(?:delete(?!d)|purge|drop|forcedelete|destroy)[A-Za-z0-9_]*$/i;
+// `remove*` is only a data sink through a persistence-shaped field; in-memory
+// removals (`pollers.Remove`, `RemoveSpeculativeWorkflowTaskTimeout`) are not.
+const REMOVE_CALL_RE = /^remove(?![A-Za-z0-9_]*(?:listener|handler|observer|callback|attribute|attr|class|child|style|hook|timeout|timer)$)[A-Za-z0-9_]*$/i;
+const PERSISTENCE_FIELD_RE = /(store|client|db|repo|repository|persistence|manager|queue|bucket|index|table|storage|dao)/i;
+const SCHEDULED_ENTRY_NAME_RE = /(^|\.)(run|execute|handle|process|tick|scan)$/i;
 const SCHEDULED_ENTRY_PATH_RE = /(^|\/)(jobs?|workers?|scanners?|scavengers?|cron|schedulers?|processors?|consumers?|reconcil\w*)(\/|$)/i;
 
 /** A time- or queue-triggered entry: nothing calls it synchronously, nobody waits
@@ -472,7 +484,9 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // Fix D: ranking hygiene. Test-support code, bare constants/variables, and trivial
   // accessors stay in the behavior DENOMINATOR but never compete for a risk slot.
   const TEST_SUPPORT_PATH_RE = /(^|\/)(testing|testutils?|testhelpers?|fixtures?|mocks?|fakes?)(\/|$)/i;
-  const extraTestSupportRef: RegExp[] = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.classification.test_support_paths.map(globToRegExp);
+  const cfgEarly = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.classification;
+  const extraTestSupportRef: RegExp[] = cfgEarly.test_support_paths.map(globToRegExp);
+  const rankExcludeRef: RegExp[] = cfgEarly.rank_exclude_paths.map(globToRegExp);
   const ACCESSOR_RE = /(^|\.)(Get|Set|Is|Has)[A-Z][A-Za-z0-9]*$/;
   const rankEligible = (n: GraphNode): boolean => {
     const props = (n.properties ?? {}) as { symbol_kind?: string; start_line?: number; end_line?: number };
@@ -484,6 +498,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     if (props.symbol_kind === "class" && ((props.end_line ?? 0) - (props.start_line ?? 0)) <= 2) return false;
     const span = (props.end_line ?? 0) - (props.start_line ?? 0);
     if (ACCESSOR_RE.test(n.title || "") && span <= 3) return false;
+    if (rankExcludeRef.some((re) => re.test(symbolFile(n)))) return false;
     return true;
   };
   const suppressedRef = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.overrides.filter((o) => o.action === "suppress");
@@ -567,24 +582,38 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // A sink is a destructive call on an EXTERNAL surface — a persistence store, an
   // admin/service client, a database handle. In-repo methods named `delete` are
   // not sinks by name alone (CHASM's `Node.delete` is a tree op, not a data loss).
-  const SINK_QUALIFIER_RE = /(client|store|manager|persistence|db|admin|repo|repository|dao|storage|bucket|index)/i;
-  const isSink = (id: string): boolean => {
+  // A retained callee is by construction a call through a receiver FIELD to code
+  // the graph could not resolve — i.e. an external surface. That structural fact is
+  // the test; the qualifier's NAME is not (round one's store/client/db vocabulary was
+  // Temporal-shaped and hid inngest's `w.q.DeleteOldQueueSnapshots`).
+  const sinkCallee = (id: string): string | undefined => {
     const n = nodeById.get(id);
-    if (!n) return false;
+    if (!n) return undefined;
     const ext = (n.properties as { external_callees?: string[] } | undefined)?.external_callees ?? [];
-    return ext.some((c) => (DESTRUCTIVE_CALL_RE.test(lastSeg(c)) && SINK_QUALIFIER_RE.test(c.slice(0, c.lastIndexOf(".")))) || extraSinks.some((re) => re.test(lastSeg(c))));
+    // A receiver FIELD path is `x.field.Method` — no call parentheses before the last
+    // segment. `q.Clock().Now().Truncate` is a chain of return values, not a surface.
+    const viaField = (c: string): boolean => !c.slice(0, c.lastIndexOf(".")).includes("(");
+    const fieldOf = (c: string): string => c.slice(0, c.lastIndexOf("."));
+    return ext.find((c) => viaField(c) && (
+      DESTRUCTIVE_CALL_RE.test(lastSeg(c)) ||
+      (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
+      extraSinks.some((re) => re.test(lastSeg(c)))));
   };
-  const reachesSinkFrom = (id: string, depth: number, seen: Set<string>): boolean => {
-    if (isSink(id)) return true;
-    if (depth === 0) return false;
+  const isSink = (id: string): boolean => sinkCallee(id) !== undefined;
+  const reachedSinkFrom = (id: string, depth: number, seen: Set<string>): string | undefined => {
+    const own = sinkCallee(id);
+    if (own) return own;
+    if (depth === 0) return undefined;
     for (const t of fanOutTargets.get(id) ?? []) {
       if (seen.has(t)) continue;
       seen.add(t);
-      if (reachesSinkFrom(t, depth - 1, seen)) return true;
+      const hit = reachedSinkFrom(t, depth - 1, seen);
+      if (hit) return hit;
     }
-    return false;
+    return undefined;
   };
-  const reachesSink = new Map(symbols.map((s) => [s.external_id, reachesSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
+  const sinkReached = new Map(symbols.map((s) => [s.external_id, reachedSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
+  const reachesSink = new Map([...sinkReached].map(([k, v]) => [k, v !== undefined]));
   const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
   const candidateLinked = candidateSignalIds(graph, symbolIds);
@@ -680,6 +709,9 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       if (override && override.action !== "suppress") reasons.push(`config override (${override.action}): ${override.reason}`);
       return {
         ...(override && override.action !== "suppress" ? { override: { action: override.action, reason: override.reason } } : {}),
+        ...(sinkReached.get(s.external_id) ? { sink_callee: sinkReached.get(s.external_id) } : {}),
+        ...(rawScores[idx].scheduledEntry ? { scheduled_entry: true } : {}),
+        detection_tier: detectionTier,
         id: s.external_id,
         title: s.title || s.external_id,
         file,

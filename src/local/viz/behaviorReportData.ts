@@ -4,7 +4,7 @@ import path from "node:path";
 import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
 import type { Ledger } from "../ledger.js";
 import { buildRtm, type RtmRow } from "../rtm.js";
-import { inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, type RiskGap } from "../score/risk.js";
+import { inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, rankRiskGaps, type RiskGap } from "../score/risk.js";
 import { ORANGEPRO_VERSION } from "../version.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "../generate/draftGuidance.js";
@@ -76,6 +76,11 @@ export interface BehaviorReportData {
    * merged into `flows`, flow counts, the pipeline strip, or tier cards.
    */
   candidateFlows: BehaviorReportCandidateFlows | null;
+  /** Two views of one ranking: what is changing fastest with no proof, and what can destroy data with no proof. */
+  worklists: {
+    changeFrontier: Array<{ path: string; file: string; score: number; probability: number }>;
+    irreversible: Array<{ path: string; file: string; score: number; sink: string }>;
+  };
   risks: Array<{
     rank: number;
     verb: string;
@@ -637,21 +642,49 @@ function riskContext(risk: RiskGap): string {
             : (risk.data_sensitivity ?? 1) >= 3 ? "notification/webhook"
               : "";
   const pos = (risk.flow_position ?? 0) >= 5
-    ? "an entry point"
+    ? "entry point"
     : (risk.flow_position ?? 0) >= 3
-      ? `${5 - (risk.flow_position ?? 0)} call${5 - (risk.flow_position ?? 0) === 1 ? "" : "s"} from the nearest entry point`
+      ? `${5 - (risk.flow_position ?? 0)} call${5 - (risk.flow_position ?? 0) === 1 ? "" : "s"} from an entry point`
       : "deep in the call graph";
-  const churn = risk.churn_available !== false
-    ? `${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days`
-    : "Git churn unavailable (provisional static-only ranking)";
-  // Consequence signals and config overrides are stated on the row, so a reader can
-  // disagree with a weight without doubting the fact — and a tuned report is visible.
-  const flagged = (risk.reasons ?? []).filter((r) => r.startsWith("reaches a destructive") || r.startsWith("scheduled/queue-triggered") || r.startsWith("config override"));
-  const parts = [
-    `Sits at ${pos}${sens ? ` on ${sens} paths` : ""}.`,
-    ...flagged.map((r) => `${r[0].toUpperCase()}${r.slice(1)}.`),
-    `ORS ${risk.risk_score} (P${risk.probability ?? "?"} × I${risk.impact ?? "?"} × D${risk.detection_difficulty ?? "?"}) reflects flow position, change activity, complexity, impact, and test evidence; ${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}, ${churn} — and no test proves this flow.`
+  const sink = risk.sink_callee;
+  const scheduled = risk.scheduled_entry === true;
+  const churnKnown = risk.churn_available !== false;
+  const churn = churnKnown
+    ? (risk.git_churn > 0 ? `${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days` : "unchanged in 180 days")
+    : "change history unavailable";
+  const tier = risk.detection_tier ?? "";
+  const evidence = tier === "candidate"
+    ? "no test links here (a similarly-named test exists but never calls it)"
+    : tier === "associated" ? "a test calls it but nothing proves it fails when broken" : "no test links here";
+  const sinkShort = sink ? sink.split(".").pop() ?? sink : "";
+  // Line 1 — the consequence, in plain English, from the signals only.
+  const lead = sink && scheduled
+    ? `Runs on a schedule and can ${sinkShort.toLowerCase().startsWith("purge") ? "purge" : "delete"} data — nothing proves it does the right thing.`
+    : sink
+      ? `Can ${sinkShort.toLowerCase().startsWith("purge") ? "purge" : "delete"} data and nothing proves it works.`
+      : scheduled
+        ? "Runs on a schedule with no proof — a failure here surfaces nowhere."
+        : sens
+          ? `Sits on ${sens} paths, changes, and nothing proves it.`
+          : "Reachable and changing, with nothing proving it.";
+  // Line 2 — what the graph saw. Facts only: names, counts, tiers.
+  const seen = [
+    pos + (sens ? ` on ${sens} paths` : ""),
+    ...(sink ? [`reaches \`${sink}\` within two calls`] : []),
+    ...(scheduled ? ["scheduled / queue-triggered"] : []),
+    `${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}`,
+    churn,
+    evidence
   ];
+  // Line 3 — what would close it: a test SHAPE, never a claim that one exists.
+  const close = sink
+    ? `one test that drives the path to \`${sinkShort}\` and fails when the guard before it is broken.`
+    : scheduled
+      ? "one test that runs this entry against a mutated dependency and fails."
+      : "one test that exercises this behavior and fails when it is mutated.";
+  const scoreWords = `ORS ${risk.risk_score} — ${(risk.probability ?? 0) >= 6 ? "changes often" : (risk.probability ?? 0) >= 3 ? "changes some" : "stable"} (${risk.probability ?? "?"}) × ${sink ? "irreversible" : (risk.impact ?? 0) >= 6 ? "high blast radius" : "moderate impact"} (${risk.impact ?? "?"}) × ${(risk.detection_difficulty ?? 0) >= 9 ? "unproven and silent" : "unproven"} (${risk.detection_difficulty ?? "?"})`;
+  const overrides = (risk.reasons ?? []).filter((r) => r.startsWith("config override"));
+  const parts = [lead, `Seen: ${seen.join(" · ")}.`, `Would close it: ${close}`, ...overrides.map((o) => `${o[0].toUpperCase()}${o.slice(1)}.`), scoreWords + "."];
   return parts.join(" ");
 }
 
@@ -1121,6 +1154,18 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
       .map((row) => row.code_symbol!)
   );
   const riskGaps = rankPriorityGaps(graph, { repoRoot, limit: opts.riskLimit ?? 20, provenIds });
+  // Two worklists from ONE ranking, no new weights. A multiplicative P×I×D top-N
+  // cannot hold "changing fast, unproven" and "irreversible, stable, unproven" on
+  // the same page: with P=1 for stable code, one family always erases the other
+  // (verified three ways on Temporal). Same rows, two questions.
+  const wide = rankRiskGaps(graph, { repoRoot, limit: 200, provenIds });
+  const changeFrontier = [...wide]
+    .filter((r) => !r.sink_callee)
+    .sort((a, b) => (b.probability ?? 0) - (a.probability ?? 0) || b.risk_score - a.risk_score || a.id.localeCompare(b.id))
+    .slice(0, 20)
+    .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, probability: r.probability ?? 0 }));
+  const irreversible = wide.filter((r) => r.sink_callee).slice(0, 20)
+    .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, sink: r.sink_callee ?? "" }));
   const riskHealth = inspectRiskInputHealth(repoRoot);
   const churnAvailable = riskHealth.churnAvailable && riskGaps.every((risk) => risk.churn_available !== false);
   const provenance: BehaviorReportData["provenance"] = {
@@ -1158,6 +1203,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     flows: flowRows,
     candidateFlows: candidateFlows(graph),
     risks,
+    worklists: { changeFrontier, irreversible },
     zeroProofExplainer: summary.proven === 0 ? { title: ZERO_PROOF_EXPLAINER.title, body: [...ZERO_PROOF_EXPLAINER.body] } : null,
     mapModel: buildSystemMapModel({ flows: flowRows, risks, behaviors: sortedBehaviors }),
     viewMeta: {

@@ -540,6 +540,14 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   // Emitted CodeSymbol names per file — the call graph resolves callers/callees
   // ONLY to symbols that actually became nodes (the "known symbol" invariant).
   const symbolsByFile = new Map<string, Set<string>>();
+  // Retained callee NAMES (no node, no edge) for calls the resolver cannot anchor —
+  // shared by the TS/JS loop and the tree-sitter loop; persisted as external_callees.
+  const externalCalleesByCaller = new Map<string, Set<string>>();
+  const recordExternalCallee = (callerId: string, name: string): void => {
+    let set = externalCalleesByCaller.get(callerId);
+    if (!set) { set = new Set(); externalCalleesByCaller.set(callerId, set); }
+    if (set.size < 32) set.add(name);
+  };
   // Raw (caller, callee) call pairs per TS/JS code file, resolved after the
   // import graph is built (cross-file calls need its bindings + targets).
   const rawCallsByFile = new Map<string, RawCall[]>();
@@ -1385,12 +1393,17 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
               }
             }
             // A non-imported (local/param) qualifier is NOT anchored — no edge.
+            if (!ns && !qImport) recordExternalCallee(callerId, `${c.qualifier}.${c.callee}`); // round two: retain by name
             // Retain the callee NAME as a fact on the caller (Fix B): `t.adminClient.
             // DeleteWorkflowExecution` is invisible as an edge (external interface) but
             // is exactly the kind of sink risk scoring must be able to see. Names only —
             // no node, no edge, no evidence claim.
           }
         } else if (c.via === "injected" && c.injectedType) {
+          // Retain `this.<field>.<callee>` by name regardless of resolution: names are
+          // facts, not evidence, and consequence signals need the callee even when the
+          // injected type never resolves (round two — TS parity with Go).
+          recordExternalCallee(callerId, `this.${c.qualifier ?? c.injectedType}.${c.callee}`);
           const typeBinding = typeImports?.get(c.injectedType) ?? imports?.get(c.injectedType);
           if (typeBinding) {
             const targetMember = resolveInjectedMember(typeBinding, c.callee);
@@ -1879,12 +1892,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     const goPackageMethodFile = (rel: string, member: string): string | undefined => {
       const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
       return goPkgMethods.get(dir)?.get(member);
-    };
-    const externalCalleesByCaller = new Map<string, Set<string>>();
-    const recordExternalCallee = (callerId: string, name: string): void => {
-      let set = externalCalleesByCaller.get(callerId);
-      if (!set) { set = new Set(); externalCalleesByCaller.set(callerId, set); }
-      if (set.size < 32) set.add(name);
     };
     for (const [rel, { language, structure }] of nonTsStructureByFile) {
       const localSyms = symbolsByFile.get(rel);

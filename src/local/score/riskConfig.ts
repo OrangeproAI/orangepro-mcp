@@ -29,6 +29,8 @@ export interface RiskConfig {
     destructive_sinks: string[];
     /** Symbol title globs whose name-derived sensitivity is ignored. */
     sensitivity_ignore: string[];
+    /** Path globs excluded from the RISK RANKING only (still counted): e.g. "ui/**" on a backend repo. */
+    rank_exclude_paths: string[];
   };
   tuning: {
     /** Impact floors at 5/10 for paths reaching a destructive external sink. */
@@ -40,7 +42,7 @@ export interface RiskConfig {
 }
 
 export const DEFAULT_RISK_CONFIG: RiskConfig = {
-  classification: { test_support_paths: [], scheduled_entry_paths: [], destructive_sinks: [], sensitivity_ignore: [] },
+  classification: { test_support_paths: [], scheduled_entry_paths: [], destructive_sinks: [], sensitivity_ignore: [], rank_exclude_paths: [] },
   tuning: { irreversibility_floor: true, silence_multiplier: true },
   overrides: []
 };
@@ -74,6 +76,7 @@ export function loadRiskConfig(repoRoot: string): LoadedRiskConfig {
       cfg.classification.scheduled_entry_paths = asStringArray(cls.scheduled_entry_paths);
       cfg.classification.destructive_sinks = asStringArray(cls.destructive_sinks);
       cfg.classification.sensitivity_ignore = asStringArray(cls.sensitivity_ignore);
+      cfg.classification.rank_exclude_paths = asStringArray(cls.rank_exclude_paths);
       const tun = (raw.tuning ?? {}) as Record<string, unknown>;
       if (typeof tun.irreversibility_floor === "boolean") cfg.tuning.irreversibility_floor = tun.irreversibility_floor;
       if (typeof tun.silence_multiplier === "boolean") cfg.tuning.silence_multiplier = tun.silence_multiplier;
