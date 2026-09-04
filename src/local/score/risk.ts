@@ -392,6 +392,8 @@ interface RawScores {
   reachesDestructiveSink?: boolean;
   scheduledEntry?: boolean;
   sensitivityIgnored?: boolean;
+  /** Config reclassification: an explicit sensitivity value that replaces the name-derived one. */
+  sensitivityOverride?: number;
 }
 
 /** Calls that make a defect irreversible: deletes, drops, purges. Matched on the
@@ -420,6 +422,8 @@ export interface RiskSignals {
   scheduledEntry: boolean;
   /** Config said this symbol's name-derived sensitivity is a false positive. */
   sensitivityIgnored?: boolean;
+  /** Config reclassification: explicit sensitivity value replacing the name-derived one. */
+  sensitivityOverride?: number;
 }
 
 function computeRawORS(
@@ -440,7 +444,7 @@ function computeRawORS(
   const routeWeight = deriveRouteWeight(node);
   const flowDepth = getFlowDepth(node, depthCtx);
   const flowPosition = Math.max(0, 5 - flowDepth);
-  const dataSensitivity = signals.sensitivityIgnored ? 0 : deriveDataSensitivity(node);
+  const dataSensitivity = signals.sensitivityOverride !== undefined ? signals.sensitivityOverride : signals.sensitivityIgnored ? 0 : deriveDataSensitivity(node);
   // Irreversibility is impact: a bug on a path that reaches a delete/purge cannot be
   // rolled back. Bounded, additive, graph-derived (Fix C, signal 1).
   const rawI = incomingRefs * 0.3 + routeWeight * 0.3 + flowPosition * 0.2 + dataSensitivity * 0.2;
@@ -448,7 +452,7 @@ function computeRawORS(
   // queue fails where no request surfaces it (Fix C, signal 2). Proven stays proven.
   const silentFactor = signals.scheduledEntry && detectionTier !== "associated" ? 1.25 : 1;
   const d = DETECTION_MAP[detectionTier] * silentFactor;
-  return { p: rawP, i: rawI, d, reachesDestructiveSink: signals.reachesDestructiveSink, scheduledEntry: signals.scheduledEntry, sensitivityIgnored: signals.sensitivityIgnored };
+  return { p: rawP, i: rawI, d, reachesDestructiveSink: signals.reachesDestructiveSink, scheduledEntry: signals.scheduledEntry, sensitivityIgnored: signals.sensitivityIgnored, sensitivityOverride: signals.sensitivityOverride };
 }
 
 function staticTestLinkedIds(graph: LocalGraph, candidateIds: Set<string>): Set<string> {
@@ -651,7 +655,9 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     return computeRawORS(s, depthCtx, incoming_refs, git_churn, fan_out, detectionFor(s.external_id), ts, nowSec, {
       reachesDestructiveSink: cfg.tuning.irreversibility_floor && (reachesSink.get(s.external_id) ?? false),
       scheduledEntry: cfg.tuning.silence_multiplier && (isScheduledEntry(s) || (SCHEDULED_ENTRY_NAME_RE.test(s.title || "") && extraScheduled.some((re) => re.test(symbolFile(s))))),
-      sensitivityIgnored: sensitivityIgnore.some((re) => re.test(s.title || "") || re.test(s.external_id)) || overrideFor(s.external_id)?.action === "reclassify" && overrideFor(s.external_id)?.sensitivity === "none"
+      sensitivityIgnored: sensitivityIgnore.some((re) => re.test(s.title || "") || re.test(s.external_id)) || overrideFor(s.external_id)?.action === "reclassify" && overrideFor(s.external_id)?.sensitivity === "none",
+      // reclassify to a named class uses the SAME values deriveDataSensitivity assigns (payment 10, auth 9, pii 8)
+      sensitivityOverride: (() => { const o = overrideFor(s.external_id); if (!o || o.action !== "reclassify") return undefined; return o.sensitivity === "payment" ? 10 : o.sensitivity === "auth" ? 9 : o.sensitivity === "pii" ? 8 : o.sensitivity === "none" ? 0 : undefined; })()
     });
   });
 
@@ -671,7 +677,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const fan_out = fanOut.get(s.external_id) ?? 0;
       const isEntry = entryPoint.get(s.external_id) ?? false;
       const route_weight = deriveRouteWeight(s);
-      const data_sensitivity = rawScores[idx].sensitivityIgnored ? 0 : deriveDataSensitivity(s);
+      const data_sensitivity = rawScores[idx].sensitivityOverride !== undefined ? rawScores[idx].sensitivityOverride! : rawScores[idx].sensitivityIgnored ? 0 : deriveDataSensitivity(s);
       const flow_position = Math.max(0, 5 - getFlowDepth(s, depthCtx));
       const complexity_proxy = complexityProxy(s);
       const firstTs = firstCommitTs.get(file) ?? 0;
@@ -797,4 +803,35 @@ export function rankPriorityGaps(
   opts: Omit<RiskGapOptions, "maxPerFile" | "maxPerTitle"> = {}
 ): RiskGap[] {
   return rankRiskGaps(graph, { ...opts, maxPerFile: 3, maxPerTitle: 1 });
+}
+
+/** What the per-repo config DID to this ranking — for visible disclosure in the report.
+ *  A tuned report must never pass as clean: every suppression is listed with its reason. */
+export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
+  hash: string;
+  warnings: string[];
+  overridesActive: number;
+  suppressed: Array<{ symbol: string; reason: string }>;
+  rankExcludePaths: string[];
+  floor: boolean;
+  silence: boolean;
+} {
+  const loaded = loadRiskConfig(repoRoot);
+  const cfg = loaded.config;
+  const symbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale);
+  const suppressed: Array<{ symbol: string; reason: string }> = [];
+  for (const o of cfg.overrides) {
+    if (o.action !== "suppress") continue;
+    const re = globToRegExp(o.symbol);
+    for (const n of symbols) if (n.external_id === o.symbol || re.test(n.external_id)) suppressed.push({ symbol: n.title || n.external_id, reason: o.reason });
+  }
+  return {
+    hash: loaded.hash,
+    warnings: loaded.warnings,
+    overridesActive: cfg.overrides.length,
+    suppressed,
+    rankExcludePaths: cfg.classification.rank_exclude_paths,
+    floor: cfg.tuning.irreversibility_floor,
+    silence: cfg.tuning.silence_multiplier
+  };
 }

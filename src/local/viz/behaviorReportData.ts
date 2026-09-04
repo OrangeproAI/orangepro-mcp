@@ -1,4 +1,5 @@
 import { loadRiskConfig } from "../score/riskConfig.js";
+import { configDisclosureFor } from "../score/risk.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
@@ -80,6 +81,12 @@ export interface BehaviorReportData {
   worklists: {
     changeFrontier: Array<{ path: string; file: string; score: number; probability: number }>;
     irreversible: Array<{ path: string; file: string; score: number; sink: string }>;
+  };
+  /** What the per-repo config did to this ranking — always shown, so a tuned report never passes as clean. */
+  configDisclosure: {
+    hash: string; warnings: string[]; overridesActive: number;
+    suppressed: Array<{ symbol: string; reason: string }>;
+    rankExcludePaths: string[]; floor: boolean; silence: boolean;
   };
   risks: Array<{
     rank: number;
@@ -1164,7 +1171,9 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     .sort((a, b) => (b.probability ?? 0) - (a.probability ?? 0) || b.risk_score - a.risk_score || a.id.localeCompare(b.id))
     .slice(0, 20)
     .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, probability: r.probability ?? 0 }));
-  const irreversible = wide.filter((r) => r.sink_callee).slice(0, 20)
+  // Fix: search the FULL ranking for sinks, not the top 200 — a stable destructive path
+  // ranked 300th is exactly what this panel exists to recover.
+  const irreversible = rankRiskGaps(graph, { repoRoot, limit: Number.MAX_SAFE_INTEGER, provenIds }).filter((r) => r.sink_callee).slice(0, 20)
     .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, sink: r.sink_callee ?? "" }));
   const riskHealth = inspectRiskInputHealth(repoRoot);
   const churnAvailable = riskHealth.churnAvailable && riskGaps.every((risk) => risk.churn_available !== false);
@@ -1178,7 +1187,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     toolVersion: ORANGEPRO_VERSION,
     configHash: loadRiskConfig(repoRoot).hash,
     inputFingerprint: createHash("sha256")
-      .update(JSON.stringify({ root: graph.workspace.root_hash, commit: riskHealth.commit, history: riskHealth.history, churn: churnAvailable, window: riskHealth.churnWindow, version: ORANGEPRO_VERSION }))
+      .update(JSON.stringify({ root: graph.workspace.root_hash, commit: riskHealth.commit, history: riskHealth.history, churn: churnAvailable, window: riskHealth.churnWindow, version: ORANGEPRO_VERSION, config: loadRiskConfig(repoRoot).hash }))
       .digest("hex")
       .slice(0, 16),
     reason: churnAvailable ? undefined : (riskHealth.reason ?? "Git churn scan did not complete")
@@ -1204,6 +1213,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     candidateFlows: candidateFlows(graph),
     risks,
     worklists: { changeFrontier, irreversible },
+    configDisclosure: configDisclosureFor(graph, repoRoot),
     zeroProofExplainer: summary.proven === 0 ? { title: ZERO_PROOF_EXPLAINER.title, body: [...ZERO_PROOF_EXPLAINER.body] } : null,
     mapModel: buildSystemMapModel({ flows: flowRows, risks, behaviors: sortedBehaviors }),
     viewMeta: {

@@ -1,3 +1,4 @@
+import { loadRiskConfig } from "./score/riskConfig.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -2101,6 +2102,9 @@ export async function opStart(
   );
   const warnings = [...analyze.warnings];
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
+  // A per-repo/user risk config that fails to parse must announce itself here, not
+  // silently revert to defaults (round-three review finding #1).
+  for (const w of loadRiskConfig(root).warnings) warnings.push(w);
   const staticSnapshot = writeStartStaticSnapshot(root, opts.baseRef, warnings);
 
   const aiProviderConfigured = deps.aiProvider !== undefined || resolveProviderConfig(providerEnv, providerOpts) !== null;
