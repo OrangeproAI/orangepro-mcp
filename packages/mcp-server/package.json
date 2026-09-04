@@ -1,6 +1,6 @@
 {
   "name": "@orangepro/mcp-server",
-  "version": "0.2.37",
+  "version": "0.2.38",
   "mcpName": "ai.orangepro/mcp",
   "private": false,
   "description": "OrangePro — find behavioral test gaps, generate grounded integration tests, and dynamically prove them via mutation kill. Local-first with no OrangePro-hosted service or repo upload; optional BYOK generation sends redacted grounded context directly to your configured provider.",
@@ -38,7 +38,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@orangepro/orangepro-mcp": "^0.2.37"
+    "@orangepro/orangepro-mcp": "^0.2.38"
   },
   "engines": {
     "node": ">=20"

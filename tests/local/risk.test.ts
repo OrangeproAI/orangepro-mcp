@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
-import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
+import { configDisclosureFor, inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
 
 const dirs: string[] = [];
 
@@ -551,5 +551,53 @@ describe("user-level risk config defaults (~/.orangepro/config.json, overridable
     } finally {
       if (prev === undefined) delete process.env.ORANGEPRO_USER_CONFIG; else process.env.ORANGEPRO_USER_CONFIG = prev;
     }
+  });
+});
+
+describe("round three — reviewer reproductions as fixtures", () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  const repoWith = (json: string): string => {
+    const root = mkdtempSync(join(tmpdir(), "oprorev-"));
+    mkdirSync(join(root, ".orangepro"));
+    writeFileSync(join(root, ".orangepro", "config.json"), json);
+    return root;
+  };
+
+  it("#1 a config with a // comment is invalid JSON: defaults apply AND a warning is produced (never silent)", () => {
+    const root = repoWith('{ "tuning": { "irreversibility_floor": false // back to old behavior\n } }');
+    const l = loadRiskConfig(root);
+    expect(l.config.tuning.irreversibility_floor).toBe(true);
+    expect(l.warnings.some((w) => /unreadable|JSON/i.test(w))).toBe(true);
+    expect(configDisclosureFor(graph(root), root).warnings.length).toBeGreaterThan(0);
+  });
+
+  it("#2 a suppressed symbol is DISCLOSED with its reason, not silently dropped", () => {
+    const root = repoWith(JSON.stringify({ overrides: [{ symbol: "sym:src/noise.go#noise.Run", action: "suppress", reason: "generated shim, not product behavior" }] }));
+    const g = graph(root);
+    g.nodes = [symbol("sym:src/noise.go#noise.Run", "noise.Run", "src/noise.go"), symbol("sym:src/real.go#Real.Do", "Real.Do", "src/real.go")];
+    expect(rankRiskGaps(g, { limit: 10, repoRoot: root }).map((r) => r.id)).not.toContain("sym:src/noise.go#noise.Run");
+    const d = configDisclosureFor(g, root);
+    expect(d.suppressed).toEqual([{ symbol: "noise.Run", reason: "generated shim, not product behavior" }]);
+    expect(d.overridesActive).toBe(1);
+  });
+
+  it("#3 reclassify to payment/auth/pii actually changes the row's sensitivity", () => {
+    const root = repoWith(JSON.stringify({ overrides: [{ symbol: "sym:src/x.go#Svc.Do", action: "reclassify", sensitivity: "payment", reason: "handles card capture despite the bland name" }] }));
+    const g = graph(root);
+    g.nodes = [symbol("sym:src/x.go#Svc.Do", "Svc.Do", "src/x.go")];
+    const r = rankRiskGaps(g, { limit: 10, repoRoot: root }).find((x) => x.id === "sym:src/x.go#Svc.Do")!;
+    expect(r.data_sensitivity).toBe(10);
+  });
+
+  it("#5 a destructive path ranked far below the top 200 still reaches the irreversible worklist (full-ranking search)", () => {
+    const g = graph();
+    const filler = Array.from({ length: 260 }, (_, i) => symbol(`sym:src/f${i}.go#F${i}.Do`, `F${i}.Do`, `src/f${i}.go`));
+    const low = { ...symbol("sym:pkg/store/gc.go#gc.Sweep", "gc.Sweep", "pkg/store/gc.go"), properties: { file: "pkg/store/gc.go", external_callees: ["g.store.DeleteExpired"] } };
+    g.nodes = [...filler, low];
+    const all = rankRiskGaps(g, { limit: Number.MAX_SAFE_INTEGER, repoRoot: "" });
+    const sinks = all.filter((r) => r.sink_callee);
+    expect(sinks.map((r) => r.id)).toContain(low.external_id);
   });
 });
