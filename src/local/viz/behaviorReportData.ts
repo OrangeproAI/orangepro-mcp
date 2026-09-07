@@ -87,6 +87,8 @@ export interface BehaviorReportData {
     hash: string; warnings: string[]; overridesActive: number;
     suppressed: Array<{ symbol: string; reason: string }>;
     rankExcludePaths: string[]; floor: boolean; silence: boolean;
+    classification: { test_support_paths: string[]; scheduled_entry_paths: string[]; destructive_sinks: string[]; sensitivity_ignore: string[] };
+    sensitivityIgnored: string[];
   };
   risks: Array<{
     rank: number;
