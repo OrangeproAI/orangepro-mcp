@@ -547,3 +547,19 @@ describe("buildBehaviorReportData — report trust metadata", () => {
     expect(data.risks.every((risk) => risk.tags.some(([label]) => label.startsWith("ORS ")))).toBe(true);
   });
 });
+
+describe("report-level worklists (builder, not the ranking function)", () => {
+  it("a destructive path ranked far below the top 200 appears in data.worklists.irreversible", () => {
+    const g = graph();
+    const filler = Array.from({ length: 260 }, (_, i) => codeSymbol(`sym:src/f${i}.ts#F${i}.do`, `F${i}.do`, `src/f${i}.ts`));
+    const low = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
+    low.properties = { ...low.properties, external_callees: ["this.store.deleteExpired"] };
+    g.nodes = [...g.nodes, ...filler, low];
+    const data = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/tmp/medusa" });
+    expect(data.worklists.irreversible.map((r) => r.path)).toContain("Gc.sweep");
+    expect(data.worklists.irreversible.find((r) => r.path === "Gc.sweep")?.sink).toBe("this.store.deleteExpired");
+    // and the disclosure block is always present, even with no config
+    expect(data.configDisclosure.overridesActive).toBe(0);
+    expect(data.configDisclosure.suppressed).toEqual([]);
+  });
+});

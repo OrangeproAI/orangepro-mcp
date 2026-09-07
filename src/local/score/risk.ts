@@ -815,6 +815,10 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
   rankExcludePaths: string[];
   floor: boolean;
   silence: boolean;
+  /** Every other ranking-changing classification setting, listed when set. */
+  classification: { test_support_paths: string[]; scheduled_entry_paths: string[]; destructive_sinks: string[]; sensitivity_ignore: string[] };
+  /** Symbols whose sensitivity was zeroed by a sensitivity_ignore glob (score changed — say so). */
+  sensitivityIgnored: string[];
 } {
   const loaded = loadRiskConfig(repoRoot);
   const cfg = loaded.config;
@@ -825,6 +829,10 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
     const re = globToRegExp(o.symbol);
     for (const n of symbols) if (n.external_id === o.symbol || re.test(n.external_id)) suppressed.push({ symbol: n.title || n.external_id, reason: o.reason });
   }
+  const ignoreRes = cfg.classification.sensitivity_ignore.map(globToRegExp);
+  const sensitivityIgnored = ignoreRes.length
+    ? symbols.filter((n) => ignoreRes.some((re) => re.test(n.title || "") || re.test(n.external_id))).map((n) => n.title || n.external_id).slice(0, 50)
+    : [];
   return {
     hash: loaded.hash,
     warnings: loaded.warnings,
@@ -832,6 +840,13 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
     suppressed,
     rankExcludePaths: cfg.classification.rank_exclude_paths,
     floor: cfg.tuning.irreversibility_floor,
-    silence: cfg.tuning.silence_multiplier
+    silence: cfg.tuning.silence_multiplier,
+    classification: {
+      test_support_paths: cfg.classification.test_support_paths,
+      scheduled_entry_paths: cfg.classification.scheduled_entry_paths,
+      destructive_sinks: cfg.classification.destructive_sinks,
+      sensitivity_ignore: cfg.classification.sensitivity_ignore
+    },
+    sensitivityIgnored
   };
 }

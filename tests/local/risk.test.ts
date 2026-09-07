@@ -583,12 +583,23 @@ describe("round three — reviewer reproductions as fixtures", () => {
     expect(d.overridesActive).toBe(1);
   });
 
-  it("#3 reclassify to payment/auth/pii actually changes the row's sensitivity", () => {
-    const root = repoWith(JSON.stringify({ overrides: [{ symbol: "sym:src/x.go#Svc.Do", action: "reclassify", sensitivity: "payment", reason: "handles card capture despite the bland name" }] }));
+  it.each([["payment", 10], ["auth", 9], ["pii", 8], ["none", 0]] as const)("#3 reclassify to %s sets the row's sensitivity to %i", (cls, expected) => {
+    const root = repoWith(JSON.stringify({ overrides: [{ symbol: "sym:src/x.go#Svc.Do", action: "reclassify", sensitivity: cls, reason: "classified by the owning team after review" }] }));
     const g = graph(root);
     g.nodes = [symbol("sym:src/x.go#Svc.Do", "Svc.Do", "src/x.go")];
     const r = rankRiskGaps(g, { limit: 10, repoRoot: root }).find((x) => x.id === "sym:src/x.go#Svc.Do")!;
-    expect(r.data_sensitivity).toBe(10);
+    expect(r.data_sensitivity).toBe(expected);
+  });
+
+  it("#2b every ranking-changing classification setting is disclosed, and sensitivity_ignore names the symbols it changed", () => {
+    const root = repoWith(JSON.stringify({ classification: { sensitivity_ignore: ["*CapturePanic*"], test_support_paths: ["internal/testutil/**"], destructive_sinks: ["Purge*"] } }));
+    const g = graph(root);
+    g.nodes = [symbol("sym:common/log/panic.go#log.CapturePanic", "log.CapturePanic", "common/log/panic.go")];
+    const d = configDisclosureFor(g, root);
+    expect(d.classification.sensitivity_ignore).toEqual(["*CapturePanic*"]);
+    expect(d.classification.test_support_paths).toEqual(["internal/testutil/**"]);
+    expect(d.classification.destructive_sinks).toEqual(["Purge*"]);
+    expect(d.sensitivityIgnored).toEqual(["log.CapturePanic"]);
   });
 
   it("#5 a destructive path ranked far below the top 200 still reaches the irreversible worklist (full-ranking search)", () => {
