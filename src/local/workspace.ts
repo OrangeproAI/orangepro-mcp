@@ -110,7 +110,15 @@ export function loadConfig(paths: WorkspacePaths): LocalProofConfig {
       privacy: defaultPrivacySettings()
     };
   }
-  return JSON.parse(readFileSync(paths.configPath, "utf8")) as LocalProofConfig;
+  const raw = readFileSync(paths.configPath, "utf8");
+  try {
+    return JSON.parse(raw) as LocalProofConfig;
+  } catch (err) {
+    // Fail loud AND clear: this file also carries the per-repo risk config, so a
+    // silent default here would be exactly the failure a verification layer must not have.
+    const hint = /\/\//.test(raw) ? " JSON does not allow // comments." : "";
+    throw new Error(`Unreadable ${paths.configPath}: ${(err as Error).message}.${hint} Fix the JSON, or delete the file to regenerate defaults.`);
+  }
 }
 
 export function saveConfig(paths: WorkspacePaths, config: LocalProofConfig): void {

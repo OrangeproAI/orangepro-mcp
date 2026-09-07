@@ -1145,7 +1145,9 @@ export function opAnalyze(root: string, opts: AnalyzeOptions = {}, deps: Operati
     runtimeCoveragePrepare?.generated
       .filter((g) => g.ok && g.artifact_path)
       .map((g) => `coverage artifact generated for ${g.language} module ${g.module_dir}: ${g.artifact_path}`) ?? [];
-  const warnings = [...coverageSuccess, ...coverageWarnings, ...(runtimeCoveragePrepare?.warnings ?? []), ...analyzeFragment.warnings, ...enrichFragments.flatMap((f) => f.warnings)];
+  // Risk-config problems must surface on EVERY entry point that ranks, not just `start`.
+  const riskConfigWarnings = loadRiskConfig(scanRoot).warnings;
+  const warnings = [...coverageSuccess, ...coverageWarnings, ...(runtimeCoveragePrepare?.warnings ?? []), ...analyzeFragment.warnings, ...enrichFragments.flatMap((f) => f.warnings), ...riskConfigWarnings];
   return {
     graph_path: paths.graphPath,
     sources_count: graph.sources.length,
@@ -1395,8 +1397,11 @@ export function opGaps(root: string, opts: { limit?: number; min_priority?: stri
     is_new_code: gap.is_new_code,
     integration_signal: gap.integration_signal
   }));
+  // Same root the ranking itself uses (the analyzed source), not the workspace cwd.
+  const riskConfigWarnings = loadRiskConfig(graph.workspace.root).warnings;
   return {
     ...gaps,
+    ...(riskConfigWarnings.length ? { warnings: riskConfigWarnings } : {}),
     top_risk_gaps: topRiskGaps,
     risk_model: {
       formula: "OrangePro Risk Score = Probability(1-10) × Impact(1-10) × DetectionDifficulty(1|5|10); P = normalize(git_churn*0.35 + fan_out*0.30 + new_code*15 + complexity*0.20); I = normalize(fan_in*0.30 + route_weight*0.30 + flow_position*0.20 + data_sensitivity*0.20); D = {proven:1, associated:5, none:10}",

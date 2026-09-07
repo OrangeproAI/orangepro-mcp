@@ -101,6 +101,8 @@ export interface RiskGapItem {
 export interface GapsResult {
   gaps: GapItem[];
   total_behaviors: number;
+  /** Risk-config problems (unreadable file, ignored overrides) — surfaced on every ranking entry point. */
+  warnings?: string[];
   /** Unproven code symbols ranked for prioritization only; does not affect coverage/proof status. */
   top_risk_gaps?: RiskGapItem[];
   risk_model?: {

@@ -612,3 +612,33 @@ describe("round three — reviewer reproductions as fixtures", () => {
     expect(sinks.map((r) => r.id)).toContain(low.external_id);
   });
 });
+
+describe("config warnings reach EVERY ranking entry point, in both usage patterns (surface, not mechanism)", () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  const makeRepo = (): string => {
+    const repo = mkdtempSync(join(tmpdir(), "oprosurf-"));
+    mkdirSync(join(repo, "src"));
+    writeFileSync(join(repo, "src", "a.ts"), "export function a(){ return 1 }\n");
+    mkdirSync(join(repo, ".orangepro"));
+    writeFileSync(join(repo, ".orangepro", "config.json"), '{ "tuning": { "irreversibility_floor": false // comment\n } }');
+    return repo;
+  };
+
+  it("cross-directory: analyze <path> then gaps from the workspace both carry the config warning", async () => {
+    const { opAnalyze, opGaps } = await import("../../src/local/operations.js");
+    const repo = makeRepo();
+    const ws = mkdtempSync(join(tmpdir(), "oprows-"));
+    const a = opAnalyze(ws, { source: repo, readContent: true });
+    expect(a.warnings.some((w) => /config \(repo\): unreadable/.test(w))).toBe(true);
+    const g = opGaps(ws, {});
+    expect((g.warnings ?? []).some((w) => /config \(repo\): unreadable/.test(w))).toBe(true);
+  });
+
+  it("in-repo: an unreadable workspace config aborts analyze with the file path and a hint, never a bare parse error", async () => {
+    const { opAnalyze } = await import("../../src/local/operations.js");
+    const repo = makeRepo();
+    expect(() => opAnalyze(repo, { readContent: true })).toThrow(/Unreadable .*config\.json.*JSON does not allow \/\/ comments/);
+  });
+});

@@ -708,6 +708,7 @@ async function main(): Promise<number> {
       if (json) printJson(res);
       else {
         out(`Test gaps (${res.gaps.length} of ${res.total_behaviors} behaviors):`);
+        for (const w of res.warnings ?? []) out(`  warning: ${w}`);
         if (res.guidance) out(`  ${res.guidance}`);
         for (const g of res.gaps) {
           out(`  [${g.priority}] ${g.title}  (${g.external_id})`);
