@@ -162,3 +162,15 @@ describe("removed hosted-IP artifacts can never ship", () => {
     expect(broken).toEqual([]);
   });
 });
+
+describe("repository secret hygiene", () => {
+  it("tracks no private-key or credential files", () => {
+    const tracked = execFileSync("git", ["ls-files"], { cwd: resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."), encoding: "utf8" }).split("\n").filter(Boolean);
+    const isSecret = (f: string): boolean => {
+      const base = f.split("/").pop() ?? f;
+      if (/\.example$/.test(base)) return false;
+      return /\.(pem|key|p12|pfx)$/.test(base) || /^id_(rsa|ed25519|ecdsa)(\.pub)?$/.test(base) || /^\.env(\..+)?$/.test(base);
+    };
+    expect(tracked.filter(isSecret)).toEqual([]);
+  });
+});
