@@ -630,7 +630,7 @@ describe("config warnings reach EVERY ranking entry point, in both usage pattern
     const { opAnalyze, opGaps } = await import("../../src/local/operations.js");
     const repo = makeRepo();
     const ws = mkdtempSync(join(tmpdir(), "oprows-"));
-    const a = opAnalyze(ws, { source: repo, readContent: true });
+    const a = opAnalyze(ws, { source: repo });
     expect(a.warnings.some((w) => /config \(repo\): unreadable/.test(w))).toBe(true);
     const g = opGaps(ws, {});
     expect((g.warnings ?? []).some((w) => /config \(repo\): unreadable/.test(w))).toBe(true);
@@ -639,6 +639,6 @@ describe("config warnings reach EVERY ranking entry point, in both usage pattern
   it("in-repo: an unreadable workspace config aborts analyze with the file path and a hint, never a bare parse error", async () => {
     const { opAnalyze } = await import("../../src/local/operations.js");
     const repo = makeRepo();
-    expect(() => opAnalyze(repo, { readContent: true })).toThrow(/Unreadable .*config\.json.*JSON does not allow \/\/ comments/);
+    expect(() => opAnalyze(repo, {})).toThrow(/Unreadable .*config\.json.*JSON does not allow \/\/ comments/);
   });
 });
