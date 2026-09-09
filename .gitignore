@@ -24,3 +24,5 @@ private/
 .omc/
 .paul/
 fix-brief.md
+*.pem
+*.key
