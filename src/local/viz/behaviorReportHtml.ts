@@ -305,8 +305,6 @@ body{padding-bottom:48px}
 .mode-btn.active{background:var(--orange);color:#1a0a02;box-shadow:0 1px 3px rgba(240,136,62,.25)}
 body[data-mode="simple"] .expert-only{display:none!important}
 body[data-mode="simple"] .kpis{grid-template-columns:repeat(3,1fr)}
-body[data-mode="simple"] .gen-test .gen-test-body{display:block}
-body[data-mode="simple"] .gen-test .gen-test-toggle{display:none}
 body[data-mode="simple"] .risk-card{border-left:3px solid var(--orange)}
 body[data-mode="simple"] .risk-ctx{color:var(--ink2);font-size:13px}
 body[data-mode="simple"] .todo{font-size:12.5px;font-weight:600;color:var(--ink);background:var(--obg);border-color:var(--obd)}
@@ -994,7 +992,7 @@ function riskCardHtml(r){
       const cBadge=t.concern?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(t.concern.replace('_',' '))}</span>\`:'';
       const iBadge=t.runnable===false?\`<span class="badge b-cand" style="margin-left:6px;font-size:9px">Manual test</span>\`:'';
       const bBadge=t.bucket?\`<span class="badge b-info" style="margin-left:6px;font-size:9px">\${esc(String(t.bucket).replace(/_/g,' '))}</span>\`:'';
-      testsHtml+=\`<div class="gen-test"><div class="gen-test-head"><span class="gen-test-name">\${esc(t.name)}\${cBadge}\${bBadge}\${iBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><button class="copy-btn" onclick="event.stopPropagation();navigator.clipboard.writeText(this.closest('.gen-test').querySelector('.gen-test-body').textContent).then(()=>{this.textContent='Copied!';this.classList.add('copied');setTimeout(()=>{this.textContent='Copy';this.classList.remove('copied')},1500)})">Copy</button><span class="gen-test-toggle">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
+      testsHtml+=\`<div class="gen-test"><div class="gen-test-head" role="button" tabindex="0" aria-expanded="false"><span class="gen-test-name">\${esc(t.name)}\${cBadge}\${bBadge}\${iBadge}</span><span class="gen-test-assert">\${esc(t.assertion)}</span><button class="copy-btn" onclick="event.stopPropagation();navigator.clipboard.writeText(this.closest('.gen-test').querySelector('.gen-test-body').textContent).then(()=>{this.textContent='Copied!';this.classList.add('copied');setTimeout(()=>{this.textContent='Copy';this.classList.remove('copied')},1500)})">Copy</button><span class="gen-test-toggle" aria-hidden="true">&#9660;</span></div><div class="gen-test-body">\${esc(t.code)}</div></div>\`;
     });
     testsHtml+=\`</div>\`;
   }
@@ -1071,10 +1069,24 @@ renderRisks();
   </div>\`;
   host.addEventListener("click",e=>{const r=e.target.closest("[data-path]");if(r&&topPaths.has(r.getAttribute("data-path")))scrollToRisk(r.getAttribute("data-path"));});
 })();
-// toggle test expand
+// Generated-test drafts are collapsed by default in every view. Keep the
+// control operable by pointer and keyboard; Simple mode must not override it.
+function toggleGeneratedTest(h){
+  const item=h.closest('.gen-test');
+  if(!item)return;
+  const open=item.classList.toggle('open');
+  h.setAttribute('aria-expanded',String(open));
+}
 document.addEventListener('click',e=>{
   const h=e.target.closest('.gen-test-head');
-  if(h)h.parentElement.classList.toggle('open');
+  if(h)toggleGeneratedTest(h);
+});
+document.addEventListener('keydown',e=>{
+  const h=e.target.closest('.gen-test-head');
+  if(h&&(e.key==='Enter'||e.key===' ')){
+    e.preventDefault();
+    toggleGeneratedTest(h);
+  }
 });
 
 // tabs

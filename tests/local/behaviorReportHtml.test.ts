@@ -563,6 +563,19 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(withTests!.generatedCategories).toEqual(["integration_flow"]); // draft target, never a coverage claim
   });
 
+  it("keeps generated-test drafts collapsible in Simple and Expert views", () => {
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
+    const html = renderBehaviorReport(data);
+
+    // Simple mode previously forced every generated-test body open and hid the
+    // only toggle, so pointer clicks could never collapse the content.
+    expect(html).not.toContain('body[data-mode="simple"] .gen-test .gen-test-body{display:block}');
+    expect(html).not.toContain('body[data-mode="simple"] .gen-test .gen-test-toggle{display:none}');
+    expect(html).toContain('role="button" tabindex="0" aria-expanded="false"');
+    expect(html).toContain("function toggleGeneratedTest(h)");
+    expect(html).toContain("e.key==='Enter'||e.key===' '");
+  });
+
   it("attaches a same-file generated test to exactly ONE deterministic row, labeled 'same-file target'", () => {
     const g = graph();
     // Two risk rows in one file + a generated test targeting a THIRD (unlisted) symbol in that file.
