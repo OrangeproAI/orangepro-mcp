@@ -1,6 +1,11 @@
 import { loadRiskConfig, globToRegExp, type RiskOverride } from "./riskConfig.js";
 import { execFileSync } from "node:child_process";
 import { LocalGraph, GraphNode } from "../graph/ontology.js";
+import { hashString } from "../util/hash.js";
+import { builtInRankExclusion } from "./rankEligibility.js";
+
+/** Explicit scorer identity. Formula changes require a new value. */
+export const ORS_VERSION = "orangepro.ors.stable_population.v2" as const;
 
 export interface RiskGap {
   id: string;
@@ -65,6 +70,12 @@ export interface RiskGapOptions {
    * own proven methods.
    */
   provenIds?: Set<string>;
+  /**
+   * Consequence worklists may need to show statically Associated behaviors that
+   * are still unproven. The main priority-gap list leaves this false so its
+   * existing semantics and ordering remain unchanged.
+   */
+  includeAssociated?: boolean;
 }
 
 const ENTRY_PATH_RE = /(^|\/)(routes?|controllers?|handlers?|jobs?|workers?|processors?|queues?|consumers?|subscribers?|listeners?|server|cmd)\//i;
@@ -238,7 +249,26 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
   return out;
 }
 
+/** Exact deterministic identity of the Git-derived inputs consumed by ORS. */
+export function riskHistoryFingerprint(root: string | undefined, files: string[], churnWindow?: string): string {
+  const health = inspectRiskInputHealth(root, churnWindow);
+  const sortedFiles = [...new Set(files)].sort();
+  if (!health.churnAvailable) {
+    return hashString(JSON.stringify({ state: health.history, window: health.churnWindow, available: false }));
+  }
+  const churn = gitChurn(root, sortedFiles, health.churnWindow);
+  const first = churn.complete ? gitFirstCommitBatch(root, sortedFiles) : new Map<string, number>();
+  return hashString(JSON.stringify({
+    state: health.history,
+    window: health.churnWindow,
+    available: churn.complete,
+    churn: sortedFiles.map((file) => [file, churn.values.get(file) ?? 0]),
+    first_commit: sortedFiles.map((file) => [file, first.get(file) ?? 0])
+  }));
+}
+
 export function isEntryPoint(node: GraphNode): boolean {
+  if (node.properties.cli_entrypoint === true) return true;
   const file = symbolFile(node);
   const title = symbolTitle(node);
   if (API_HANDLER_NAME_RE.test(title) && /(^|\/)api(s)?\//i.test(file)) return true;
@@ -257,6 +287,8 @@ function deriveRouteWeight(node: GraphNode): number {
   const method = methodMatch?.[1].toUpperCase() ?? "";
   const isStore = /\/store\//i.test(file) || /\/store\b/i.test(file);
   const isAdmin = /\/admin\//i.test(file) || /\/admin\b/i.test(file);
+
+  if (node.properties.cli_entrypoint === true) return 6;
 
   if (isHttpRouteSymbol(node) && isStore) {
     if (method === "POST") return 10;
@@ -403,6 +435,10 @@ interface RawScores {
 // `remove` kept but not for listener/handler/attribute/child tails — those detach,
 // they don't destroy data.
 const DESTRUCTIVE_CALL_RE = /^(?:delete(?!d)|purge|drop|forcedelete|destroy)[A-Za-z0-9_]*$/i;
+// Replacement can overwrite a remote collection, but the verb is too broad to
+// treat by name alone. It is a sink only when the analyzer proves the receiver
+// is a runtime binding imported from an external module.
+const IMPORTED_REPLACEMENT_CALL_RE = /^replace[A-Za-z0-9_]*$/i;
 // `remove*` is only a data sink through a persistence-shaped field; in-memory
 // removals (`pollers.Remove`, `RemoveSpeculativeWorkflowTaskTimeout`) are not.
 const REMOVE_CALL_RE = /^remove(?![A-Za-z0-9_]*(?:listener|handler|observer|callback|attribute|attr|class|child|style|hook|timeout|timer)$)[A-Za-z0-9_]*$/i;
@@ -484,17 +520,19 @@ function candidateSignalIds(graph: LocalGraph, candidateIds: Set<string>): Set<s
 
 export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): RiskGap[] {
   const limit = opts.limit ?? 20;
-  const confirmed = confirmedBehaviorIds(graph, opts.provenIds);
+  const repoRoot = opts.repoRoot ?? graph.workspace.root;
+  const confirmed = opts.includeAssociated
+    ? new Set(opts.provenIds ?? [])
+    : confirmedBehaviorIds(graph, opts.provenIds);
   // Fix D: ranking hygiene. Test-support code, bare constants/variables, and trivial
   // accessors stay in the behavior DENOMINATOR but never compete for a risk slot.
-  const TEST_SUPPORT_PATH_RE = /(^|\/)(testing|testutils?|testhelpers?|fixtures?|mocks?|fakes?)(\/|$)/i;
-  const cfgEarly = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.classification;
+  const cfgEarly = loadRiskConfig(repoRoot).config.classification;
   const extraTestSupportRef: RegExp[] = cfgEarly.test_support_paths.map(globToRegExp);
   const rankExcludeRef: RegExp[] = cfgEarly.rank_exclude_paths.map(globToRegExp);
   const ACCESSOR_RE = /(^|\.)(Get|Set|Is|Has)[A-Z][A-Za-z0-9]*$/;
   const rankEligible = (n: GraphNode): boolean => {
     const props = (n.properties ?? {}) as { symbol_kind?: string; start_line?: number; end_line?: number };
-    if (TEST_SUPPORT_PATH_RE.test(symbolFile(n))) return false;
+    if (builtInRankExclusion(symbolFile(n))) return false;
     if (extraTestSupportRef.some((re) => re.test(symbolFile(n)))) return false;
     if (props.symbol_kind === "constant" || props.symbol_kind === "variable") return false;
     // Go `var x = ...` / `const` / `type` one-liners are minted as "class" with a
@@ -505,19 +543,22 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     if (rankExcludeRef.some((re) => re.test(symbolFile(n)))) return false;
     return true;
   };
-  const suppressedRef = loadRiskConfig(opts.repoRoot ?? graph.workspace.root).config.overrides.filter((o) => o.action === "suppress");
+  const suppressedRef = loadRiskConfig(repoRoot).config.overrides.filter((o) => o.action === "suppress");
   const isSuppressed = (id: string): boolean => suppressedRef.some((o) => o.symbol === id || globToRegExp(o.symbol).test(id));
-  const symbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && !confirmed.has(n.external_id) && rankEligible(n) && !isSuppressed(n.external_id));
-  const symbolIds = new Set(symbols.map((s) => s.external_id));
+  // ORS v2 computes structural inputs and normalizes P/I over the stable
+  // denominator-eligible production population. Evidence changes filter the
+  // worklist but do not rescale an unchanged peer.
+  const normalizationSymbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && rankEligible(n) && !isSuppressed(n.external_id));
+  const symbols = normalizationSymbols.filter((n) => !confirmed.has(n.external_id));
+  const symbolIds = new Set(normalizationSymbols.map((s) => s.external_id));
   const symbolsByFile = new Map<string, GraphNode[]>();
-  for (const s of symbols) {
+  for (const s of normalizationSymbols) {
     const file = symbolFile(s);
     const list = symbolsByFile.get(file);
     if (list) list.push(s);
     else symbolsByFile.set(file, [s]);
   }
-  const files = [...new Set(symbols.map(symbolFile))];
-  const repoRoot = opts.repoRoot ?? graph.workspace.root;
+  const files = [...new Set(normalizationSymbols.map(symbolFile))];
   const loadedCfg = loadRiskConfig(repoRoot);
   const cfg = loadedCfg.config;
   const overrideFor = (id: string): RiskOverride | undefined => cfg.overrides.find((o) => o.symbol === id || globToRegExp(o.symbol).test(id));
@@ -569,7 +610,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     return fileChurn * (Math.max(complexityProxy(s), 1) / Math.max(total, 1));
   };
 
-  const entryPoint = new Map(symbols.map((s) => [s.external_id, isEntryPoint(s)]));
+  const entryPoint = new Map(normalizationSymbols.map((s) => [s.external_id, isEntryPoint(s)]));
   // Single pass over edges (was one full edge scan PER symbol).
   const fanOutTargets = new Map<string, Set<string>>();
   for (const e of graph.edges) {
@@ -578,7 +619,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     set.add(e.to_external_id);
     fanOutTargets.set(e.from_external_id, set);
   }
-  const fanOut = new Map(symbols.map((s) => [s.external_id, fanOutTargets.get(s.external_id)?.size ?? 0]));
+  const fanOut = new Map(normalizationSymbols.map((s) => [s.external_id, fanOutTargets.get(s.external_id)?.size ?? 0]));
   // Fix C signals: destructive reach via CALLS (<=3 hops) to a sink; sinks are symbols
   // whose own name, or a retained external callee, is a destructive call.
   const nodeById = new Map(graph.nodes.map((n) => [n.external_id, n]));
@@ -594,12 +635,19 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     const n = nodeById.get(id);
     if (!n) return undefined;
     const ext = (n.properties as { external_callees?: string[] } | undefined)?.external_callees ?? [];
+    const importedStatic = (n.properties as { imported_static_callees?: string[] } | undefined)?.imported_static_callees ?? [];
     // A receiver FIELD path is `x.field.Method` — no call parentheses before the last
     // segment. `q.Clock().Now().Truncate` is a chain of return values, not a surface.
     const viaField = (c: string): boolean => !c.slice(0, c.lastIndexOf(".")).includes("(");
     const fieldOf = (c: string): string => c.slice(0, c.lastIndexOf("."));
-    return ext.find((c) => viaField(c) && (
+    const destructive = ext.find((c) => viaField(c) && (
       DESTRUCTIVE_CALL_RE.test(lastSeg(c)) ||
+      (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
+      extraSinks.some((re) => re.test(lastSeg(c)))));
+    if (destructive) return destructive;
+    return importedStatic.find((c) => viaField(c) && (
+      DESTRUCTIVE_CALL_RE.test(lastSeg(c)) ||
+      IMPORTED_REPLACEMENT_CALL_RE.test(lastSeg(c)) ||
       (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
       extraSinks.some((re) => re.test(lastSeg(c)))));
   };
@@ -616,7 +664,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     }
     return undefined;
   };
-  const sinkReached = new Map(symbols.map((s) => [s.external_id, reachedSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
+  const sinkReached = new Map(normalizationSymbols.map((s) => [s.external_id, reachedSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
   const reachesSink = new Map([...sinkReached].map(([k, v]) => [k, v !== undefined]));
   const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
@@ -625,10 +673,33 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     staticLinked.has(id) ? "associated" : candidateLinked.has(id) ? "candidate" : "none";
 
   if (opts.legacy) {
+    // Preserve the legacy option's historical evidence-filtered attribution.
+    const legacyIds = new Set(symbols.map((s) => s.external_id));
+    const legacyByFile = new Map<string, GraphNode[]>();
+    for (const s of symbols) {
+      const file = symbolFile(s);
+      const list = legacyByFile.get(file);
+      if (list) list.push(s);
+      else legacyByFile.set(file, [s]);
+    }
+    const legacyIncoming = new Map<string, number>();
+    const legacyFileImports = new Map<string, number>();
+    for (const e of graph.edges) {
+      if (e.relationship_type === "CALLS" && legacyIds.has(e.to_external_id)) {
+        legacyIncoming.set(e.to_external_id, (legacyIncoming.get(e.to_external_id) ?? 0) + 1);
+      } else if (e.relationship_type === "IMPORTS" && legacyByFile.has(e.to_external_id)) {
+        legacyFileImports.set(e.to_external_id, (legacyFileImports.get(e.to_external_id) ?? 0) + 1);
+      }
+    }
+    for (const [file, count] of legacyFileImports) {
+      const syms = legacyByFile.get(file) ?? [];
+      const share = syms.length > 0 ? count / syms.length : 0;
+      for (const s of syms) legacyIncoming.set(s.external_id, (legacyIncoming.get(s.external_id) ?? 0) + share);
+    }
     return symbols
       .map((s) => {
         const file = symbolFile(s);
-        const incoming_refs = incoming.get(s.external_id) ?? 0;
+        const incoming_refs = legacyIncoming.get(s.external_id) ?? 0;
         const git_churn = churn.get(file) ?? 0;
         const isEntry = entryPoint.get(s.external_id) ?? false;
         const churnForScore = Math.min(git_churn, 500);
@@ -646,7 +717,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       .slice(0, limit);
   }
 
-  const rawScores = symbols.map((s) => {
+  const rawScores = normalizationSymbols.map((s) => {
     const file = symbolFile(s);
     const incoming_refs = incoming.get(s.external_id) ?? 0;
     const git_churn = symbolChurn(s);
@@ -668,16 +739,20 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // matter how few callers it has. Impact FLOORS at 5/10 for such paths (a floor,
   // not an increment — an additive bump vanishes under hub-dominated normalization).
   const iScores = iScoresRaw.map((v, idx) => (rawScores[idx].reachesDestructiveSink ? Math.max(v, 5) : v));
+  const rawById = new Map(normalizationSymbols.map((s, idx) => [s.external_id, rawScores[idx]]));
+  const pById = new Map(normalizationSymbols.map((s, idx) => [s.external_id, pScores[idx]]));
+  const iById = new Map(normalizationSymbols.map((s, idx) => [s.external_id, iScores[idx]]));
 
   const ranked = symbols
-    .map((s, idx) => {
+    .map((s) => {
       const file = symbolFile(s);
       const incoming_refs = Math.round((incoming.get(s.external_id) ?? 0) * 10) / 10;
       const git_churn = Math.round(symbolChurn(s));
       const fan_out = fanOut.get(s.external_id) ?? 0;
       const isEntry = entryPoint.get(s.external_id) ?? false;
       const route_weight = deriveRouteWeight(s);
-      const data_sensitivity = rawScores[idx].sensitivityOverride !== undefined ? rawScores[idx].sensitivityOverride! : rawScores[idx].sensitivityIgnored ? 0 : deriveDataSensitivity(s);
+      const raw = rawById.get(s.external_id)!;
+      const data_sensitivity = raw.sensitivityOverride !== undefined ? raw.sensitivityOverride : raw.sensitivityIgnored ? 0 : deriveDataSensitivity(s);
       const flow_position = Math.max(0, 5 - getFlowDepth(s, depthCtx));
       const complexity_proxy = complexityProxy(s);
       const firstTs = firstCommitTs.get(file) ?? 0;
@@ -686,11 +761,11 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       // before multiplying previously collapsed whole hot files into identical
       // P×I×D ties (seventeen ORS-100 rows from one service). Integers remain
       // display-only in the decomposition string.
-      const pExact = pScores[idx];
-      const iExact = iScores[idx];
+      const pExact = pById.get(s.external_id)!;
+      const iExact = iById.get(s.external_id)!;
       const p = Math.round(pExact);
       const i = Math.round(iExact);
-      const d = rawScores[idx].d;
+      const d = raw.d;
       const detectionTier = detectionFor(s.external_id);
       let score = Math.round(pExact * iExact * d * 10) / 10;
       const disconnected = incoming_refs === 0 && fan_out === 0;
@@ -709,14 +784,14 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       if (detectionTier === "candidate") reasons.push("lexical candidate test match only — unconfirmed");
       // Reason chips for the two consequence signals — a reader can disagree with the
       // weight without doubting the fact, and the fact is what's shown.
-      if (rawScores[idx].reachesDestructiveSink) reasons.push("reaches a destructive external call (delete/purge) within 2 hops — impact floored at 5");
-      if (rawScores[idx].scheduledEntry) reasons.push("scheduled/queue-triggered entry with no proof — failures surface nowhere, detection ×1.25");
+      if (raw.reachesDestructiveSink) reasons.push("reaches a destructive external call (delete/purge) within 2 hops — impact floored at 5");
+      if (raw.scheduledEntry) reasons.push("scheduled/queue-triggered entry with no proof — failures surface nowhere, detection ×1.25");
       const override = overrideFor(s.external_id);
       if (override && override.action !== "suppress") reasons.push(`config override (${override.action}): ${override.reason}`);
       return {
         ...(override && override.action !== "suppress" ? { override: { action: override.action, reason: override.reason } } : {}),
         ...(sinkReached.get(s.external_id) ? { sink_callee: sinkReached.get(s.external_id) } : {}),
-        ...(rawScores[idx].scheduledEntry ? { scheduled_entry: true } : {}),
+        ...(raw.scheduledEntry ? { scheduled_entry: true } : {}),
         detection_tier: detectionTier,
         id: s.external_id,
         title: s.title || s.external_id,

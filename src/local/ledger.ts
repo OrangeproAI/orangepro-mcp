@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { GraphEdge, LocalGraph } from "./graph/ontology.js";
+import type { ArtifactIdentity, GraphEdge, LocalGraph } from "./graph/ontology.js";
 import { workspacePaths } from "./workspace.js";
 import { hashString } from "./util/hash.js";
 
@@ -18,6 +18,9 @@ export interface DynamicProofCertificate {
   runner?: string;
   test_path?: string;
   mutant_status?: string;
+  /** Proof implementation identity; metadata only, never a substitute for a killed mutation. */
+  oracle_version?: string;
+  run_fingerprint?: string;
 }
 
 export interface LedgerRecordInput {
@@ -35,6 +38,8 @@ export interface LedgerRecordInput {
   prompt_version?: string;
   language?: string;
   dynamic_proof?: DynamicProofCertificate;
+  /** Identity of the graph/ranking/proof inputs used for this attempt. */
+  artifact_identity?: ArtifactIdentity;
   /**
    * Composite code-identity fingerprint of the proven target at prove time
    * (see `targetFingerprint`). RTM only re-surfaces a dynamic proof as Proven

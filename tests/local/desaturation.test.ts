@@ -275,18 +275,26 @@ import { buildProofDoctor } from "../../src/local/proofDoctor.js";
 describe("proof doctor — legacy sidecar backfills mutant_status from the ledger", () => {
   it("diagnoses non-assertion failure even when the sidecar predates the field", () => {
     const generatedAt = "2026-07-18T01:00:00Z";
+    const identity = {
+      schema_version: "orangepro.artifact_identity.v1", repository_snapshot: "sha256:repo",
+      analysis_fingerprint: "sha256:analysis", ranking_fingerprint: "sha256:ranking", run_fingerprint: "sha256:run",
+      analyzer_version: "orangepro.analyzer.v1", graph_schema_version: "orangepro.local_graph.v2",
+      ors_version: "orangepro.ors.population_normalized.v1", oracle_version: "orangepro.targeted_mutation_oracle.v1",
+      risk_config_hash: "config", tool_version: "test", git_commit: null, git_dirty: null
+    };
     const graph = {
       schema_version: "orangepro.local_graph.v1",
       workspace: { name: "r", root: "", root_hash: "", source_upload_policy: "metadata_only" as const },
       created_at: generatedAt, updated_at: generatedAt, sources: [],
       nodes: [], edges: [], candidate_edges: [], generation_runs: [], generated_tests: [],
-      manifest: { generated_at: generatedAt, git: null, files: {} }
+      manifest: { generated_at: generatedAt, git: null, files: {} }, artifact_identity: identity
     } as never;
     const rtm = { summary: { proven: 3, total: 82 }, rows: [] } as never;
     // Legacy sidecar: classification only — no mutant_status (pre-fix writer).
     const attempts = {
       schema_version: "orangepro.proof_attempts.v1", generated_at: generatedAt,
       graph_generated_at: generatedAt, git_commit: null, git_dirty: null,
+      artifact_identity: identity,
       attempted: 5, proven: 3,
       attempts: [{ target_symbol: "sym:src/x.ts#X.run", test_path: "src/x.test.ts", classification: "non_killing" as const, language: "typescript" }],
       skipped: []
@@ -420,21 +428,31 @@ describe("buildSystemMapModel", () => {
 import { computeReportDelta, reportBaselineOf } from "../../src/local/viz/behaviorReportData.js";
 
 describe("computeReportDelta", () => {
+  const identity = {
+    schema_version: "orangepro.artifact_identity.v1" as const, repository_snapshot: "sha256:repo",
+    analysis_fingerprint: "sha256:analysis", ranking_fingerprint: "sha256:ranking", run_fingerprint: "sha256:run",
+    analyzer_version: "orangepro.analyzer.v1", graph_schema_version: "orangepro.local_graph.v2",
+    ors_version: "orangepro.ors.population_normalized.v1", oracle_version: "orangepro.targeted_mutation_oracle.v1",
+    risk_config_hash: "config", tool_version: "test", git_commit: null, git_dirty: null
+  };
   const base = {
     ts: "2026-07-17T00:00:00Z",
     summary: { total: 100, proven: 1, associated: 10, candidate: 80, none: 9, reachableUntested: 2, noSignal: 7 },
     riskPaths: ["A.x", "B.y", "C.z"],
-    generatedTotal: 5
+    generatedTotal: 5,
+    identity
   };
   const cur = (over: Record<string, unknown>) => ({
     summary: { total: 100, proven: 1, associated: 10, candidate: 80, none: 9, reachableUntested: 2, noSignal: 7 },
     risks: [{ path: "A.x" }, { path: "B.y" }, { path: "C.z" }],
     generatedTotal: 5,
+    provenance: { identity },
     ...over
   }) as never;
 
   it("identical run → changed:false, all deltas zero", () => {
     const d = computeReportDelta(base, cur({}));
+    expect(d.comparisonState).toBe("comparable");
     expect(d.changed).toBe(false);
     expect(d.totalDelta).toBe(0);
     expect(d.newRisks).toEqual([]);
@@ -455,5 +473,13 @@ describe("computeReportDelta", () => {
   it("baseline round-trips through reportBaselineOf", () => {
     const snap = reportBaselineOf(cur({}) as never, "2026-07-18T00:00:00Z");
     expect(computeReportDelta(snap, cur({}) as never).changed).toBe(false);
+  });
+
+  it("withholds deltas for repository, analysis and ranking incompatibility", () => {
+    const current = cur({});
+    expect(computeReportDelta({ ...base, identity: { ...identity, repository_snapshot: "sha256:other" } }, current).comparisonState).toBe("repository_changed");
+    expect(computeReportDelta({ ...base, identity: { ...identity, analysis_fingerprint: "sha256:other" } }, current).comparisonState).toBe("analysis_changed");
+    expect(computeReportDelta({ ...base, identity: { ...identity, ranking_fingerprint: "sha256:other" } }, current).comparisonState).toBe("ranking_changed");
+    expect(computeReportDelta({ ...base, identity: undefined }, current).comparisonState).toBe("provenance_incomplete");
   });
 });

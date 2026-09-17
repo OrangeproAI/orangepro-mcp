@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
-import { configDisclosureFor, inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
+import { configDisclosureFor, inspectRiskInputHealth, ORS_VERSION, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
+import { builtInRankExclusion } from "../../src/local/score/rankEligibility.js";
 
 const dirs: string[] = [];
 
@@ -103,6 +104,29 @@ function aiCandidate(from: string, to: string, relationship_type: "MAY_BE_TESTED
 }
 
 describe("rankRiskGaps", () => {
+  it("keeps an unchanged behavior stable when a peer becomes Associated", () => {
+    const g = graph();
+    const a = symbol("sym:src/api/a.ts#runA", "runA", "src/api/a.ts");
+    const b = symbol("sym:src/api/b.ts#runB", "runB", "src/api/b.ts");
+    const caller = symbol("sym:src/core/caller.ts#callA", "callA", "src/core/caller.ts");
+    const test = testCase("test:b.test.ts");
+    g.nodes = [a, b, caller, test];
+    g.edges = [edge(caller.external_id, a.external_id, "CALLS")];
+
+    const beforeA = rankRiskGaps(g, { limit: 10, repoRoot: "" }).find((row) => row.id === a.external_id);
+    expect(beforeA).toBeDefined();
+
+    g.edges.push(edge(b.external_id, test.external_id, "TESTED_BY"));
+    const after = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const afterA = after.find((row) => row.id === a.external_id);
+
+    expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v2");
+    expect(afterA?.risk_score).toBe(beforeA?.risk_score);
+    expect(afterA?.probability).toBe(beforeA?.probability);
+    expect(afterA?.impact).toBe(beforeA?.impact);
+    expect(after.map((row) => row.id)).not.toContain(b.external_id);
+  });
+
   it("ranks only unconfirmed denominator symbols and treats risk as prioritization", () => {
     const g = graph();
     g.nodes = [
@@ -437,6 +461,29 @@ describe("rankRiskGaps — irreversibility floor, scheduled silence, ranking hyg
     expect(ids).not.toContain(helper.external_id);
     expect(ids).not.toContain(decl.external_id);
     expect(ids).not.toContain(getter.external_id);
+  });
+
+  it("HYGIENE: e2e test-support helpers stay denominator-eligible but never take a production risk slot", () => {
+    const g = graph();
+    const helper = symbol(
+      "sym:packages/twenty-e2e-testing/lib/requests/delete-workflow.ts#deleteWorkflow",
+      "deleteWorkflow",
+      "packages/twenty-e2e-testing/lib/requests/delete-workflow.ts"
+    );
+    const product = symbol(
+      "sym:packages/server/src/testing-platform/run.ts#runTestingPlatform",
+      "runTestingPlatform",
+      "packages/server/src/testing-platform/run.ts"
+    );
+    g.nodes = [helper, product];
+
+    expect(helper.denominator_eligible).toBe(true);
+    expect(builtInRankExclusion("packages/twenty-e2e-testing/lib/requests/delete-workflow.ts")?.code).toBe("test_support_helper");
+    expect(builtInRankExclusion("packages/server/src/testing-platform/run.ts")).toBeUndefined();
+
+    const ids = rankRiskGaps(g, { limit: 10, repoRoot: "" }).map((row) => row.id);
+    expect(ids).not.toContain(helper.external_id);
+    expect(ids).toContain(product.external_id);
   });
 });
 

@@ -54,7 +54,7 @@ export function behaviorEntries(nodes: GraphNode[], edges: GraphEdge[]): FlowEnt
         n.denominator_eligible === true &&
         n.stale !== true &&
         !endpointStarts.has(n.external_id) &&
-        !incomingEligibleCalls.has(n.external_id)
+        (n.properties.cli_entrypoint === true || !incomingEligibleCalls.has(n.external_id))
     )
     .map((n) => ({
       external_id: n.external_id,

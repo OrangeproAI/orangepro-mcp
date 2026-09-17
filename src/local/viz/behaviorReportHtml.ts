@@ -54,6 +54,7 @@ a{color:var(--blue);text-decoration:none}
 .kpi[data-t="nosig"]{--kw:var(--rbg)} .kpi[data-t="nosig"] .kpi-num{color:var(--red)}
 .kpi[data-t="priority"]{--kw:var(--obg)} .kpi[data-t="priority"] .kpi-num{color:var(--orange)}
 .metric-scope{margin:9px 2px 0;color:var(--muted);font-size:11.5px;line-height:1.5}
+.scope-note{margin:9px 0 0;padding:9px 11px;border:1px solid var(--abd);background:var(--abg);color:var(--ink2);font-size:11.5px;line-height:1.5;border-radius:6px}
 
 /* TABS */
 nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
@@ -347,6 +348,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
   </div>
 </header>
 <div class="provenance" id="provenance"></div>
+<div class="scope-note" id="cli-exclusions" hidden></div>
 
 <section class="kpis" id="kpis"></section>
 <p class="metric-scope" id="metric-scope"></p>
@@ -469,9 +471,13 @@ const D=window.DATA,$=(s)=>document.querySelector(s);
   var el2=document.getElementById("delta-banner");
   var d=D.delta;
   if(!el2||d===undefined)return;
-  if(d===null){el2.innerHTML='';return;} // first run — baseline just recorded, nothing to compare
+  if(d.comparisonState==='first_run'){el2.innerHTML='';return;}
   var when=new Date(d.baselineTs);
   var ago=isNaN(when.getTime())?"last run":when.toLocaleString();
+  if(d.comparisonState!=='comparable'){
+    el2.innerHTML='<div class="delta-wrap"><span class="delta-chip dc-none">Comparison withheld: '+d.comparisonReason+'</span></div>';
+    return;
+  }
   if(!d.changed){
     el2.innerHTML='<div class="delta-wrap"><span class="delta-chip dc-none">No report changes since last run ('+ago+') for the recorded inputs</span></div>';
     return;
@@ -519,7 +525,12 @@ function scrollToRisk(path){
 (function(){
   var hero=document.getElementById("delta-hero");
   var d=D.delta;
-  if(!hero||d===undefined||d===null)return;
+  if(!hero||d===undefined||d.comparisonState==='first_run')return;
+  if(d.comparisonState!=='comparable'){
+    hero.className="delta-hero simple-only dh-clear";
+    hero.innerHTML='<h3>Comparison withheld</h3><p>'+d.comparisonReason+'</p>';
+    return;
+  }
   if(!d.changed){
     var when=new Date(d.baselineTs);
     var ago=isNaN(when.getTime())?"last run":when.toLocaleDateString();
@@ -681,6 +692,12 @@ const prov=$("#provenance");
 const provisional=P.churn!=="available";
 prov.classList.toggle("warn",provisional);
 prov.textContent=(provisional?"PROVISIONAL RANKING · ":"VERIFIED INPUTS · ")+"source "+P.source+" · commit "+(P.commit?P.commit.slice(0,12):"unavailable")+" · history "+P.history+" · churn "+P.churn+" ("+P.churnWindow+") · OrangePro "+P.toolVersion+" · input "+P.inputFingerprint+(P.reason?" · "+P.reason:"");
+const excludedCli=D.scan.excludedCliCommands||[];
+if(excludedCli.length){
+  const note=$("#cli-exclusions");
+  note.hidden=false;
+  note.textContent="CLI command entries excluded from the behavior count: "+excludedCli.map(x=>x.path+" ("+x.reason+")").join(" · ");
+}
 $("#fw-pill").textContent=D.framework;
 
 // bridge text in codebase tab

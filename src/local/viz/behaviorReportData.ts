@@ -1,14 +1,13 @@
 import { loadRiskConfig } from "../score/riskConfig.js";
 import { configDisclosureFor } from "../score/risk.js";
-import { createHash } from "node:crypto";
 import path from "node:path";
-import type { BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
+import type { ArtifactIdentity, BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
 import type { Ledger } from "../ledger.js";
 import { buildRtm, type RtmRow } from "../rtm.js";
-import { inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, rankRiskGaps, type RiskGap } from "../score/risk.js";
-import { ORANGEPRO_VERSION } from "../version.js";
+import { inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint, type RiskGap } from "../score/risk.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "../generate/draftGuidance.js";
+import { buildArtifactIdentity, comparisonCompatibility, type ComparisonCompatibilityState } from "../provenance.js";
 
 export interface BehaviorReportData {
   repo: string;
@@ -25,6 +24,8 @@ export interface BehaviorReportData {
     toolVersion: string;
     /** sha256 prefix of the per-repo risk config; part of the determinism claim. */
     configHash?: string;
+    /** Explicit versioned identities. `inputFingerprint` remains a legacy display alias. */
+    identity: ArtifactIdentity;
     inputFingerprint: string;
     reason?: string;
   };
@@ -67,6 +68,7 @@ export interface BehaviorReportData {
       unionPct: number;
     };
     excluded: { count: string; text: string };
+    excludedCliCommands: Array<{ path: string; file: string; reason: string }>;
   };
   behaviorGroups: Array<{ key: string; count: number }>;
   behaviors: Array<{ sig: string; group: string; file: string; tier: "proven" | "assoc" | "candidate" | "none"; reachable: boolean; desc: string }>;
@@ -112,8 +114,8 @@ export interface BehaviorReportData {
   /** Total generated tests recorded in the graph (honest count; 0 hides the CTA band). */
   /** Cap disclosure: what the view shows vs what was computed. Display-only. */
   mapModel: SystemMapModel;
-  /** Delta vs the previous run's snapshot (null on first run / unreadable baseline). Display-only. */
-  delta?: ReportDelta | null;
+  /** Compatibility-gated delta vs the previous run's snapshot. Display-only. */
+  delta?: ReportDelta;
   viewMeta: {
     risks: { shown: number; scored: number };
     flows: { shown: number; prunedByCaps: number };
@@ -134,6 +136,8 @@ export interface BehaviorReportFlow {
   trigger: { verb: string; path: string } | null;
   /** Root symbol is a true entry point per the graph (route/main/CLI). */
   root_entry?: boolean;
+  /** Framework-derived entry lane. Metadata only; never creates a flow. */
+  entry_lane?: "cli";
   risk: "critical" | "high" | "medium" | null;
   proof: "proven" | "none";
   services: number;
@@ -414,6 +418,17 @@ function proofGuidance(
   };
 }
 
+export function excludedCliCommands(graph: LocalGraph): BehaviorReportData["scan"]["excludedCliCommands"] {
+  return graph.nodes
+    .filter((node) => node.kind === "CodeSymbol" && node.properties.cli_entrypoint === true && node.denominator_eligible !== true)
+    .map((node) => ({
+      path: node.title ?? node.external_id,
+      file: String(node.properties.file ?? ""),
+      reason: node.denominator_reason ?? "Excluded from the behavior denominator."
+    }))
+    .sort((a, b) => a.file.localeCompare(b.file) || a.path.localeCompare(b.path));
+}
+
 function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"] {
   const services = new Map<string, number>();
   for (const row of rows) {
@@ -454,7 +469,8 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
     excluded: {
       count: excludedCount > 0 ? String(excludedCount) : "0",
       text: "non-behavior symbols were excluded from the behavior count — generated code, framework internals, test-inferred flows, and infrastructure plumbing."
-    }
+    },
+    excludedCliCommands: excludedCliCommands(graph)
   };
 }
 
@@ -540,6 +556,7 @@ function flows(graph: LocalGraph, rows: RtmRow[], risks: RiskGap[]): BehaviorRep
       title: flow.entry_point.title || flow.entry_point.external_id,
       trigger,
       root_entry,
+      ...(rootNode?.properties.entry_lane === "cli" ? { entry_lane: "cli" as const } : {}),
       risk: risk ? riskBucket(risk.risk_score, maxRiskScore) : null,
       proof,
       services,
@@ -707,10 +724,14 @@ export interface ReportBaseline {
   generatedTotal: number;
   /** Risk config hash — part of the determinism claim (same commit + version + config). */
   configHash?: string;
+  /** Absent on legacy baselines; those fail closed as provenance_incomplete. */
+  identity?: ArtifactIdentity;
 }
 
 export interface ReportDelta {
-  baselineTs: string;
+  baselineTs: string | null;
+  comparisonState: ComparisonCompatibilityState;
+  comparisonReason: string;
   changed: boolean;
   totalDelta: number;
   provenDelta: number;
@@ -727,6 +748,24 @@ export interface ReportDelta {
 /** Pure delta between a persisted baseline and the current report data.
  *  Deterministic: same inputs, same delta. */
 export function computeReportDelta(prev: ReportBaseline, cur: BehaviorReportData): ReportDelta {
+  const comparisonState = comparisonCompatibility(prev.identity, cur.provenance.identity);
+  if (comparisonState !== "comparable") {
+    return {
+      baselineTs: prev.ts,
+      comparisonState,
+      comparisonReason: comparisonReason(comparisonState),
+      changed: false,
+      totalDelta: 0,
+      provenDelta: 0,
+      associatedDelta: 0,
+      candidateDelta: 0,
+      noneDelta: 0,
+      newRisks: [],
+      droppedRisks: [],
+      generatedDelta: 0,
+      configChanged: comparisonState === "ranking_changed"
+    };
+  }
   const curPaths = cur.risks.map((r) => r.path);
   const prevSet = new Set(prev.riskPaths);
   const curSet = new Set(curPaths);
@@ -734,6 +773,8 @@ export function computeReportDelta(prev: ReportBaseline, cur: BehaviorReportData
   const droppedRisks = prev.riskPaths.filter((p) => !curSet.has(p));
   const d: ReportDelta = {
     baselineTs: prev.ts,
+    comparisonState,
+    comparisonReason: comparisonReason(comparisonState),
     changed: false,
     totalDelta: cur.summary.total - prev.summary.total,
     provenDelta: cur.summary.proven - prev.summary.proven,
@@ -752,7 +793,36 @@ export function computeReportDelta(prev: ReportBaseline, cur: BehaviorReportData
 }
 
 export function reportBaselineOf(cur: BehaviorReportData, ts: string): ReportBaseline {
-  return { ts, summary: cur.summary, riskPaths: cur.risks.map((r) => r.path), generatedTotal: cur.generatedTotal, configHash: cur.provenance?.configHash };
+  return { ts, summary: cur.summary, riskPaths: cur.risks.map((r) => r.path), generatedTotal: cur.generatedTotal, configHash: cur.provenance?.configHash, identity: cur.provenance.identity };
+}
+
+export function firstRunDelta(): ReportDelta {
+  return {
+    baselineTs: null,
+    comparisonState: "first_run",
+    comparisonReason: comparisonReason("first_run"),
+    changed: false,
+    totalDelta: 0,
+    provenDelta: 0,
+    associatedDelta: 0,
+    candidateDelta: 0,
+    noneDelta: 0,
+    newRisks: [],
+    droppedRisks: [],
+    generatedDelta: 0
+  };
+}
+
+function comparisonReason(state: ComparisonCompatibilityState): string {
+  switch (state) {
+    case "first_run": return "No prior identity-bearing baseline exists.";
+    case "comparable": return "Repository, analysis, ranking and proof-oracle identities match.";
+    case "repository_changed": return "The scanned repository paths or bytes changed; trend deltas are withheld.";
+    case "analysis_changed": return "Analyzer, schema, scope or history inputs changed; treat this as structural recalibration.";
+    case "ranking_changed": return "Risk configuration or ORS version changed; treat this as ranking recalibration.";
+    case "experiment_changed": return "A proof-oracle or declared experiment input changed; only controlled-experiment interpretation is valid.";
+    case "provenance_incomplete": return "The previous artifact lacks the required versioned identity; automated comparison is disabled.";
+  }
 }
 
 /** Deterministic system-map model: trigger lanes → deepest services reached,
@@ -820,6 +890,7 @@ export function buildSystemMapModel(data: {
   // near-ubiquitous owners eligible only when a flow touches nothing else.
   const laneForFlow = (flow: (typeof data.flows)[number]): TriggerLane | null => {
     if (flow.trigger) return laneForTrigger(flow.trigger);
+    if (flow.entry_lane === "cli") return { id: "cli", label: "CLI", priority: 60 };
     // A program root without a framework trigger is still a real product entry
     // point (CLI/main). Internal call-graph roots remain excluded.
     return flow.root_entry ? { id: "entry", label: "Entry points", priority: 80 } : null;
@@ -1175,10 +1246,30 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, probability: r.probability ?? 0 }));
   // Fix: search the FULL ranking for sinks, not the top 200 — a stable destructive path
   // ranked 300th is exactly what this panel exists to recover.
-  const irreversible = rankRiskGaps(graph, { repoRoot, limit: Number.MAX_SAFE_INTEGER, provenIds }).filter((r) => r.sink_callee).slice(0, 20)
+  // Consequence view: a static test association is not dynamic proof. Keep
+  // Associated sink paths visible here while the main priority-gap list retains
+  // its existing behavior and excludes hard-linked rows.
+  const irreversible = rankRiskGaps(graph, {
+    repoRoot,
+    limit: Number.MAX_SAFE_INTEGER,
+    provenIds,
+    includeAssociated: true
+  }).filter((r) => r.sink_callee).slice(0, 20)
     .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, sink: r.sink_callee ?? "" }));
   const riskHealth = inspectRiskInputHealth(repoRoot);
   const churnAvailable = riskHealth.churnAvailable && riskGaps.every((risk) => risk.churn_available !== false);
+  const configHash = loadRiskConfig(repoRoot).hash;
+  const codeFiles = Object.entries(graph.manifest.files).filter(([, file]) => file.kind === "code").map(([file]) => file);
+  const identity = buildArtifactIdentity(graph, {
+    configHash,
+    history: {
+      state: riskHealth.history,
+      churnWindow: riskHealth.churnWindow,
+      churnAvailable,
+      commitDate: riskHealth.commitDate,
+      inputFingerprint: riskHistoryFingerprint(repoRoot, codeFiles, riskHealth.churnWindow)
+    }
+  });
   const provenance: BehaviorReportData["provenance"] = {
     source: path.basename(repoRoot || graph.workspace.name || "repo"),
     gitRoot: riskHealth.gitRoot ? path.basename(riskHealth.gitRoot) : null,
@@ -1186,12 +1277,10 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     history: riskHealth.history,
     churn: churnAvailable ? "available" : "unavailable",
     churnWindow: riskHealth.churnWindow,
-    toolVersion: ORANGEPRO_VERSION,
-    configHash: loadRiskConfig(repoRoot).hash,
-    inputFingerprint: createHash("sha256")
-      .update(JSON.stringify({ root: graph.workspace.root_hash, commit: riskHealth.commit, history: riskHealth.history, churn: churnAvailable, window: riskHealth.churnWindow, version: ORANGEPRO_VERSION, config: loadRiskConfig(repoRoot).hash }))
-      .digest("hex")
-      .slice(0, 16),
+    toolVersion: identity.tool_version,
+    configHash,
+    identity,
+    inputFingerprint: identity.run_fingerprint.replace(/^sha256:/, "").slice(0, 16),
     reason: churnAvailable ? undefined : (riskHealth.reason ?? "Git churn scan did not complete")
   };
   const lists = behaviorLists(rows, flowIds);
@@ -1218,6 +1307,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     configDisclosure: configDisclosureFor(graph, repoRoot),
     zeroProofExplainer: summary.proven === 0 ? { title: ZERO_PROOF_EXPLAINER.title, body: [...ZERO_PROOF_EXPLAINER.body] } : null,
     mapModel: buildSystemMapModel({ flows: flowRows, risks, behaviors: sortedBehaviors }),
+    delta: firstRunDelta(),
     viewMeta: {
       // Every denominator behavior is scored; the risks tab surfaces the top N.
       risks: { shown: risks.length, scored: summary.total },

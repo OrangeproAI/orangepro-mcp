@@ -357,6 +357,8 @@ export interface AnalysisMeta {
   files_cap_hit?: boolean;
   /** The file-count cap that applied to the scan. */
   max_files?: number;
+  /** The total-symbol cap that applied to the scan. Identity metadata only; does not change extraction. */
+  max_symbols?: number;
   /**
    * Set when a wall-clock budget (ORANGEPRO_MAX_ANALYZE_MS) stopped the per-file scan
    * before all files were processed. Its presence means the analysis is PARTIAL — the
@@ -559,6 +561,8 @@ export interface StructuralClustersMeta {
 export interface ConfirmedCoverageMeta {
   /** Distinct (test, behavior) pairs the confirmer proved → hard edges. */
   confirmed_pairs: number;
+  /** Real, non-mocked runtime invocations with no assertion-backed confirmation. */
+  associated_pairs?: number;
   /** (test, behavior) pairs evaluated by the confirmer. */
   attempted: number;
   /** Confirmed-by-rule but the impl symbol was capped out of the graph → downgraded to INFERRED (never COVERS-to-file). */
@@ -707,6 +711,24 @@ export interface WorkspaceMeta {
   source_upload_policy: SourceUploadPolicy;
 }
 
+/** Versioned identities for comparing persisted analysis/ranking/proof artifacts. */
+export interface ArtifactIdentity {
+  schema_version: "orangepro.artifact_identity.v1";
+  repository_snapshot: string;
+  analysis_fingerprint: string;
+  ranking_fingerprint: string;
+  run_fingerprint: string;
+  analyzer_version: string;
+  graph_schema_version: string;
+  ors_version: string;
+  oracle_version: string;
+  risk_config_hash: string;
+  tool_version: string;
+  /** Diagnostic metadata only. Neither field participates in any fingerprint. */
+  git_commit: string | null;
+  git_dirty: boolean | null;
+}
+
 /** The full local graph persisted to `.orangepro/graph.json`. */
 export interface LocalGraph {
   schema_version: typeof LOCAL_GRAPH_SCHEMA_VERSION;
@@ -720,6 +742,8 @@ export interface LocalGraph {
   generation_runs: GenerationRun[];
   generated_tests: GeneratedTest[];
   manifest: Manifest;
+  /** Optional for backward reading; new analyses always persist it. */
+  artifact_identity?: ArtifactIdentity;
   /** Optional for backward compatibility with graphs written before analysis meta. */
   analysis?: AnalysisMeta;
 }

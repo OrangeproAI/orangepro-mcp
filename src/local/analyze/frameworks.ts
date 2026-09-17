@@ -48,6 +48,9 @@ const RUNTIME_HINTS: Record<string, string> = {
   "django": "Django",
   "flask": "Flask",
   "spring-boot": "Spring Boot",
+  "@oclif/core": "oclif",
+  "@salesforce/sf-plugins-core": "Salesforce CLI",
+  "commander": "Commander",
 };
 
 

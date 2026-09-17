@@ -20,6 +20,21 @@ import type { LocalGraph } from "../../src/local/graph/ontology.js";
 import type { RtmResult } from "../../src/local/rtm.js";
 
 const dirs: string[] = [];
+const IDENTITY = {
+  schema_version: "orangepro.artifact_identity.v1" as const,
+  repository_snapshot: "sha256:repo",
+  analysis_fingerprint: "sha256:analysis",
+  ranking_fingerprint: "sha256:ranking",
+  run_fingerprint: "sha256:run",
+  analyzer_version: "orangepro.analyzer.v1",
+  graph_schema_version: "orangepro.local_graph.v2",
+  ors_version: "orangepro.ors.stable_population.v2",
+  oracle_version: "orangepro.targeted_mutation_oracle.v1",
+  risk_config_hash: "config",
+  tool_version: "0.0.0-test",
+  git_commit: "abc123",
+  git_dirty: false
+};
 function temp(): string {
   const dir = mkdtempSync(join(tmpdir(), "oplocal-proofdoc-"));
   dirs.push(dir);
@@ -37,7 +52,8 @@ function fakeGraph(overrides: { commit?: string | null; generatedAt?: string; ro
       git: overrides.commit === null ? null : { commit: overrides.commit ?? "abc123", dirty: false },
       files: {}
     },
-    workspace: { name: "t", root: overrides.root ?? "/nonexistent-root", root_hash: "h", source_upload_policy: "metadata_only" }
+    workspace: { name: "t", root: overrides.root ?? "/nonexistent-root", root_hash: "h", source_upload_policy: "metadata_only" },
+    artifact_identity: { ...IDENTITY }
   } as unknown as LocalGraph;
 }
 
@@ -55,6 +71,7 @@ function attemptsFile(graph: LocalGraph, attempts: ProofAttemptsFile["attempts"]
     graph_generated_at: (graph as { manifest: { generated_at: string } }).manifest.generated_at,
     git_commit: "abc123",
     git_dirty: false,
+    artifact_identity: graph.artifact_identity,
     attempted: attempts.length,
     proven: 0,
     attempts,
@@ -180,7 +197,7 @@ describe("buildProofDoctor", () => {
   });
 
   it("fails closed on stale attempt data: reasons are not presented as current", () => {
-    const graph = fakeGraph({ commit: "NEWCOMMIT" });
+    const graph = fakeGraph();
     const attempts = attemptsFile(fakeGraph(), [
       {
         target_symbol: "sym:src/a.ts#a",
@@ -190,6 +207,7 @@ describe("buildProofDoctor", () => {
         language: "typescript"
       }
     ]);
+    attempts.artifact_identity = { ...attempts.artifact_identity!, run_fingerprint: "sha256:stale-run" };
     const res = buildProofDoctor(graph, fakeRtm(), attempts);
     expect(res.stale).toBe(true);
     expect(res.status).toBe("stale");
@@ -260,6 +278,7 @@ describe("opProofDoctor — read-only over a real workspace", () => {
       graph_generated_at: manifest.generated_at,
       git_commit: manifest.git?.commit ?? null,
       git_dirty: manifest.git === null ? null : Boolean((manifest.git as { dirty?: boolean }).dirty),
+      artifact_identity: graph.artifact_identity,
       attempted: 2,
       proven: 0,
       attempts: [
@@ -322,6 +341,7 @@ describe("opProofDoctor — read-only over a real workspace", () => {
       graph_generated_at: manifest.generated_at,
       git_commit: manifest.git?.commit ?? null,
       git_dirty: false,
+      artifact_identity: graph.artifact_identity,
       attempted: 3,
       proven: 0,
       attempts: [
@@ -335,8 +355,11 @@ describe("opProofDoctor — read-only over a real workspace", () => {
     const htmlFresh = readFileSync(outFresh, "utf8");
     expect(htmlFresh).toContain("attempted");
 
-    // Stale sidecar (wrong commit anchor) must be ignored — fail closed.
-    writeProofAttempts(root, { ...fresh, git_commit: "someothersha" });
+    // Stale sidecar (wrong material-input run identity) must be ignored — fail closed.
+    writeProofAttempts(root, {
+      ...fresh,
+      artifact_identity: { ...fresh.artifact_identity!, run_fingerprint: "sha256:other-run" }
+    });
     const outStale = join(root, "report-stale.html");
     opBehaviorCoverageHtml(root, outStale);
     const htmlStale = readFileSync(outStale, "utf8");

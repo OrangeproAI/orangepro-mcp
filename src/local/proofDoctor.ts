@@ -23,7 +23,7 @@ import { workspacePaths } from "./workspace.js";
 import { redactSecrets } from "./util/redact.js";
 import { targetLanguage } from "./ledger.js";
 import { readEnginesNode, satisfiesNodeRange, type BaselineCategory } from "./proofRunnability.js";
-import type { LocalGraph } from "./graph/ontology.js";
+import type { ArtifactIdentity, LocalGraph } from "./graph/ontology.js";
 import type { RtmResult } from "./rtm.js";
 
 export const PROOF_ATTEMPTS_SCHEMA_VERSION = "orangepro.proof_attempts.v1";
@@ -55,6 +55,8 @@ export interface ProofAttemptsFile {
   graph_generated_at: string | null;
   git_commit: string | null;
   git_dirty: boolean | null;
+  /** Versioned material-input identity. Absent legacy sidecars fail closed. */
+  artifact_identity?: ArtifactIdentity;
   attempted: number;
   proven: number;
   attempts: ProofAttemptRecord[];
@@ -209,6 +211,7 @@ export function distillProofAttempts(
     graph_generated_at: manifest?.generated_at ?? null,
     git_commit: manifest?.git?.commit ?? null,
     git_dirty: manifest?.git?.dirty ?? null,
+    artifact_identity: meta.graph.artifact_identity,
     attempted: auto.attempted,
     proven: auto.proven,
     attempts: auto.attempts.map((a) => ({
@@ -235,12 +238,12 @@ export function writeProofAttempts(root: string, file: ProofAttemptsFile): strin
   return path;
 }
 
-/** True when the sidecar anchors to the CURRENT graph generation + commit. */
+/** True when the sidecar anchors to the CURRENT material run inputs. */
 export function proofAttemptsFresh(attempts: ProofAttemptsFile, graph: LocalGraph): boolean {
-  const manifest = graph.manifest;
-  return (
-    attempts.graph_generated_at === (manifest?.generated_at ?? null) &&
-    attempts.git_commit === (manifest?.git?.commit ?? null)
+  return Boolean(
+    attempts.artifact_identity?.run_fingerprint &&
+    graph.artifact_identity?.run_fingerprint &&
+    attempts.artifact_identity.run_fingerprint === graph.artifact_identity.run_fingerprint
   );
 }
 

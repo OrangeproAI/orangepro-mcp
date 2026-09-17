@@ -422,7 +422,7 @@ function initViz() {
       function dotTip(e){
         var label = (dt.tier === 'proven') ? 'Proven — dynamic targeted proof'
                   : (dt.tier === 'runtime') ? 'Runtime-covered — executed by a coverage report, not proof'
-                  : (dt.tier === 'associated') ? 'Associated — name/path/import/structural matching only, not proof'
+                  : (dt.tier === 'associated') ? 'Associated — resolved static test-to-behavior invocation; not execution or mutation proof'
                   : 'No link — no static or runtime signal';
         showTip('<div class="tt">' + esc(dt.area) + ' &middot; symbol</div>' +
           '<div class="trow"><span>tier</span><span class="v" style="color:' + col + '">' + TIER[dt.tier].label + '</span></div>' +
@@ -1030,12 +1030,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
               <h3>Tiers</h3>
               <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="var(--proven)"/></svg><div><div class="lt">Dynamic Proven</div><div class="ld">disc · dynamic targeted proof</div></div></div>
               <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="var(--runtime)"/></svg><div><div class="lt">Runtime-covered</div><div class="ld">disc · executed by coverage, not proof</div></div></div>
-              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--assoc)" stroke-width="2.4"/></svg><div><div class="lt">Associated</div><div class="ld">ring · weak signal, not proof</div></div></div>
+              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--assoc)" stroke-width="2.4"/></svg><div><div class="lt">Associated</div><div class="ld">ring · invocation-backed static signal, not proof</div></div></div>
               <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4" fill="none" stroke="var(--none)" stroke-width="2.2"/><circle cx="8" cy="8" r="7" fill="none" stroke="var(--none)" stroke-width="1" opacity=".55"/></svg><div><div class="lt">No link</div><div class="ld">glowing ring · no test signal</div></div></div>
             </div>
             <div><h3>Code areas</h3><div class="areafilters" id="areafilters"></div></div>
             <div class="explain">
-              <b>Tier definitions.</b> Proven = dynamic targeted mutation proof recorded in the local ledger, not static matching or LLM. Runtime-covered = executed by a repo coverage report. Associated signal = name/path/import/structural matching only, not semantic proof. No link = no direct static or runtime signal found. Broad e2e or integration coverage may still exist.
+              <b>Tier definitions.</b> Proven = dynamic targeted mutation proof recorded in the local ledger, not static matching or LLM. Runtime-covered = executed by a repo coverage report. Associated signal = a resolved static test-to-behavior invocation. It is not execution evidence and does not prove the test detects failure. No link = no direct static or runtime signal found. Broad e2e or integration coverage may still exist.
             </div>
           </div>
           <div class="stage" id="stage">

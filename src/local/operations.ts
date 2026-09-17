@@ -56,7 +56,7 @@ import { enrichFromContent } from "./enrich/index.js";
 import { scoreGraph } from "./score/score.js";
 import { doctorGraph } from "./score/doctor.js";
 import { findGaps } from "./gaps/gaps.js";
-import { rankPriorityGaps, rankRiskGaps } from "./score/risk.js";
+import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint } from "./score/risk.js";
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
@@ -109,6 +109,7 @@ import {
   writeProofAttempts,
   type ProofDoctorResult
 } from "./proofDoctor.js";
+import { buildArtifactIdentity, PROOF_ORACLE_VERSION } from "./provenance.js";
 import { tryScopedReprove } from "./reprove/scoped.js";
 import { resolveContained, toWorkspaceRel } from "./reprove/paths.js";
 import { hashBuffer } from "./util/hash.js";
@@ -950,7 +951,7 @@ function buildGraphFromFragments(
   const manifest: Manifest = buildManifest(analyzeFragment.file_entries, readGitInfo(gitRunner(scanRoot)), now);
   const prunedEdges = pruneDanglingEdges(nodes, edges);
 
-  return {
+  const graph: LocalGraph = {
     schema_version: LOCAL_GRAPH_SCHEMA_VERSION,
     workspace: {
       name: config.workspace_name || deriveWorkspaceName(scanRoot),
@@ -976,6 +977,23 @@ function buildGraphFromFragments(
       confirmed_by_layer: confirmedCoverageByLayer({ nodes, edges: prunedEdges })
     }
   };
+  graph.artifact_identity = artifactIdentityFor(graph, scanRoot);
+  return graph;
+}
+
+function artifactIdentityFor(graph: LocalGraph, repoRoot: string) {
+  const health = inspectRiskInputHealth(repoRoot);
+  const codeFiles = Object.entries(graph.manifest.files).filter(([, file]) => file.kind === "code").map(([file]) => file);
+  return buildArtifactIdentity(graph, {
+    configHash: loadRiskConfig(repoRoot).hash,
+    history: {
+      state: health.history,
+      churnWindow: health.churnWindow,
+      churnAvailable: health.churnAvailable,
+      commitDate: health.commitDate,
+      inputFingerprint: riskHistoryFingerprint(repoRoot, codeFiles, health.churnWindow)
+    }
+  });
 }
 
 // ── operations ───────────────────────────────────────────────────────
@@ -1489,6 +1507,7 @@ export function opRecordRun(root: string, opts: RecordRunOptions, deps: Operatio
     model: opts.model,
     prompt_version: opts.prompt_version,
     language,
+    artifact_identity: artifactIdentityFor(preGraph, preGraph.workspace.root),
     status,
     reprove_mode: reproveMode,
     reprove_reason: reproveReason,
@@ -1714,6 +1733,7 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
   const closed = dynamicProofSucceeded(oracle);
   const baselineGreen = oracle.baseline?.exitCode === 0 && oracle.baseline?.timedOut !== true;
   const mutantFailedAssertion = oracle.mutant?.assertionFailure === true && oracle.mutant?.timedOut !== true;
+  const artifactIdentity = artifactIdentityFor(graph, sourceRoot);
   const dynamicProof: DynamicProofCertificate = {
     proof_kind: "dynamic_targeted",
     baseline_green: baselineGreen,
@@ -1724,7 +1744,9 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     sentinel: oracle.replacementMode ?? replacementMode,
     runner: oracle.runner ?? runner,
     test_path: oracle.test ?? testRel,
-    mutant_status: oracle.status
+    mutant_status: oracle.status,
+    oracle_version: PROOF_ORACLE_VERSION,
+    run_fingerprint: artifactIdentity.run_fingerprint
   };
   const result = appendLedgerRecord(root, {
     run_id: opts.run_id,
@@ -1736,6 +1758,7 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     evidence_ids: [],
     language,
     dynamic_proof: dynamicProof,
+    artifact_identity: artifactIdentity,
     target_fingerprint: targetFingerprint(graph, target),
     status: closed ? "reproven" : "unproven",
     reason: oracle.reason ?? (closed ? "Dynamic targeted proof closed." : "Dynamic targeted proof did not close."),
@@ -2170,7 +2193,12 @@ export async function opStart(
   // Auto-prove (PR 1): key-gated generate→prove for the top provable TS/JS targets.
   // Runs BEFORE the report/RTM writes below so they reflect any freshly-minted Proven.
   // Proof is minted only by opProveLoop's UNCHANGED oracle; no key ⇒ no files, no proof.
-  reportProgress("auto-prove: driving generate → prove on the top provable targets", { current: 6, total: 8 });
+  reportProgress(
+    opts.noAuto
+      ? "auto-prove: disabled (--no-auto)"
+      : "auto-prove: driving generate → prove on the top provable targets",
+    { current: 6, total: 8 }
+  );
   let autoProveResult: AutoProveResult;
   try {
     autoProveResult = await autoProve(
@@ -2888,7 +2916,7 @@ export function opBehaviorCoverageHtml(
     const prev = JSON.parse(readFileSync(baselinePath, "utf8")) as ReportBaseline;
     if (prev && prev.summary && Array.isArray(prev.riskPaths)) data.delta = computeReportDelta(prev, data);
   } catch {
-    data.delta = null;
+    // buildBehaviorReportData already provides an explicit first_run state.
   }
   const html = renderBehaviorReport(data);
   const htmlPath = resolve(root, outputPath);
@@ -3044,6 +3072,7 @@ function incrementalMerge(
       confirmed_by_layer: confirmedCoverageByLayer({ nodes, edges: prunedEdges })
     }
   };
+  graph.artifact_identity = artifactIdentityFor(graph, root);
   return { graph, updated_entities: updatedEntities, stale_generated_tests: staleCount, warnings: freshFragment.warnings };
 }
 

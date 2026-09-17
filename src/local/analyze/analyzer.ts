@@ -11,6 +11,7 @@ import { buildImportGraph, type GateMetrics } from "../resolve/importGraph.js";
 import { walkBarrel } from "../resolve/barrelWalker.js";
 import { resetResolverCaches } from "../resolve/resolver.js";
 import { resetExportIndexCache } from "../resolve/exportIndex.js";
+import { builtInRankExclusion } from "../score/rankEligibility.js";
 import {
   baseName,
   extOf,
@@ -177,6 +178,59 @@ function behaviorSurfaceReason(relPath: string, name: string, memberOf?: string)
 }
 
 const RUNTIME_SOURCE_EXT_RE = /\.(?:[cm]?[jt]sx?)$/i;
+
+type CliFramework = "oclif" | "salesforce-cli" | "commander";
+
+/**
+ * Return qualified `Class.run` symbols whose class extends a CLI command base
+ * imported from a known runtime package. This is deliberately import-scoped:
+ * a local class merely named Command/SfCommand never becomes an entry point.
+ */
+function cliEntrySymbols(content: string): Map<string, CliFramework> {
+  const out = new Map<string, CliFramework>();
+  const sourceFile = ts.createSourceFile("cli-entry.tsx", content, ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
+  const importedBases = new Map<string, CliFramework>();
+
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.importClause || stmt.importClause.isTypeOnly) continue;
+    const source = stmt.moduleSpecifier.text;
+    const framework: CliFramework | undefined =
+      source === "@oclif/core" ? "oclif" :
+      source === "@salesforce/sf-plugins-core" ? "salesforce-cli" :
+      source === "commander" ? "commander" :
+      undefined;
+    if (!framework) continue;
+    const bindings = stmt.importClause.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      if (element.isTypeOnly) continue;
+      const imported = element.propertyName?.text ?? element.name.text;
+      if (imported === "Command" || imported === "SfCommand") importedBases.set(element.name.text, framework);
+    }
+  }
+
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
+    let framework: CliFramework | undefined;
+    for (const clause of stmt.heritageClauses ?? []) {
+      if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+      for (const type of clause.types) {
+        if (ts.isIdentifier(type.expression)) framework = importedBases.get(type.expression.text) ?? framework;
+      }
+    }
+    if (!framework) continue;
+    const hasRun = stmt.members.some(
+      (member) =>
+        ts.isMethodDeclaration(member) &&
+        !!member.body &&
+        ts.isIdentifier(member.name) &&
+        member.name.text === "run"
+    );
+    if (hasRun) out.set(`${stmt.name.text}.run`, framework);
+  }
+
+  return out;
+}
 
 /**
  * Resolve package-level public entry modules from package metadata and the two
@@ -548,6 +602,16 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     if (!set) { set = new Set(); externalCalleesByCaller.set(callerId, set); }
     if (set.size < 32) set.add(name);
   };
+  // Stronger than an unanchored receiver name: the qualifier is a runtime
+  // binding imported from a bare external module. Preserve that provenance so
+  // risk scoring can recognize replacement operations without treating every
+  // local `replace*` method as destructive.
+  const importedStaticCalleesByCaller = new Map<string, Set<string>>();
+  const recordImportedStaticCallee = (callerId: string, name: string): void => {
+    let set = importedStaticCalleesByCaller.get(callerId);
+    if (!set) { set = new Set(); importedStaticCalleesByCaller.set(callerId, set); }
+    if (set.size < 32) set.add(name);
+  };
   // Raw (caller, callee) call pairs per TS/JS code file, resolved after the
   // import graph is built (cross-file calls need its bindings + targets).
   const rawCallsByFile = new Map<string, RawCall[]>();
@@ -917,6 +981,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         const extraction = opts.parseCache
           ? opts.parseCache.symbols(file.hash, `${language}#${extractionBackend(language)}`, () => extractFileSymbols(content, language))
           : extractFileSymbols(content, language);
+        const cliEntries = language === "typescript" || language === "javascript" ? cliEntrySymbols(content) : new Map<string, CliFramework>();
         if (extraction.truncated) symbolFilesTruncated++;
         for (const sym of extraction.symbols) {
           if (symbolCount >= maxSymbols) {
@@ -948,15 +1013,18 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           const surfaceExclusionReason = callableBehaviorCandidate
             ? behaviorSurfaceExclusionReason(file.relPath, sym.name, sym.member_of)
             : null;
+          const cliFramework = cliEntries.get(sym.name);
+          const cliDenominatorOverride = Boolean(cliFramework) && callableBehaviorCandidate;
           const surfaceReason = nonTsClassBehavior
             ? "Non-TS class/constructor behavior surface — countable for language proof."
             : callableBehaviorCandidate && !surfaceExclusionReason
               ? behaviorSurfaceReason(file.relPath, sym.name, sym.member_of)
               : null;
           const publicApiEntry = callableBehaviorCandidate && !surfaceExclusionReason && publicEntryFiles.has(file.relPath);
-          const eligible = callableBehaviorCandidate && (surfaceReason !== null || publicApiEntry);
-          const behaviorSurfaceExcluded = callableBehaviorCandidate && surfaceExclusionReason !== null;
+          const eligible = cliDenominatorOverride || (callableBehaviorCandidate && (surfaceReason !== null || publicApiEntry));
+          const behaviorSurfaceExcluded = callableBehaviorCandidate && surfaceExclusionReason !== null && !cliDenominatorOverride;
           const notEntryPointAdjacent = callableBehaviorCandidate && !eligible && !behaviorSurfaceExcluded;
+          const rankingExclusion = builtInRankExclusion(file.relPath);
           if (isBoilerplate) excludedBoilerplate++;
           nodes.push(
             makeNode({
@@ -969,10 +1037,27 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 ...(sym.start_line ? { start_line: sym.start_line } : {}),
                 ...(sym.end_line ? { end_line: sym.end_line } : {}),
                 ...(sym.member_of ? { member_of: sym.member_of } : {}),
+                ...(cliFramework ? { cli_entrypoint: true, entry_lane: "cli", cli_framework: cliFramework } : {}),
                 ...(sym.callable !== undefined ? { callable_const: sym.callable } : {}),
-                ...(surfaceReason ? { behavior_surface: "entrypoint_adjacent" } : publicApiEntry ? { behavior_surface: "public_api_entry" } : {}),
+                ...(cliDenominatorOverride
+                  ? {
+                      behavior_surface: "cli_command_entry",
+                      denominator_reason_code: "cli_command_entry",
+                      ...(surfaceExclusionReason ? { denominator_override_from: surfaceExclusionReason } : {})
+                    }
+                  : surfaceReason
+                    ? { behavior_surface: "entrypoint_adjacent" }
+                    : publicApiEntry
+                      ? { behavior_surface: "public_api_entry" }
+                      : {}),
                 ...(behaviorSurfaceExcluded ? { denominator_reason_code: "infra_behavior_surface" } : {}),
-                ...(notEntryPointAdjacent ? { denominator_reason_code: "not_entry_point_adjacent" } : {})
+                ...(notEntryPointAdjacent ? { denominator_reason_code: "not_entry_point_adjacent" } : {}),
+                ...(rankingExclusion
+                  ? {
+                      ranking_exclusion_reason_code: rankingExclusion.code,
+                      ranking_exclusion_reason: rankingExclusion.reason
+                    }
+                  : {})
               },
               evidence_strength: "hard",
               review_status: "auto_detected",
@@ -988,6 +1073,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                   ? GENERATED_CODE_REASON
                   : isBoilerplate
                   ? BOILERPLATE_REASON
+                  : cliDenominatorOverride
+                    ? `Verified ${cliFramework} CLI command run() entry — countable behavior surface${surfaceExclusionReason ? `; overrides: ${surfaceExclusionReason}` : "."}`
                   : eligible && surfaceReason
                     ? surfaceReason
                     : publicApiEntry
@@ -1160,9 +1247,15 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     const importBindingsByFile = new Map<string, Map<string, { imported: string; targetRel: string; targetAbs: string }>>();
     const typeBindingsByFile = new Map<string, Map<string, { imported: string; targetRel: string; targetAbs: string }>>();
     const namespaceBindingsByFile = new Map<string, Map<string, { targetRel: string; targetAbs: string }>>();
+    const externalRuntimeBindingsByFile = new Map<string, Set<string>>();
     for (const e of importGraph.edges) {
-      if (!e.resolved || e.external || !e.target) continue;
       const fromRel = relByAbs.get(path.resolve(e.from));
+      if (fromRel && e.importKind === "runtime" && e.category === "bare-external") {
+        let bindings = externalRuntimeBindingsByFile.get(fromRel);
+        if (!bindings) externalRuntimeBindingsByFile.set(fromRel, (bindings = new Set()));
+        for (const binding of e.bindings) bindings.add(binding.local);
+      }
+      if (!e.resolved || e.external || !e.target) continue;
       const targetRel = relByAbs.get(path.resolve(e.target));
       // Skip targets outside the scanned set (ignored/generated files): no node to link.
       if (!fromRel || !targetRel || fromRel === targetRel) continue;
@@ -1343,6 +1436,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const imports = importBindingsByFile.get(rel);
       const typeImports = typeBindingsByFile.get(rel);
       const namespaces = namespaceBindingsByFile.get(rel);
+      const externalRuntimeBindings = externalRuntimeBindingsByFile.get(rel);
       for (const c of calls) {
         if (!localSyms.has(c.caller)) continue; // caller must be an emitted symbol
         const callerId = `sym:${rel}#${c.caller}`;
@@ -1391,6 +1485,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
               if (cands && cands.length === 1 && cands[0].slice(4, cands[0].indexOf("#")) === qImport.targetRel) {
                 queueMay(callerId, cands[0], rel, 0.65, `Imported-binding member match: the qualifier is imported from the module defining the only *.method symbol.`);
               }
+            }
+            if (externalRuntimeBindings?.has(c.qualifier)) {
+              recordImportedStaticCallee(callerId, `${c.qualifier}.${c.callee}`);
             }
             // A non-imported (local/param) qualifier is NOT anchored — no edge.
             if (!ns && !qImport) recordExternalCallee(callerId, `${c.qualifier}.${c.callee}`); // round two: retain by name
@@ -1962,15 +2059,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         }
       }
     }
-    // Fix B: persist retained callee names on their caller symbols (names only).
-    if (externalCalleesByCaller.size > 0) {
-      const byId = new Map(nodes.map((n) => [n.external_id, n] as const));
-      for (const [callerId, names] of externalCalleesByCaller) {
-        const n = byId.get(callerId);
-        if (!n) continue;
-        n.properties = { ...(n.properties ?? {}), external_callees: [...names].sort() };
-      }
-    }
     const seenGoProof = new Set<string>();
     const proofVerifiedAt = scanStartMs;
     for (const [testRel, structure] of goTestStructureByFile) {
@@ -2078,6 +2166,25 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     }
   }
 
+  // Persist retained callees for every language mix. This must live outside the
+  // non-TS conditional: a TypeScript-only repository still needs its unresolved
+  // external and import-anchored static calls available to risk scoring.
+  if (externalCalleesByCaller.size > 0 || importedStaticCalleesByCaller.size > 0) {
+    const byId = new Map(nodes.map((n) => [n.external_id, n] as const));
+    const callerIds = new Set([...externalCalleesByCaller.keys(), ...importedStaticCalleesByCaller.keys()]);
+    for (const callerId of callerIds) {
+      const n = byId.get(callerId);
+      if (!n) continue;
+      const external = externalCalleesByCaller.get(callerId);
+      const importedStatic = importedStaticCalleesByCaller.get(callerId);
+      n.properties = {
+        ...(n.properties ?? {}),
+        ...(external?.size ? { external_callees: [...external].sort() } : {}),
+        ...(importedStatic?.size ? { imported_static_callees: [...importedStatic].sort() } : {})
+      };
+    }
+  }
+
   // ---- Static assertion candidates (Phase 4 / Gate 2): TypeChecker-derived hard edges ----
   // Upgrade resolver-derived test->source candidates to HARD TESTED_BY/COVERS
   // ONLY where the 5-conjunct confirmer proves a runtime, asserted use of a real
@@ -2088,7 +2195,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   // barrel — which holds no LOCAL behavior symbols — is not confirmed here;
   // barrel-routed confirmation is a documented follow-up. Under-confirming is the
   // desired failure mode.)
-  let confirmedCoverage: { confirmed_pairs: number; attempted: number; capped_downgrades: number; skipped_files_budget: number } | undefined;
+  let confirmedCoverage: { confirmed_pairs: number; associated_pairs?: number; attempted: number; capped_downgrades: number; skipped_files_budget: number } | undefined;
   if (readContent && eligibleSymbolsByFile.size > 0) {
     const absByRel = new Map(resolveFiles.map((f) => [f.rel, f.abs]));
     const candidates: ConfirmCandidate[] = [];
@@ -2146,7 +2253,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       involved.add(c.implAbs);
     }
     if (candidates.length === 0) {
-      confirmedCoverage = { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 0 };
+      confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 0 };
     } else try {
       const scoped = involved.size > confirmBudget
         ? selectRiskScopedConfirmCandidates({
@@ -2161,7 +2268,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           })
         : { candidates, riskSymbols: 0, involvedFiles: involved.size };
       if (involved.size > confirmBudget && scoped.candidates.length === 0) {
-        confirmedCoverage = { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: involved.size };
+        confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: involved.size };
         warnings.push(
           `Static confirmation skipped: ${involved.size} files exceed the confirmer budget (${confirmBudget}), and no high-risk subset fit. Use \`--base <ref>\` for PR-scoped confirmation, or raise ORANGEPRO_MAX_CONFIRM_FILES.`
         );
@@ -2184,8 +2291,29 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             })
           );
         }
+        let associatedPairs = 0;
+        for (const c of result.associations) {
+          const edgeKey = `test:${c.testRel}|${c.symId}`;
+          if (seenEdge.has(edgeKey)) continue;
+          seenEdge.add(edgeKey);
+          associatedPairs++;
+          edges.push(
+            ...makeProofEdges({
+              testRel: c.testRel,
+              symId: c.symId,
+              provenance: prov(c.testRel, hashString(`${c.symId}:runtime-invocation`)),
+              lastVerified: proofVerifiedAt,
+              properties: {
+                static_association: "runtime_invocation",
+                assertion_observed: false,
+                association_reason: c.reason
+              }
+            })
+          );
+        }
         confirmedCoverage = {
           confirmed_pairs: confirmedPairs,
+          associated_pairs: associatedPairs,
           attempted: result.attempted,
           capped_downgrades: result.capped_downgrades,
           skipped_files_budget: involved.size > confirmBudget ? involved.size : 0,
@@ -2212,7 +2340,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       // or a TS compiler-API edge must NEVER crash analyze. Degrade to
       // candidate-only coverage with a disclosure.
       const msg = err instanceof Error ? err.message : String(err);
-      confirmedCoverage = { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 0 };
+      confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 0 };
       warnings.push(
         `Static confirmation skipped: the structural confirmer could not run on this project (${msg.slice(0, 160)}). Coverage is reported from candidate links only.`
       );
@@ -2222,6 +2350,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   if (nonTsHardProofAttempted > 0) {
     confirmedCoverage = {
       confirmed_pairs: (confirmedCoverage?.confirmed_pairs ?? 0) + goProofConfirmedPairs + javaProofConfirmedPairs + pythonProofConfirmedPairs,
+      associated_pairs: confirmedCoverage?.associated_pairs ?? 0,
       attempted: (confirmedCoverage?.attempted ?? 0) + nonTsHardProofAttempted,
       capped_downgrades: confirmedCoverage?.capped_downgrades ?? 0,
       skipped_files_budget: confirmedCoverage?.skipped_files_budget ?? 0
@@ -2423,6 +2552,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     files_scanned: filesProcessed,
     files_cap_hit: filesCapHit,
     max_files: maxFiles,
+    max_symbols: maxSymbols,
     ...(budgetStopped
       ? { not_analyzed_due_to_budget: { files_not_analyzed: filesNotAnalyzed, elapsed_ms: elapsedMs, budget_ms: budgetMs as number } }
       : {}),

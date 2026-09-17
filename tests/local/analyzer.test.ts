@@ -56,6 +56,10 @@ describe("classify", () => {
     expect(isTestFile("src/UserTest.kt")).toBe(true);
     expect(isTestFile("src/FooIT.java")).toBe(true);
     expect(isTestFile("src/user_test.rb")).toBe(true);
+    expect(isTestFile("src/commands/agent/test/resume.ts")).toBe(false);
+    expect(isTestFile("packages/plugin/src/commands/agent/test/run.ts")).toBe(false);
+    expect(isTestFile("src/commands/agent/test/run.test.ts")).toBe(true);
+    expect(isTestFile("test/commands/agent/run.ts")).toBe(true);
   });
 
   it("testLayerOf infers e2e from an e2e directory", () => {
@@ -107,6 +111,30 @@ describe("frameworks", () => {
 
     const playwrightFw = frameworks.find((f) => f.name === "playwright");
     expect(playwrightFw?.test_layer).toBe("e2e");
+  });
+
+  it("detectFromPackageJson recognizes CLI runtime frameworks without inventing a test runner", () => {
+    const content = JSON.stringify({
+      name: "cli-plugin",
+      dependencies: {
+        "@oclif/core": "^4.0.0",
+        "@salesforce/sf-plugins-core": "^12.0.0",
+        commander: "^12.0.0"
+      },
+      devDependencies: {
+        "@oclif/test": "^4.0.0"
+      }
+    });
+
+    const { frameworks } = detectFromPackageJson("package.json", content);
+    expect(frameworks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "oclif", category: "runtime", evidence_ref: "package.json" }),
+        expect.objectContaining({ name: "Salesforce CLI", category: "runtime", evidence_ref: "package.json" }),
+        expect.objectContaining({ name: "Commander", category: "runtime", evidence_ref: "package.json" })
+      ])
+    );
+    expect(frameworks.some((fw) => fw.name === "@oclif/test" && fw.category === "test")).toBe(false);
   });
 
   it("detectFromPackageJson tolerates invalid JSON", () => {
@@ -218,6 +246,51 @@ describe("analyzeRepo", () => {
     expect(kinds.has("TestCase")).toBe(true);
     expect(kinds.has("CodeSymbol")).toBe(true);
     expect(kinds.has("Framework")).toBe(true);
+  });
+
+  it("creates report-visible Framework nodes for oclif and Salesforce CLI manifests", () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify(
+        {
+          name: "cli-plugin",
+          dependencies: {
+            "@oclif/core": "^4.0.0",
+            "@salesforce/sf-plugins-core": "^12.0.0"
+          },
+          devDependencies: {
+            "@oclif/test": "^4.0.0"
+          }
+        },
+        null,
+        2
+      )
+    );
+
+    const fragment = analyzeRepo(dir);
+    const frameworkTitles = fragment.nodes.filter((n) => n.kind === "Framework").map((n) => n.title);
+    expect(frameworkTitles).toContain("oclif");
+    expect(frameworkTitles).toContain("Salesforce CLI");
+  });
+
+  it("keeps a CLI command namespace named test as product code and extracts its run method", () => {
+    const commandDir = join(dir, "src", "commands", "agent", "test");
+    mkdirSync(commandDir, { recursive: true });
+    writeFileSync(
+      join(commandDir, "resume.ts"),
+      [
+        "class SfCommand<T> {}",
+        "export default class AgentTestResume extends SfCommand<string> {",
+        "  public async run(): Promise<string> { return 'ok'; }",
+        "}"
+      ].join("\n")
+    );
+
+    const fragment = analyzeRepo(dir);
+    const file = fragment.nodes.find((n) => n.external_id === "src/commands/agent/test/resume.ts");
+    expect(file).toMatchObject({ kind: "File", properties: { role: "code" } });
+    expect(fragment.nodes.some((n) => n.external_id === "sym:src/commands/agent/test/resume.ts#AgentTestResume.run")).toBe(true);
+    expect(fragment.nodes.some((n) => n.external_id === "test:src/commands/agent/test/resume.ts")).toBe(false);
   });
 
   it("recognizes exact top-level test.js conventions as test files", () => {
@@ -372,6 +445,21 @@ describe("analyzeRepo", () => {
     expect(byId.get("sym:src/components/HtmlPreview.tsx#HtmlPreview")?.denominator_eligible).toBe(false);
     expect(byId.get("sym:src/lib/resend.ts#getResendClient")?.denominator_eligible).toBe(false);
     expect(byId.get("sym:src/lib/resend.ts#getResendClient")?.properties.denominator_reason_code).toBe("not_entry_point_adjacent");
+  });
+
+  it("tags e2e test-support helpers for ranking exclusion without changing denominator eligibility", () => {
+    mkdirSync(join(dir, "packages", "twenty-e2e-testing", "lib", "requests"), { recursive: true });
+    writeFileSync(
+      join(dir, "packages", "twenty-e2e-testing", "lib", "requests", "delete-workflow.ts"),
+      "export const deleteWorkflow = () => true;\n"
+    );
+
+    const fragment = analyzeRepo(dir);
+    const node = fragment.nodes.find((n) => n.external_id === "sym:packages/twenty-e2e-testing/lib/requests/delete-workflow.ts#deleteWorkflow");
+
+    expect(node?.denominator_eligible).toBe(true);
+    expect(node?.properties.ranking_exclusion_reason_code).toBe("test_support_helper");
+    expect(node?.properties.ranking_exclusion_reason).toContain("excluded from the primary production priority ranking");
   });
 
   it("uses semantic infrastructure signals without excluding product package layouts", () => {

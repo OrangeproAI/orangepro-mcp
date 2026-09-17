@@ -85,11 +85,15 @@ export function languageOf(relPath: string): string {
 export function isTestFile(relPath: string): boolean {
   const p = relPath.toLowerCase();
   const file = relPath.split("/").pop() || relPath;
+  // CLI frameworks commonly use `src/commands/<topic>/test/` as a PRODUCT
+  // command namespace (for example `agent test run`), not as a test suite.
+  // Explicit test filenames and real test roots remain authoritative.
+  const cliTestCommandNamespace = /(^|\/)src\/commands\/(?:[^/]+\/)*test\//.test(p);
   return (
     /\.(test|spec)\.[a-z]+$/.test(p) ||
     /(^|\/)test\.[cm]?[jt]sx?$/.test(p) ||
     /(^|\/)__tests__\//.test(p) ||
-    /(^|\/)(tests?|e2e|cypress|spec)\//.test(p) ||
+    (!cliTestCommandNamespace && /(^|\/)(tests?|e2e|cypress|spec)\//.test(p)) ||
     /(^|\/)(unit|integration|functional|acceptance)tests?\//.test(p) ||
     /_test\.(py|go)$/.test(p) ||
     /test_.*\.py$/.test(p) ||

@@ -19,6 +19,7 @@ const at = (f: string): string => resolve(FIX, f);
 const IMPL = at("impl.ts");
 const LOGIN = at("LoginForm.tsx");
 const DEFAULT_IMPL = at("defaultExport.ts");
+const COMMAND_DEFAULT = at("commandDefault.ts");
 const APP_SERVICE = at("application.service.ts");
 
 interface Case {
@@ -83,6 +84,7 @@ const NEGATIVES: Case[] = [
   { file: "N52-nest-assert-before-call.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
   { file: "N53-nest-unrelated-expect.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
   { file: "N54-nest-side-effect-only.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
+  { file: "N55-cli-esmock-no-related-assert.test.ts", impl: COMMAND_DEFAULT, behavior: "AgentCommand.run", expect: "inferred" },
   { file: "N90-nest-usevalue-override.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
   { file: "N91-nest-overrideprovider.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
   { file: "N92-nest-spyon-stub.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
@@ -215,6 +217,8 @@ const POSITIVES: Case[] = [
   { file: "P21-promise-then.test.ts", impl: IMPL, behavior: "saveUser", expect: "confirmed" },
   { file: "P22-array-from-mapfn.test.ts", impl: IMPL, behavior: "saveUser", expect: "confirmed" },
   { file: "P23-nest-testingmodule-service.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
+  { file: "P24-cli-default-static-run.test.ts", impl: COMMAND_DEFAULT, behavior: "AgentCommand.run", expect: "confirmed" },
+  { file: "P25-cli-esmock-default-static-run.test.ts", impl: COMMAND_DEFAULT, behavior: "AgentCommand.run", expect: "confirmed" },
   { file: "P90-nest-unrelated-spy-real-impl.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
   { file: "L01-minimal-target-only.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
   { file: "L02-with-dto-builder.test.ts", impl: APP_SERVICE, behavior: "ApplicationService.uploadDefaultPackageFilesAndSetFileIds", expect: "inferred" },
@@ -334,6 +338,19 @@ describe("confirmer — false-confirm safety invariants", () => {
   it("a test outside the program cannot confirm", () => {
     const v = confirmPair(ctx, at("does-not-exist.test.ts"), IMPL, "saveUser");
     expect(v.verdict).toBe("none");
+  });
+
+  it("a local helper merely named esmock cannot create a command confirmation", () => {
+    const v = confirmPair(ctx, at("N56-cli-local-esmock-spoof.test.ts"), COMMAND_DEFAULT, "AgentCommand.run");
+    expect(v.verdict).toBe("none");
+    expect(v.verdict).not.toBe("confirmed");
+  });
+
+  it("records a real unasserted command invocation as Associated without confirming it", () => {
+    const v = confirmPair(ctx, at("N55-cli-esmock-no-related-assert.test.ts"), COMMAND_DEFAULT, "AgentCommand.run");
+    expect(v.verdict).toBe("inferred");
+    expect(v.association_signal).toBe("runtime_invocation");
+    expect(v.verdict).not.toBe("confirmed");
   });
 });
 

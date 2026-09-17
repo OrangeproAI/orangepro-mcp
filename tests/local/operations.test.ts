@@ -224,6 +224,19 @@ describe("start orchestration", () => {
     expect(existsSync(res.rtm.rtm_path)).toBe(true);
   });
 
+  it("does not claim auto-prove is running when --no-auto disables it", async () => {
+    const W = makeTempDir();
+    writeStartFixture(W);
+    const messages: string[] = [];
+    setProgressReporter((msg) => messages.push(msg));
+
+    const res = await opStart(W, { source: W, ai: false, noAuto: true }, deps);
+
+    expect(messages).toContain("auto-prove: disabled (--no-auto)");
+    expect(messages).not.toContain("auto-prove: driving generate → prove on the top provable targets");
+    expect(res.auto_prove).toMatchObject({ status: "disabled", attempted: 0, proven: 0 });
+  });
+
   it("compares the final report with the previous completed start run", async () => {
     const W = makeTempDir();
     writeStartFixture(W);
@@ -243,8 +256,10 @@ describe("start orchestration", () => {
     const finalBaseline = JSON.parse(readFileSync(baselinePath, "utf8")) as { summary: { total: number } };
 
     expect(finalBaseline.summary.total).toBe(first.summary.total + 1);
-    expect(html).toContain('"changed":true');
-    expect(html).toContain('"totalDelta":1');
+    expect(html).toContain('"comparisonState":"repository_changed"');
+    expect(html).toContain('"changed":false');
+    expect(html).toContain('"totalDelta":0');
+    expect(html).toContain("Comparison withheld");
   });
 
   it("auto-applies AI candidate links when a provider is configured without changing deterministic RTM status", async () => {

@@ -95,6 +95,68 @@ describe("analyzeRepo — import graph integration", () => {
     expect(rel!.reason).toContain("../src/feature.js");
   });
 
+  it("treats a module loaded through imported esmock as a runtime test-to-source edge", () => {
+    writeFileSync(
+      join(dir, "tests", "esmock-command.test.ts"),
+      [
+        'import esmock from "esmock";',
+        'it("loads the command", async () => {',
+        '  const mod = await esmock("../src/feature.js", { "./dep.js": {} });',
+        '  mod.doThing();',
+        '});'
+      ].join("\n")
+    );
+
+    const fragment = analyzeRepo(dir);
+    expect(
+      fragment.edges.some(
+        (e) =>
+          e.relationship_type === "IMPORTS" &&
+          e.from_external_id === "tests/esmock-command.test.ts" &&
+          e.to_external_id === "src/feature.ts"
+      )
+    ).toBe(true);
+    const candidate = fragment.candidate_edges.find(
+      (e) =>
+        e.relationship_type === "MAY_RELATE_TO" &&
+        e.from_external_id === "tests/esmock-command.test.ts" &&
+        e.to_external_id === "src/feature.ts"
+    );
+    expect(candidate).toBeDefined();
+    expect(candidate?.reason).toContain("../src/feature.js");
+  });
+
+  it("does not trust a local function merely named esmock", () => {
+    writeFileSync(
+      join(dir, "tests", "fake-esmock.test.ts"),
+      [
+        'const esmock = async (_specifier: string) => ({ doThing: () => 1 });',
+        'it("uses a local helper", async () => {',
+        '  const mod = await esmock("../src/feature.js");',
+        '  mod.doThing();',
+        '});'
+      ].join("\n")
+    );
+
+    const fragment = analyzeRepo(dir);
+    expect(
+      fragment.edges.some(
+        (e) =>
+          e.relationship_type === "IMPORTS" &&
+          e.from_external_id === "tests/fake-esmock.test.ts" &&
+          e.to_external_id === "src/feature.ts"
+      )
+    ).toBe(false);
+    expect(
+      fragment.candidate_edges.some(
+        (e) =>
+          e.relationship_type === "MAY_RELATE_TO" &&
+          e.from_external_id === "tests/fake-esmock.test.ts" &&
+          e.to_external_id === "src/feature.ts"
+      )
+    ).toBe(false);
+  });
+
   it("does NOT stem-link an import-linked test to a same-stem different module", () => {
     const fragment = analyzeRepo(dir);
     const stemLink = fragment.candidate_edges.find(

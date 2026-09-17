@@ -36,6 +36,8 @@ export interface ConfirmVerdict {
   reason: string;
   /** Which conjunct failed (1-5), when the verdict is not confirmed. */
   rejected_conjunct?: 1 | 2 | 3 | 4 | 5 | 6;
+  /** Real, non-mocked runtime invocation exists, but no related assertion was observed. */
+  association_signal?: "runtime_invocation";
 }
 
 export interface ConfirmProgram {
@@ -647,6 +649,23 @@ export function confirmBehaviors(
     return out;
   }
   const implNorm = norm(implAbsPath);
+  const implSf = program.getSourceFile(implNorm);
+  const hasModifier = (node: ts.Node, kind: ts.SyntaxKind): boolean =>
+    ts.canHaveModifiers(node) && (ts.getModifiers(node)?.some((m) => m.kind === kind) ?? false);
+  const cliCommandClasses = new Set<string>();
+  let defaultCliCommandClass: string | null = null;
+  for (const statement of implSf?.statements ?? []) {
+    if (!ts.isClassDeclaration(statement) || !statement.name) continue;
+    const extendsCliCommand =
+      statement.heritageClauses?.some(
+        (clause) =>
+          clause.token === ts.SyntaxKind.ExtendsKeyword &&
+          clause.types.some((t) => /(?:^|\.)(?:Sf)?Command$/.test(t.expression.getText(implSf)))
+      ) ?? false;
+    if (!extendsCliCommand || !memberTargetsByClass.has(statement.name.text)) continue;
+    cliCommandClasses.add(statement.name.text);
+    if (hasModifier(statement, ts.SyntaxKind.DefaultKeyword)) defaultCliCommandClass = statement.name.text;
+  }
 
   // Resolve an identifier's binding to a terminal export name in implAbsPath, or
   // null. Follows aliases (renames, re-export barrels) to the defining file.
@@ -978,6 +997,7 @@ export function confirmBehaviors(
   const constructorBindings = new Map<ts.Symbol, string>();
   const prototypeBindings = new Map<ts.Symbol, string>();
   const mutatorAliases = new Map<ts.Symbol, string>();
+  const loadedModuleBindings = new Map<ts.Symbol, { src: BindingSource; defaultClassName: string | null }>();
   const unwrapExpression = (expr: ts.Expression): ts.Expression => {
     let current = expr;
     while (
@@ -991,6 +1011,35 @@ export function confirmBehaviors(
       current = current.expression;
     }
     return current;
+  };
+  const loadedModuleFromEsmock = (expr: ts.Expression): { src: BindingSource; defaultClassName: string | null } | null => {
+    const value = unwrapExpression(expr);
+    if (
+      !ts.isCallExpression(value) ||
+      !ts.isIdentifier(value.expression) ||
+      !importedFromPkg(value.expression, ["esmock"]) ||
+      value.arguments.length === 0
+    ) {
+      return null;
+    }
+    const spec = unwrapExpression(value.arguments[0]);
+    if (!ts.isStringLiteralLike(spec)) return null;
+    const resolved = resolveImport(spec.text, testAbsPath);
+    if (!resolved.resolvedFileName || norm(resolved.resolvedFileName) !== implNorm) return null;
+    return {
+      src: { file: implNorm, importedName: "default", typeOnly: false },
+      defaultClassName: defaultCliCommandClass
+    };
+  };
+  const loadedDefaultClassBinding = (expr: ts.Expression): NestInstanceBinding | null => {
+    const value = unwrapExpression(expr);
+    if (!ts.isPropertyAccessExpression(value) || value.name.text !== "default") return null;
+    const receiver = unwrapExpression(value.expression);
+    if (!ts.isIdentifier(receiver)) return null;
+    const sym = checker.getSymbolAtLocation(receiver);
+    const loaded = sym ? loadedModuleBindings.get(sym) : undefined;
+    if (!loaded?.defaultClassName) return null;
+    return { className: loaded.defaultClassName, src: loaded.src, fromNest: false };
   };
   const numericIndex = (expr: ts.Expression): number | null => {
     const index = unwrapExpression(expr);
@@ -1199,7 +1248,12 @@ export function confirmBehaviors(
     if (ts.isIdentifier(receiver)) {
       const sym = checker.getSymbolAtLocation(receiver);
       const binding = sym ? instanceBindings.get(sym) : undefined;
-      return binding ?? null;
+      if (binding) return binding;
+      const directClass = classNameFromToken(receiver);
+      if (directClass && cliCommandClasses.has(directClass)) {
+        return { className: directClass, src: importSourceOf(receiver), fromNest: false };
+      }
+      return null;
     }
     if (ts.isConditionalExpression(receiver)) {
       return sameClassBinding([bindingFromNestInstanceExpr(receiver.whenTrue), bindingFromNestInstanceExpr(receiver.whenFalse)]);
@@ -1790,6 +1844,8 @@ export function confirmBehaviors(
   };
   const classBindingFromExpr = (expr: ts.Expression, requireNest: boolean): { className: string; src: BindingSource | null; fromNest: boolean } | null => {
     const value = unwrapExpression(expr);
+    const loadedDefault = loadedDefaultClassBinding(value);
+    if (loadedDefault) return loadedDefault;
     if (ts.isIdentifier(value)) {
       const sym = checker.getSymbolAtLocation(value);
       const binding = sym ? instanceBindings.get(sym) : undefined;
@@ -1816,6 +1872,18 @@ export function confirmBehaviors(
     if (!binding) return;
     const sym = checker.getSymbolAtLocation(name);
     if (sym) instanceBindings.set(sym, binding);
+  };
+  const maybeBindLoadedModule = (name: ts.Identifier, expr: ts.Expression): void => {
+    const loaded = loadedModuleFromEsmock(expr);
+    if (!loaded) return;
+    const sym = checker.getSymbolAtLocation(name);
+    if (sym) loadedModuleBindings.set(sym, loaded);
+    if (!loaded.defaultClassName) return;
+    const targetName = `${loaded.defaultClassName}.run`;
+    if (!nameSet.has(targetName)) return;
+    const st = stateFor(targetName);
+    st.importedRuntime = true;
+    st.importSources.push(loaded.src);
   };
   const maybeBindDerivedIdentity = (name: ts.Identifier, expr: ts.Expression): void => {
     bindMutatorAlias(name, expr);
@@ -2007,6 +2075,7 @@ export function confirmBehaviors(
       markTupleMutationSeed(node.initializer);
       if (ts.isIdentifier(node.name)) {
         recordContainerBindings(node.name, node.initializer);
+        maybeBindLoadedModule(node.name, node.initializer);
         maybeBindInstance(node.name, node.initializer);
         maybeBindDerivedIdentity(node.name, node.initializer);
       } else if (ts.isArrayBindingPattern(node.name)) {
@@ -2324,7 +2393,12 @@ export function confirmBehaviors(
     out.set(name, {
       verdict: "inferred",
       reason: "the behavior is exercised but no assertion consumes its result or observes its rendered effect via the real binding",
-      rejected_conjunct: 5
+      rejected_conjunct: 5,
+      ...(st.runtimeUses.some(
+        (u) => u.src != null && cleanBindingSource(u.src) && !srcMocked(u.src)
+      )
+        ? { association_signal: "runtime_invocation" as const }
+        : {})
     });
   }
   return out;
@@ -2381,6 +2455,8 @@ export interface ConfirmerInput {
 
 export interface ConfirmerOutput {
   confirmations: ConfirmedEdge[];
+  /** Real, non-mocked invocations that remain Associated, never confirmed or Proven. */
+  associations: ConfirmedEdge[];
   /** (test, behavior) pairs evaluated. */
   attempted: number;
   /** Confirmed-by-rule but the impl symbol was capped out of the graph → downgraded to INFERRED. */
@@ -2505,9 +2581,10 @@ export function resolveSpecifier(spec: string, fromFile: string, repoRoot: strin
 export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
   const { candidates, symbolsByImpl, existingSymIds, anchorFile } = input;
   const confirmations: ConfirmedEdge[] = [];
+  const associations: ConfirmedEdge[] = [];
   let attempted = 0;
   let capped_downgrades = 0;
-  if (candidates.length === 0) return { confirmations, attempted, capped_downgrades };
+  if (candidates.length === 0) return { confirmations, associations, attempted, capped_downgrades };
 
   const absFiles = new Set<string>();
   for (const c of candidates) {
@@ -2523,7 +2600,9 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
     const verdicts = confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
     for (const [name, v] of verdicts) {
       attempted++;
-      if (v.verdict !== "confirmed") continue;
+      const isConfirmed = v.verdict === "confirmed";
+      const isAssociated = v.verdict === "inferred" && v.association_signal === "runtime_invocation";
+      if (!isConfirmed && !isAssociated) continue;
       const symId = `sym:${c.implRel}#${name}`;
       if (!existingSymIds.has(symId)) {
         capped_downgrades++; // symbol exists in source but was capped out — downgrade, don't COVERS-to-file
@@ -2532,8 +2611,10 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
       const key = `${c.testRel}|${symId}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      confirmations.push({ testRel: c.testRel, implRel: c.implRel, behaviorName: name, symId, reason: v.reason });
+      const edge = { testRel: c.testRel, implRel: c.implRel, behaviorName: name, symId, reason: v.reason };
+      if (isConfirmed) confirmations.push(edge);
+      else associations.push(edge);
     }
   }
-  return { confirmations, attempted, capped_downgrades };
+  return { confirmations, associations, attempted, capped_downgrades };
 }

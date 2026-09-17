@@ -229,6 +229,22 @@ export function extractImports(file: string): ExtractedImport[] {
   }
   const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, /*setParentNodes*/ false);
   const imports: ExtractedImport[] = [];
+  const esmockBindings = new Set<string>();
+
+  // `esmock("./module", overrides)` loads the real target module while replacing
+  // selected dependencies. Trust the first argument only when the callee is the
+  // default binding imported from the actual `esmock` package. A local helper
+  // merely named `esmock` must not create a structural module edge.
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isImportDeclaration(statement) &&
+      ts.isStringLiteralLike(statement.moduleSpecifier) &&
+      statement.moduleSpecifier.text === "esmock" &&
+      statement.importClause?.name
+    ) {
+      esmockBindings.add(statement.importClause.name.text);
+    }
+  }
 
   const moduleText = (node: ts.Expression | undefined): string | null =>
     node && ts.isStringLiteralLike(node) ? node.text : null;
@@ -249,8 +265,9 @@ export function extractImports(file: string): ExtractedImport[] {
       // Dynamic `import("lit")` or `require("lit")` with a string-literal arg.
       const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
       const isRequire = ts.isIdentifier(node.expression) && node.expression.text === "require";
+      const isEsmock = ts.isIdentifier(node.expression) && esmockBindings.has(node.expression.text);
       // TODO(low): a concatenated dynamic-import arg yields a phantom specifier; ignored.
-      if (isDynamicImport || isRequire) {
+      if (isDynamicImport || isRequire || isEsmock) {
         const specifier = moduleText(node.arguments[0]);
         if (specifier !== null) imports.push({ specifier, kind: "runtime", bindings: [] });
       }
