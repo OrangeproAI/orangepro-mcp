@@ -550,6 +550,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // worklist but do not rescale an unchanged peer.
   const normalizationSymbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && rankEligible(n) && !isSuppressed(n.external_id));
   const symbols = normalizationSymbols.filter((n) => !confirmed.has(n.external_id));
+  const worklistSymbols = symbols.filter((n) => n.properties.ranking_exclusion_reason !== "python_structural_container");
   const symbolIds = new Set(normalizationSymbols.map((s) => s.external_id));
   const symbolsByFile = new Map<string, GraphNode[]>();
   for (const s of normalizationSymbols) {
@@ -696,7 +697,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const share = syms.length > 0 ? count / syms.length : 0;
       for (const s of syms) legacyIncoming.set(s.external_id, (legacyIncoming.get(s.external_id) ?? 0) + share);
     }
-    return symbols
+    return worklistSymbols
       .map((s) => {
         const file = symbolFile(s);
         const incoming_refs = legacyIncoming.get(s.external_id) ?? 0;
@@ -743,7 +744,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const pById = new Map(normalizationSymbols.map((s, idx) => [s.external_id, pScores[idx]]));
   const iById = new Map(normalizationSymbols.map((s, idx) => [s.external_id, iScores[idx]]));
 
-  const ranked = symbols
+  const ranked = worklistSymbols
     .map((s) => {
       const file = symbolFile(s);
       const incoming_refs = Math.round((incoming.get(s.external_id) ?? 0) * 10) / 10;

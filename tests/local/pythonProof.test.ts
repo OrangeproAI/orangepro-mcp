@@ -69,7 +69,7 @@ describe("Python hard proof", () => {
       ].join("\n")
     });
     expect(hardCoverEdgeDetails(root)).toEqual([
-      { from: "test:src/app/test_calc.py", to: "sym:src/app/calc.py#total", testName: "TestCalculator::test_total" }
+      { from: "test:src/app/test_calc.py", to: "sym:src/app/calc.py#Calculator.total", testName: "TestCalculator::test_total" }
     ]);
   });
 
@@ -139,7 +139,7 @@ describe("Python hard proof", () => {
       "src/app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
       "src/app/test_calc.py": ["def test_total():", "    assert Calculator().total() == 3"].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual(["test:src/app/test_calc.py -> sym:src/app/calc.py#total"]);
+    expect(hardCoverEdges(root)).toEqual(["test:src/app/test_calc.py -> sym:src/app/calc.py#Calculator.total"]);
   });
 
   it("does not confirm local helper names that shadow product functions", () => {

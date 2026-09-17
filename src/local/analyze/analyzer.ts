@@ -925,9 +925,19 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
 
       const content = readSafe(file.absPath);
       const isGenerated = content ? isGeneratedCode(content) : false;
+      const treeStructure =
+        content && isTreeSitterLanguage(language) && treeSitterReady(language)
+          ? extractTreeSitterStructure(content, language, file.relPath)
+          : undefined;
       if (isGenerated) generatedCodeFiles.add(file.relPath);
-      if (content && (language === "typescript" || language === "javascript") && !isGenerated && !isNonProductPath(file.relPath)) {
-        for (const contract of extractBehaviorContracts(content, file.relPath)) {
+      if (content && !isGenerated && !isNonProductPath(file.relPath)) {
+        const behaviorContracts =
+          language === "typescript" || language === "javascript"
+            ? extractBehaviorContracts(content, file.relPath)
+            : language === "python"
+              ? (treeStructure?.pythonBehaviorContracts ?? [])
+              : [];
+        for (const contract of behaviorContracts) {
           if (behaviorSurfaceExclusionReason(file.relPath, contract.handler ?? contract.title)) continue;
           behaviorContractsTotal++;
           behaviorContractsByFramework.set(contract.framework, (behaviorContractsByFramework.get(contract.framework) ?? 0) + 1);
@@ -948,7 +958,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 file: contract.file,
                 source: contract.source,
                 ...(contract.handler ? { handler: contract.handler } : {}),
-                ...(contract.controller ? { controller: contract.controller } : {})
+                ...(contract.controller ? { controller: contract.controller } : {}),
+                ...(contract.route_prefix_status ? { route_prefix_status: contract.route_prefix_status } : {}),
+                ...(contract.route_prefix ? { route_prefix: contract.route_prefix } : {})
               },
               evidence_strength: "hard",
               review_status: "auto_detected",
@@ -1007,8 +1019,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           // Trivial accessors (Java getId/toString, Python __repr__) are real
           // symbols but carry no testable behavior — kept in the graph, dropped
           // from the denominator with disclosure so coverage is not under-claimed.
+          const boilerplateName = language === "python" ? (sym.name.split(".").pop() ?? sym.name) : sym.name;
           const isBoilerplate =
-            !isDts && !isInfra && !isGeneratedSymbol && callableKind && isBoilerplateSymbol(sym.name, language, sym.symbol_kind, sym.trivial_accessor);
+            !isDts && !isInfra && !isGeneratedSymbol && callableKind && isBoilerplateSymbol(boilerplateName, language, sym.symbol_kind, sym.trivial_accessor);
           const callableBehaviorCandidate = !isDts && !isInfra && !isGeneratedSymbol && !isBoilerplate && behaviorCallableKind;
           const surfaceExclusionReason = callableBehaviorCandidate
             ? behaviorSurfaceExclusionReason(file.relPath, sym.name, sym.member_of)
@@ -1147,9 +1160,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           if (calls.length > 0) rawCallsByFile.set(file.relPath, calls);
           const generatedServices = extractMedusaGeneratedServices(content, tsx);
           if (generatedServices.length > 0) medusaGeneratedServicesByFile.set(file.relPath, generatedServices);
-        } else if (isTreeSitterLanguage(language) && treeSitterReady(language) && !isNonProductFile(file.relPath)) {
-          const structure = extractTreeSitterStructure(content, language);
-          nonTsStructureByFile.set(file.relPath, { language, structure });
+        } else if (treeStructure && !isNonProductFile(file.relPath)) {
+          nonTsStructureByFile.set(file.relPath, { language, structure: treeStructure });
         }
       }
     }
@@ -1585,6 +1597,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   let javaProofAttempted = 0;
   let pythonProofConfirmedPairs = 0;
   let pythonProofAttempted = 0;
+  let pythonDependencyEdges = 0;
+  let pythonEndpointReachablePromoted = 0;
+  let pythonStructuralContainersExcluded = 0;
   if (nonTsStructureByFile.size > 0) {
     const nodeByExternalId = new Map(nodes.map((n) => [n.external_id, n]));
     const codeFilesByLanguage = new Map<string, Set<string>>();
@@ -1680,7 +1695,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       }
     }
 
-    type NonTsImportBinding = { targetRel?: string; targetDir?: string; imported?: string; kind: "module" | "named" };
+    type NonTsImportBinding = { targetRel?: string; targetDir?: string; imported?: string; module?: string; kind: "module" | "named" };
     const importBindingsByFile = new Map<string, Map<string, NonTsImportBinding>>();
     const seenImports = new Set(edges.filter((e) => e.relationship_type === "IMPORTS").map((e) => `${e.from_external_id}|${e.to_external_id}`));
     const seenCalls = new Set(edges.filter((e) => e.relationship_type === "CALLS").map((e) => `${e.from_external_id}|${e.to_external_id}`));
@@ -1726,11 +1741,12 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       local: string,
       target: { targetRel?: string; targetDir?: string },
       imported: string | undefined,
-      kind: "module" | "named"
+      kind: "module" | "named",
+      module?: string
     ): void => {
       let map = importBindingsByFile.get(fromRel);
       if (!map) importBindingsByFile.set(fromRel, (map = new Map()));
-      if (!map.has(local)) map.set(local, { ...target, imported, kind });
+      if (!map.has(local)) map.set(local, { ...target, imported, kind, module });
     };
     const uniquePythonModule = (mod: string): string | null => {
       const set = pythonModuleToFiles.get(mod);
@@ -1775,6 +1791,35 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const classes = [...(symbolsByFile.get(targetRel) ?? [])].filter((name) => symbolKind(targetRel, name) === "class");
       if (classes.length !== 1 || classes[0] !== className) return null;
       return symbolKind(targetRel, methodName) === "method" ? targetRel : null;
+    };
+    const pythonQualifiedMemberId = (targetRel: string | undefined, className: string, methodName: string): string | null => {
+      if (!targetRel) return null;
+      const member = `${className}.${methodName}`;
+      return symbolsByFile.get(targetRel)?.has(member) && symbolKind(targetRel, member) === "method"
+        ? `sym:${targetRel}#${member}`
+        : null;
+    };
+    const shouldRetainPythonImportedSink = (binding: NonTsImportBinding, callee: string): boolean => {
+      if (!/^(?:delete|destroy|purge|drop|erase|wipe|truncate|terminate|revoke|remove|replace|overwrite)/i.test(callee)) return false;
+      const topModule = (binding.module ?? "").replace(/^\.+/, "").split(".")[0]?.toLowerCase();
+      if (new Set(["os", "pathlib", "shutil", "tempfile"]).has(topModule ?? "")) return false;
+      const moduleName = (binding.module ?? "").toLowerCase();
+      const owner = binding.imported ?? "";
+      return /(?:^|[._])(db|database|model|orm|prisma|repo|repository|record|redis|mongo|sql|store|storage|table)(?:$|[._])/.test(moduleName)
+        || /(?:Model|Repository|Repo|Store|Client|Table|Database|DB)$/.test(owner);
+    };
+    const shouldRetainPythonReceiverFieldSink = (qualifier: string, callee: string): boolean => {
+      if (!/^(?:delete|destroy|purge|drop|erase|wipe|truncate|terminate|revoke|remove|replace|overwrite)/i.test(callee)) return false;
+      const tokens = qualifier
+        .replace(/\([^)]*\)/g, "")
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean);
+      return tokens.some((token) => new Set([
+        "db", "database", "model", "orm", "prisma", "repo", "repository", "record", "redis",
+        "mongo", "sql", "session", "store", "storage", "table"
+      ]).has(token));
     };
     const guardedCsharpMemberTarget = (fromRel: string, className: string, methodName: string): string | null => {
       const ownNamespace = nonTsStructureByFile.get(fromRel)?.structure.moduleName;
@@ -1949,7 +1994,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const classTargetRel = binding?.kind === "named" ? binding.targetRel : conventionTargetRel;
       if (binding?.kind === "named" && (!classTargetRel || isNonProductFile(classTargetRel) || binding.imported !== rootQualifier)) return null;
       if (!classTargetRel || symbolKind(classTargetRel, rootQualifier) !== "class") return null;
-      return eligiblePythonSymbol(classTargetRel, callee);
+      return eligiblePythonSymbol(classTargetRel, `${rootQualifier}.${callee}`);
     };
 
     for (const [rel, { language, structure }] of nonTsStructureByFile) {
@@ -1971,9 +2016,18 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           targetRel = uniqueMapTarget(csharpFilesByNamespace, i.module);
         }
         else if (language === "c" || language === "cpp") targetRel = resolveRelativeModule(rel, i.module, [".h", ".hpp", ".hh", ".hxx", ".c", ".cc", ".cpp", ".cxx"]);
-        if (!targetRel && !targetDir) continue;
+        if (!targetRel && !targetDir) {
+          // Python external runtime imports do not produce graph edges, but the
+          // binding still anchors `Model.delete()`/`client.replace()` as an
+          // imported external call. TYPE_CHECKING imports were removed by the
+          // AST extractor, so they cannot become sink provenance here.
+          if (language === "python") {
+            addImportBinding(rel, i.local, {}, i.imported, i.kind, i.module);
+          }
+          continue;
+        }
         if (targetRel) emitImport(rel, targetRel);
-        addImportBinding(rel, i.local, { ...(targetRel ? { targetRel } : {}), ...(targetDir ? { targetDir } : {}) }, i.imported, i.kind);
+        addImportBinding(rel, i.local, { ...(targetRel ? { targetRel } : {}), ...(targetDir ? { targetDir } : {}) }, i.imported, i.kind, i.module);
       }
     }
     // Go package-level method index (dir → "Recv.M" → file) for receiver calls that
@@ -2012,17 +2066,43 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             emitCall(callerId, `sym:${rel}#${c.callee}`, rel);
             continue;
           }
-          if (language === "python" && localSyms.has(c.callee)) continue;
+          if (language === "python" && localSyms.has(c.callee)) {
+            emitCall(callerId, `sym:${rel}#${c.callee}`, rel);
+            continue;
+          }
           const b = imports?.get(c.callee);
           if (language === "php" && b?.targetRel && b.imported && symbolKind(b.targetRel, b.imported) !== "function") continue;
           if (b?.kind === "named" && b.imported && b.targetRel && symbolsByFile.get(b.targetRel)?.has(b.imported)) {
             emitCall(callerId, `sym:${b.targetRel}#${b.imported}`, rel);
           }
         } else if (c.qualifier) {
-          const rootQualifier = c.qualifier.split(".")[0];
-          if (shadowed.has(rootQualifier)) continue;
+          const rootQualifier = language === "python" ? pythonQualifierRoot(c.qualifier) : c.qualifier.split(".")[0];
+          if (shadowed.has(rootQualifier) && !(language === "python" && (rootQualifier === "self" || rootQualifier === "cls"))) continue;
           const b = imports?.get(rootQualifier);
-          if (language === "go" && c.receiverVar && c.receiverType && c.qualifier === c.receiverVar) {
+          if (language === "python") {
+            const callerNode = nodeByExternalId.get(callerId);
+            const callerOwner = typeof callerNode?.properties.member_of === "string" ? callerNode.properties.member_of : undefined;
+            const selfMember = (rootQualifier === "self" || rootQualifier === "cls") && callerOwner
+              ? pythonQualifiedMemberId(rel, callerOwner, c.callee)
+              : null;
+            const localClassMember = pythonQualifiedMemberId(rel, rootQualifier.replace(/\(.*$/, ""), c.callee);
+            const importedClassMember = b?.kind === "named" && b.imported
+              ? pythonQualifiedMemberId(b.targetRel, b.imported, c.callee)
+              : null;
+            if (selfMember || localClassMember || importedClassMember) {
+              emitCall(callerId, selfMember ?? localClassMember ?? importedClassMember!, rel);
+            } else if (b?.kind === "module" && b.targetRel && symbolsByFile.get(b.targetRel)?.has(c.callee)) {
+              emitCall(callerId, `sym:${b.targetRel}#${c.callee}`, rel);
+            } else if (b && !b.targetRel && shouldRetainPythonImportedSink(b, c.callee)) {
+              const qualifier = b.kind === "named" ? c.qualifier.replace(/\([^)]*\)/g, "") : c.qualifier;
+              recordImportedStaticCallee(callerId, `${qualifier}.${c.callee}`);
+            } else if (!b && c.qualifier.includes(".") && shouldRetainPythonReceiverFieldSink(c.qualifier, c.callee)) {
+              // Attribute-chain receiver (`self.repo.delete`, `store.client.replace`):
+              // retain a name fact only. Scoring applies its own persistence + verb
+              // policy; no graph edge or evidence claim is created here.
+              recordExternalCallee(callerId, `${c.qualifier}.${c.callee}`);
+            }
+          } else if (language === "go" && c.receiverVar && c.receiverType && c.qualifier === c.receiverVar) {
             // Go receiver-method call: inside `func (t *task) Run()`, `t.validate()` calls
             // `task.validate`. The receiver's type is DECLARED in the method signature, so
             // this is exact resolution: same file first, then the same package (methods of
@@ -2057,6 +2137,154 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             emitCall(callerId, `sym:${b.targetRel}#${c.callee}`, rel);
           }
         }
+      }
+    }
+
+    const resolvePythonReferenceId = (fromRel: string, reference: string): string | null => {
+      const parts = reference.split(".").filter(Boolean);
+      if (parts.length === 0) return null;
+      const local = parts[0];
+      if (parts.length === 1 && symbolsByFile.get(fromRel)?.has(local)) return `sym:${fromRel}#${local}`;
+      const localMember = parts.length > 1 ? parts.join(".") : "";
+      if (localMember && symbolsByFile.get(fromRel)?.has(localMember)) return `sym:${fromRel}#${localMember}`;
+      const binding = importBindingsByFile.get(fromRel)?.get(local);
+      if (!binding?.targetRel || isNonProductFile(binding.targetRel)) return null;
+      const targetName = binding.kind === "module"
+        ? parts.slice(1).join(".")
+        : [binding.imported, ...parts.slice(1)].filter(Boolean).join(".");
+      return targetName && symbolsByFile.get(binding.targetRel)?.has(targetName)
+        ? `sym:${binding.targetRel}#${targetName}`
+        : null;
+    };
+    const seenPythonDependencyEdges = new Set<string>();
+    for (const [rel, { language, structure }] of nonTsStructureByFile) {
+      if (language !== "python") continue;
+      for (const dependency of structure.pythonDependencies ?? []) {
+        const handlerId = `sym:${rel}#${dependency.handler}`;
+        const dependencyId = resolvePythonReferenceId(rel, dependency.dependency);
+        if (!codeSymbolIds.has(handlerId) || !dependencyId || !codeSymbolIds.has(dependencyId)) continue;
+        const callKey = `${handlerId}|${dependencyId}`;
+        if (!seenCalls.has(callKey)) {
+          seenCalls.add(callKey);
+          edges.push(
+            makeEdge({
+              from_external_id: handlerId,
+              to_external_id: dependencyId,
+              relationship_type: "CALLS",
+              evidence_strength: "framework-derived",
+              review_status: "auto_detected",
+              provenance: prov(rel),
+              properties: { call_via: "fastapi_dependency", resolution: "tree_sitter_exact" }
+            })
+          );
+        }
+        for (const contract of behaviorContractsByFile.get(rel) ?? []) {
+          if (contract.framework !== "fastapi" || contract.handler !== dependency.handler) continue;
+          const key = `${contract.id}|${dependencyId}`;
+          if (seenPythonDependencyEdges.has(key)) continue;
+          seenPythonDependencyEdges.add(key);
+          pythonDependencyEdges++;
+          edges.push(
+            makeEdge({
+              from_external_id: contract.id,
+              to_external_id: dependencyId,
+              relationship_type: "DEPENDS_ON",
+              evidence_strength: "framework-derived",
+              review_status: "auto_detected",
+              provenance: prov(rel),
+              properties: { framework: "fastapi", dependency: dependency.dependency }
+            })
+          );
+        }
+      }
+    }
+
+    // Python's first-pass denominator is intentionally conservative. Promote only
+    // concrete production methods/functions reached from a framework handler by
+    // exact hard/framework CALLS edges. This repairs denominator visibility without
+    // admitting every class or utility into the score population.
+    const pythonNodeIds = new Set(
+      nodes
+        .filter((n) => n.kind === "CodeSymbol" && typeof n.properties.file === "string" && n.properties.file.endsWith(".py"))
+        .map((n) => n.external_id)
+    );
+    const pythonAdjacency = new Map<string, Array<{ target: string; edgeKind: string }>>();
+    for (const edge of edges) {
+      if (edge.relationship_type !== "CALLS" || !pythonNodeIds.has(edge.from_external_id) || !pythonNodeIds.has(edge.to_external_id)) continue;
+      const list = pythonAdjacency.get(edge.from_external_id);
+      const step = { target: edge.to_external_id, edgeKind: edge.relationship_type };
+      if (list) list.push(step);
+      else pythonAdjacency.set(edge.from_external_id, [step]);
+    }
+    const pythonEntrypoints = [...new Set(edges
+      .filter((e) => e.relationship_type === "IMPLEMENTED_IN" && pythonNodeIds.has(e.to_external_id))
+      .map((e) => e.to_external_id))].sort();
+    const reachablePython = new Set<string>(pythonEntrypoints);
+    const pythonWitness = new Map<string, { seed: string; edgeKinds: string[]; hopCount: number }>(
+      pythonEntrypoints.map((seed) => [seed, { seed, edgeKinds: [], hopCount: 0 }])
+    );
+    let frontier = [...pythonEntrypoints];
+    for (let depth = 0; depth < 3 && frontier.length > 0; depth++) {
+      const next: string[] = [];
+      for (const current of frontier) {
+        const currentWitness = pythonWitness.get(current);
+        if (!currentWitness) continue;
+        for (const step of pythonAdjacency.get(current) ?? []) {
+          if (reachablePython.has(step.target)) continue;
+          reachablePython.add(step.target);
+          pythonWitness.set(step.target, {
+            seed: currentWitness.seed,
+            edgeKinds: [...currentWitness.edgeKinds, step.edgeKind],
+            hopCount: currentWitness.hopCount + 1
+          });
+          next.push(step.target);
+        }
+      }
+      frontier = next;
+    }
+    for (const id of reachablePython) {
+      const node = nodeByExternalId.get(id);
+      if (!node || node.properties.symbol_kind === "class") continue;
+      const witness = pythonWitness.get(id);
+      node.properties.endpoint_reachable = true;
+      if (witness) {
+        node.properties.denominator_witness = {
+          seed: witness.seed,
+          edge_kinds: witness.edgeKinds,
+          hop_count: witness.hopCount
+        };
+      }
+      if (node.denominator_eligible === true) continue;
+      const callableName = (node.title ?? "").split(".").pop() ?? node.title ?? "";
+      if (callableName.startsWith("_") || node.properties.denominator_reason_code !== "not_entry_point_adjacent") continue;
+      node.denominator_eligible = true;
+      node.denominator_reason = "Transitively reachable from a Python framework entrypoint through exact static calls.";
+      node.properties.denominator_promotion = "python_entrypoint_reachable";
+      pythonEndpointReachablePromoted++;
+    }
+    const pythonOwnersWithMethods = new Set(
+      nodes
+        .filter(
+          (n) =>
+            n.kind === "CodeSymbol" &&
+            n.properties.symbol_kind === "method" &&
+            n.denominator_eligible === true &&
+            typeof n.properties.file === "string" &&
+            n.properties.file.endsWith(".py") &&
+            typeof n.properties.member_of === "string"
+        )
+        .map((n) => `${n.properties.file}#${n.properties.member_of}`)
+    );
+    for (const node of nodes) {
+      if (
+        node.kind === "CodeSymbol" &&
+        node.properties.symbol_kind === "class" &&
+        node.denominator_eligible === true &&
+        typeof node.properties.file === "string" &&
+        pythonOwnersWithMethods.has(`${node.properties.file}#${node.title ?? ""}`)
+      ) {
+        node.properties.ranking_exclusion_reason = "python_structural_container";
+        pythonStructuralContainersExcluded++;
       }
     }
     const seenGoProof = new Set<string>();
@@ -2570,6 +2798,15 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             by_framework: Object.fromEntries([...behaviorContractsByFramework.entries()].sort(([a], [b]) => a.localeCompare(b))),
             by_kind: Object.fromEntries([...behaviorContractsByKind.entries()].sort(([a], [b]) => a.localeCompare(b))),
             handler_edges: behaviorContractsHandlerEdges
+          }
+        }
+      : {}),
+    ...(pythonDependencyEdges || pythonEndpointReachablePromoted || pythonStructuralContainersExcluded
+      ? {
+          python_structural_recalibration: {
+            dependency_edges: pythonDependencyEdges,
+            endpoint_reachable_promoted: pythonEndpointReachablePromoted,
+            structural_containers_rank_excluded: pythonStructuralContainersExcluded
           }
         }
       : {}),

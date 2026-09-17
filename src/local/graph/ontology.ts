@@ -10,9 +10,9 @@
  * third-party graph product or format.
  */
 
-// v2: Go method symbol ids are receiver-qualified (`sym:file.go#Recv.M`) — old
-// graphs hold bare-name method ids and must force-rebuild (loadGraph hard-fails).
-export const LOCAL_GRAPH_SCHEMA_VERSION = "orangepro.local_graph.v2" as const;
+// v3: Python method symbol ids are owner-qualified (`sym:file.py#Class.method`) —
+// old graphs hold collision-prone bare method ids and must force-rebuild.
+export const LOCAL_GRAPH_SCHEMA_VERSION = "orangepro.local_graph.v3" as const;
 
 /**
  * Where a behavior node came from — drives denominator eligibility (Gate 3).
@@ -387,6 +387,12 @@ export interface AnalysisMeta {
   denominator?: DenominatorComposition;
   /** Backend behavior contracts discovered from framework entrypoints. Metadata only in v1; not yet the coverage denominator. */
   behavior_contracts?: BehaviorContractsMeta;
+  /** Python-only structural corrections applied after exact AST/import call resolution. */
+  python_structural_recalibration?: {
+    dependency_edges: number;
+    endpoint_reachable_promoted: number;
+    structural_containers_rank_excluded: number;
+  };
   /** Static confirmation outcome (Phase 4): hard TESTED_BY/COVERS edges found by the TypeChecker confirmer. */
   confirmed_coverage?: ConfirmedCoverageMeta;
   /** Static assertion candidates over the denominator behaviors, split by linked test layer (Phase 5.1). */

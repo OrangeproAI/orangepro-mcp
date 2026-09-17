@@ -6,8 +6,11 @@
  */
 import { createRequire } from "node:module";
 import { Parser, Language, type Node } from "web-tree-sitter";
+import type { BehaviorContract } from "../behaviorContracts.js";
 import { ExtractedSymbol, MAX_SYMBOLS_PER_FILE, SymbolExtraction } from "../symbols.js";
 import { TS_LANG_CONFIGS, type TsLangConfig } from "./languages.js";
+import { slugify } from "../../util/ids.js";
+import { shortHash } from "../../util/hash.js";
 
 const require = createRequire(import.meta.url);
 
@@ -73,6 +76,13 @@ export interface TreeSitterPythonProofCall extends TreeSitterRawCall {
   assertion: "pytest_assert";
 }
 
+export interface TreeSitterPythonDependency {
+  /** Owner-qualified endpoint handler (`Controller.method`) or top-level function. */
+  handler: string;
+  /** Statically named dependency passed to FastAPI Depends(...). */
+  dependency: string;
+}
+
 export interface TreeSitterJavaClassInfo {
   name: string;
   methods: string[];
@@ -97,6 +107,8 @@ export interface TreeSitterStructure {
   javaProofCalls?: TreeSitterJavaProofCall[];
   goProofCalls?: TreeSitterGoProofCall[];
   pythonProofCalls?: TreeSitterPythonProofCall[];
+  pythonBehaviorContracts?: BehaviorContract[];
+  pythonDependencies?: TreeSitterPythonDependency[];
   /**
    * Go only: top-level function name → base name of its SINGLE declared result
    * type (`func New(...) *Parser` → "Parser"). Captured ONLY when the result is a
@@ -305,6 +317,39 @@ function nodeLines(node: Node): Pick<ExtractedSymbol, "start_line" | "end_line">
 }
 
 /**
+ * Nearest lexical Python class for a function. A function boundary reached first
+ * means this is a nested local function, not a class method.
+ */
+function pythonOwnerClass(node: Node): string | undefined {
+  const owners: string[] = [];
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === "function_definition" || parent.type === "lambda") return undefined;
+    if (parent.type === "class_definition") {
+      const name = parent.childForFieldName("name")?.text;
+      if (name) owners.unshift(name);
+    }
+    parent = parent.parent;
+  }
+  return owners.length > 0 ? owners.join(".") : undefined;
+}
+
+function hasPythonFunctionAncestor(node: Node): boolean {
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === "function_definition" || parent.type === "lambda") return true;
+    parent = parent.parent;
+  }
+  return false;
+}
+
+function pythonQualifiedFunctionName(node: Node): string | undefined {
+  const name = functionName(node, "python");
+  const owner = pythonOwnerClass(node);
+  return name && owner ? `${owner}.${name}` : name;
+}
+
+/**
  * Extract class/function/method symbol metadata (names + a trivial-accessor flag —
  * never source bodies) from a tree-sitter-supported language. Sync; returns [] when
  * the grammar isn't loaded.
@@ -338,17 +383,22 @@ export function extractTreeSitterSymbols(content: string, language: string): Sym
     if (cfg.classTypes.has(node.type)) kind = "class";
     else if (cfg.methodTypes.has(node.type)) kind = "method";
     else if (cfg.functionTypes.has(node.type)) kind = "function";
-    if (kind && shouldEmitSymbol(node, language)) {
+    const pythonOwner = language === "python" && node.type === "function_definition" ? pythonOwnerClass(node) : undefined;
+    if (pythonOwner && kind === "function") kind = "method";
+    const localPythonDeclaration = language === "python" && (node.type === "function_definition" || node.type === "class_definition") && hasPythonFunctionAncestor(node);
+    if (kind && !localPythonDeclaration && shouldEmitSymbol(node, language)) {
       const name = symbolName(node, cfg);
       if (name && !RESERVED_SYMBOL_NAMES.has(name)) {
         // Go methods mint receiver-qualified names (`Recv.M`, mirroring TS/JS
         // `Class.method` + member_of) so same-named methods on different receivers
         // stay distinct symbols; an underivable receiver falls back to the bare name.
-        const recv = kind === "method" && language === "go" ? goReceiverBaseName(node) : undefined;
+        const recv = kind === "method" && language === "go" ? goReceiverBaseName(node) : language === "python" ? pythonOwner : undefined;
+        const pythonClassOwner = kind === "class" && language === "python" ? pythonOwnerClass(node) : undefined;
+        const emittedName = pythonClassOwner ? `${pythonClassOwner}.${name}` : name;
         add(
           kind === "method"
             ? { name: recv ? `${recv}.${name}` : name, ...(recv ? { member_of: recv } : {}), symbol_kind: kind, trivial_accessor: isTrivialAccessorBody(node, language), ...nodeLines(node) }
-            : { name, symbol_kind: kind, ...nodeLines(node) }
+            : { name: emittedName, symbol_kind: kind, ...nodeLines(node) }
         );
       }
     }
@@ -528,6 +578,20 @@ function kotlinTopLevelSymbols(root: Node): string[] {
   return [...out].sort();
 }
 
+function underPythonTypeCheckingGuard(node: Node): boolean {
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === "if_statement") {
+      const condition = parent.childForFieldName("condition");
+      const text = condition?.text.trim() ?? "";
+      if (text === "TYPE_CHECKING" || /^[A-Za-z_]\w*\.TYPE_CHECKING$/.test(text)) return true;
+    }
+    if (parent.type === "function_definition" || parent.type === "class_definition") break;
+    parent = parent.parent;
+  }
+  return false;
+}
+
 function extractImports(root: Node, language: string): TreeSitterImportBinding[] {
   const imports: TreeSitterImportBinding[] = [];
   const add = (binding: TreeSitterImportBinding): void => {
@@ -535,6 +599,9 @@ function extractImports(root: Node, language: string): TreeSitterImportBinding[]
     imports.push(binding);
   };
   const walk = (node: Node): void => {
+    if (language === "python" && (node.type === "import_statement" || node.type === "import_from_statement") && underPythonTypeCheckingGuard(node)) {
+      return;
+    }
     if (language === "java" && node.type === "import_declaration") {
       const spec = namedChildren(node).find((n) => n.type.endsWith("identifier"))?.text;
       if (spec && !spec.endsWith(".*")) add({ local: lastDottedPart(spec), module: spec, imported: lastDottedPart(spec), kind: "named" });
@@ -1434,6 +1501,347 @@ function extractJavaProofCalls(root: Node, imports: TreeSitterImportBinding[]): 
   return out;
 }
 
+const FASTAPI_HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "options", "head", "trace"]);
+
+function pythonStaticString(node: Node | null): string | null {
+  if (!node || node.type !== "string") return null;
+  const contents = node.descendantsOfType("string_content").filter((n): n is Node => Boolean(n));
+  if (contents.length !== 1) return null;
+  return contents[0]?.text ?? null;
+}
+
+function pythonDottedName(node: Node | null): string | null {
+  if (!node) return null;
+  if (node.type === "identifier" || node.type === "dotted_name") return node.text;
+  if (node.type !== "attribute") return null;
+  const object = pythonDottedName(node.childForFieldName("object"));
+  const attribute = node.childForFieldName("attribute")?.text;
+  return object && attribute ? `${object}.${attribute}` : null;
+}
+
+function pythonCallArguments(call: Node): Node[] {
+  const args = call.childForFieldName("arguments");
+  return args ? namedChildren(args).filter((n) => n.type !== "comment") : [];
+}
+
+function pythonKeywordArgument(call: Node, name: string): Node | null {
+  for (const arg of pythonCallArguments(call)) {
+    if (arg.type !== "keyword_argument" || arg.childForFieldName("name")?.text !== name) continue;
+    return arg.childForFieldName("value") ?? namedChildren(arg)[1] ?? null;
+  }
+  return null;
+}
+
+function pythonPositionalArguments(call: Node): Node[] {
+  return pythonCallArguments(call).filter((n) => n.type !== "keyword_argument" && n.type !== "list_splat" && n.type !== "dictionary_splat");
+}
+
+function pythonStaticHttpMethods(node: Node | null, fallback: string[] = ["GET"]): string[] | null {
+  if (!node) return fallback;
+  if (!new Set(["list", "tuple", "set"]).has(node.type)) return null;
+  const elements = namedChildren(node).filter((child) => child.type !== "comment");
+  if (elements.length === 0) return null;
+  const methods = elements.map((element) => pythonStaticString(element));
+  if (methods.some((method) => method === null)) return null;
+  const normalized = methods.map((method) => method!.toLowerCase());
+  return normalized.every((method) => FASTAPI_HTTP_METHODS.has(method)) ? normalized.map((method) => method.toUpperCase()) : null;
+}
+
+function normalizePythonRoutePath(...parts: string[]): string {
+  const joined = parts.map((p) => p.trim().replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
+  return joined ? `/${joined}` : "/";
+}
+
+function pythonImportedFromFastapi(imports: TreeSitterImportBinding[], local: string, imported: string): boolean {
+  return imports.some((b) => b.local === local && b.module === "fastapi" && b.kind === "named" && b.imported === imported);
+}
+
+function pythonCallIsFastapiConstructor(call: Node, imports: TreeSitterImportBinding[], imported: "APIRouter" | "FastAPI"): boolean {
+  const parts = callParts(call, "python");
+  if (!parts) return false;
+  if (!parts.qualifier) return pythonImportedFromFastapi(imports, parts.callee, imported);
+  if (parts.callee !== imported) return false;
+  const root = parts.qualifier.split(".")[0] ?? "";
+  return imports.some((b) => b.local === root && b.kind === "module" && b.module === "fastapi");
+}
+
+interface PythonFastapiReceiver {
+  kind: "app" | "router";
+  prefix: string;
+  prefixResolved: boolean;
+  boundAt: number;
+}
+
+function pythonBindingTargetNames(target: Node | null): string[] {
+  if (!target) return [];
+  if (target.type === "identifier") return [target.text];
+  if (!new Set(["pattern_list", "tuple_pattern", "list_pattern", "tuple", "list"]).has(target.type)) return [];
+  return namedChildren(target).flatMap((child) => pythonBindingTargetNames(child));
+}
+
+function pythonFastapiReceivers(root: Node, imports: TreeSitterImportBinding[]): Map<string, PythonFastapiReceiver> {
+  const mutationCount = new Map<string, number>();
+  const candidates = new Map<string, PythonFastapiReceiver>();
+  const mutations: Node[] = [];
+  for (const type of ["assignment", "annotated_assignment", "augmented_assignment", "delete_statement"]) {
+    mutations.push(...root.descendantsOfType(type).filter((node): node is Node => Boolean(node)));
+  }
+  mutations.sort((a, b) => a.startIndex - b.startIndex);
+  for (const assignment of mutations) {
+    if (!pythonDirectModuleExecution(assignment)) continue;
+    const left = assignment.childForFieldName("left");
+    const targets = assignment.type === "delete_statement"
+      ? namedChildren(assignment).flatMap((child) => pythonBindingTargetNames(child))
+      : pythonBindingTargetNames(left);
+    for (const target of targets) mutationCount.set(target, (mutationCount.get(target) ?? 0) + 1);
+    const right = assignment.childForFieldName("right");
+    if (left?.type !== "identifier") continue;
+    const kind = right?.type === "call" && pythonCallIsFastapiConstructor(right, imports, "APIRouter")
+      ? "router"
+      : right?.type === "call" && pythonCallIsFastapiConstructor(right, imports, "FastAPI")
+        ? "app"
+        : null;
+    if (!kind || right?.type !== "call") continue;
+    const prefixNode = kind === "router" ? pythonKeywordArgument(right, "prefix") : null;
+    const staticPrefix = pythonStaticString(prefixNode);
+    candidates.set(left.text, {
+      kind,
+      prefix: staticPrefix ?? "",
+      prefixResolved: !prefixNode || staticPrefix !== null,
+      boundAt: assignment.startIndex
+    });
+  }
+  const out = new Map<string, PythonFastapiReceiver>();
+  for (const [name, receiver] of candidates) if (mutationCount.get(name) === 1) out.set(name, receiver);
+  return out;
+}
+
+const PYTHON_NONDETERMINISTIC_SCOPES = new Set([
+  "function_definition", "class_definition", "if_statement", "for_statement", "while_statement",
+  "try_statement", "with_statement", "match_statement", "lambda", "list_comprehension",
+  "dictionary_comprehension", "set_comprehension", "generator_expression"
+]);
+
+function pythonDirectModuleExecution(node: Node): boolean {
+  let parent = node.parent;
+  while (parent) {
+    if (PYTHON_NONDETERMINISTIC_SCOPES.has(parent.type)) return false;
+    if (parent.type === "module") return true;
+    parent = parent.parent;
+  }
+  return false;
+}
+
+function pythonRouterIncludePrefixes(root: Node, receivers: Map<string, PythonFastapiReceiver>): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const call of root.descendantsOfType("call")) {
+    if (!call || !pythonDirectModuleExecution(call)) continue;
+    const parts = callParts(call, "python");
+    const app = parts?.qualifier?.split(".")[0];
+    if (!parts || parts.callee !== "include_router" || !app || receivers.get(app)?.kind !== "app") continue;
+    const router = pythonDottedName(pythonPositionalArguments(call)[0] ?? null);
+    if (!router || !receivers.has(router) || receivers.get(app)!.boundAt >= call.startIndex || receivers.get(router)!.boundAt >= call.startIndex) continue;
+    const includePrefix = pythonStaticString(pythonKeywordArgument(call, "prefix"));
+    if (includePrefix === null && pythonKeywordArgument(call, "prefix")) continue;
+    let prefixes = out.get(router);
+    if (!prefixes) out.set(router, (prefixes = new Set()));
+    prefixes.add(includePrefix ?? "");
+  }
+  return out;
+}
+
+function makePythonBehaviorContract(input: {
+  file: string;
+  method: string;
+  path: string;
+  handler?: string;
+  prefixStatus: "resolved" | "unresolved";
+  prefix: string;
+}): BehaviorContract {
+  const identityInput = `${input.method}|${input.path}|${input.file}|${input.handler ?? ""}`;
+  return {
+    id: `endpoint:${slugify(`${input.method}-${input.path}-${input.file}-${input.handler ?? ""}`)}-${shortHash(identityInput)}`,
+    title: `${input.method} ${input.path}`,
+    kind: "http_endpoint",
+    framework: "fastapi",
+    method: input.method,
+    path: input.path,
+    file: input.file,
+    handler: input.handler,
+    route_prefix_status: input.prefixStatus,
+    ...(input.prefix ? { route_prefix: input.prefix } : {}),
+    source: "framework"
+  };
+}
+
+function dedupePythonContracts(contracts: BehaviorContract[]): BehaviorContract[] {
+  const seen = new Set<string>();
+  return contracts.filter((contract) => {
+    const key = `${contract.method}|${contract.path}|${contract.handler ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function pythonDirectModuleHandlers(root: Node): Set<string> {
+  const counts = new Map<string, number>();
+  for (const fn of root.descendantsOfType("function_definition")) {
+    if (!fn || hasPythonFunctionAncestor(fn)) continue;
+    const declaration = fn.parent?.type === "decorated_definition" ? fn.parent : fn;
+    if (declaration.parent?.type !== "module") continue;
+    const name = pythonQualifiedFunctionName(fn);
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  for (const type of ["assignment", "annotated_assignment", "augmented_assignment", "delete_statement"]) {
+    for (const mutation of root.descendantsOfType(type)) {
+      if (!mutation || !pythonDirectModuleExecution(mutation)) continue;
+      const left = mutation.childForFieldName("left");
+      const targets = mutation.type === "delete_statement"
+        ? namedChildren(mutation).flatMap((child) => pythonBindingTargetNames(child))
+        : pythonBindingTargetNames(left);
+      for (const target of targets) if (counts.has(target)) counts.set(target, counts.get(target)! + 1);
+    }
+  }
+  return new Set([...counts].filter(([, count]) => count === 1).map(([name]) => name));
+}
+
+function extractPythonBehaviorContracts(
+  root: Node,
+  imports: TreeSitterImportBinding[],
+  file: string
+): BehaviorContract[] {
+  const receivers = pythonFastapiReceivers(root, imports);
+  if (receivers.size === 0) return [];
+  const directHandlers = pythonDirectModuleHandlers(root);
+  const includes = pythonRouterIncludePrefixes(root, receivers);
+  const out: BehaviorContract[] = [];
+  const add = (receiverName: string, method: string, routePath: string, registrationAt: number, handler?: string): void => {
+    const receiver = receivers.get(receiverName);
+    if (!receiver || receiver.boundAt >= registrationAt) return;
+    const includePrefixes = receiver.kind === "app" ? new Set([""]) : includes.get(receiverName);
+    const prefixes = includePrefixes && includePrefixes.size > 0 ? [...includePrefixes] : [""];
+    const status: "resolved" | "unresolved" =
+      receiver.prefixResolved && (receiver.kind === "app" || Boolean(includePrefixes?.size)) ? "resolved" : "unresolved";
+    for (const includePrefix of prefixes) {
+      const prefix = normalizePythonRoutePath(includePrefix, receiver.prefix);
+      const normalizedPrefix = prefix === "/" ? "" : prefix;
+      out.push(
+        makePythonBehaviorContract({
+          file,
+          method: method.toUpperCase(),
+          path: normalizePythonRoutePath(normalizedPrefix, routePath),
+          handler,
+          prefixStatus: status,
+          prefix: normalizedPrefix
+        })
+      );
+    }
+  };
+
+  for (const fn of root.descendantsOfType("function_definition")) {
+    if (!fn || hasPythonFunctionAncestor(fn)) continue;
+    const handler = pythonQualifiedFunctionName(fn);
+    const decorated = fn.parent?.type === "decorated_definition" ? fn.parent : null;
+    if (!handler || !directHandlers.has(handler) || !decorated || decorated.parent?.type !== "module") continue;
+    for (const decorator of namedChildren(decorated).filter((n) => n.type === "decorator")) {
+      const call = namedChildren(decorator).find((n) => n.type === "call");
+      const parts = call ? callParts(call, "python") : null;
+      const receiver = parts?.qualifier?.split(".")[0];
+      const route = call ? pythonStaticString(pythonPositionalArguments(call)[0] ?? null) : null;
+      if (!call || !parts || !receiver || route === null) continue;
+      if (FASTAPI_HTTP_METHODS.has(parts.callee)) {
+        add(receiver, parts.callee, route, call.startIndex, handler);
+      } else if (parts.callee === "api_route") {
+        const methods = pythonStaticHttpMethods(pythonKeywordArgument(call, "methods"));
+        if (!methods) continue;
+        for (const method of methods) add(receiver, method, route, call.startIndex, handler);
+      }
+    }
+  }
+
+  for (const call of root.descendantsOfType("call")) {
+    if (!call || !pythonDirectModuleExecution(call)) continue;
+    const parts = callParts(call, "python");
+    const receiver = parts?.qualifier?.split(".")[0];
+    if (!parts || parts.callee !== "add_api_route" || !receiver || !receivers.has(receiver)) continue;
+    const positional = pythonPositionalArguments(call);
+    const route = pythonStaticString(positional[0] ?? null);
+    const handler = pythonDottedName(positional[1] ?? null);
+    if (route === null || !handler || !directHandlers.has(handler)) continue;
+    const methods = pythonStaticHttpMethods(pythonKeywordArgument(call, "methods"));
+    if (!methods) continue;
+    for (const method of methods) add(receiver, method, route, call.startIndex, handler);
+  }
+  return dedupePythonContracts(out);
+}
+
+function isFastapiDependsCall(call: Node, imports: TreeSitterImportBinding[]): boolean {
+  const parts = callParts(call, "python");
+  if (!parts) return false;
+  if (!parts.qualifier) {
+    return pythonImportedFromFastapi(imports, parts.callee, "Depends") || pythonImportedFromFastapi(imports, parts.callee, "Security");
+  }
+  if (parts.callee !== "Depends" && parts.callee !== "Security") return false;
+  const root = parts.qualifier.split(".")[0] ?? "";
+  return imports.some((b) => b.local === root && b.kind === "module" && b.module === "fastapi");
+}
+
+function extractPythonDependencies(
+  root: Node,
+  imports: TreeSitterImportBinding[],
+  acceptedHandlers: Set<string>
+): TreeSitterPythonDependency[] {
+  const out: TreeSitterPythonDependency[] = [];
+  const seen = new Set<string>();
+  const receivers = pythonFastapiReceivers(root, imports);
+  const directHandlers = pythonDirectModuleHandlers(root);
+  const addFromNode = (handler: string, node: Node | null): void => {
+    if (!node) return;
+    const calls = [...(node.type === "call" ? [node] : []), ...node.descendantsOfType("call").filter((n): n is Node => Boolean(n))];
+    for (const call of calls) {
+      if (!isFastapiDependsCall(call, imports)) continue;
+      const dependency = pythonDottedName(pythonPositionalArguments(call)[0] ?? null);
+      if (!dependency) continue;
+      const key = `${handler}|${dependency}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ handler, dependency });
+    }
+  };
+  for (const fn of root.descendantsOfType("function_definition")) {
+    if (!fn || hasPythonFunctionAncestor(fn)) continue;
+    const handler = pythonQualifiedFunctionName(fn);
+    const params = fn.childForFieldName("parameters");
+    const declaration = fn.parent?.type === "decorated_definition" ? fn.parent : fn;
+    if (!handler || !params || !directHandlers.has(handler) || declaration.parent?.type !== "module" || !acceptedHandlers.has(handler)) continue;
+    addFromNode(handler, params);
+    const decorated = fn.parent?.type === "decorated_definition" ? fn.parent : null;
+    for (const decorator of decorated ? namedChildren(decorated).filter((n) => n.type === "decorator") : []) {
+      const routeCall = namedChildren(decorator).find((n) => n.type === "call");
+      const parts = routeCall ? callParts(routeCall, "python") : null;
+      const receiver = parts?.qualifier?.split(".")[0];
+      if (!routeCall || !parts || !receiver || !receivers.has(receiver) || receivers.get(receiver)!.boundAt >= routeCall.startIndex) continue;
+      if (!FASTAPI_HTTP_METHODS.has(parts.callee) && (parts.callee !== "api_route" || !pythonStaticHttpMethods(pythonKeywordArgument(routeCall, "methods")))) continue;
+      addFromNode(handler, pythonKeywordArgument(routeCall, "dependencies"));
+    }
+  }
+  for (const call of root.descendantsOfType("call")) {
+    if (!call || !pythonDirectModuleExecution(call)) continue;
+    const parts = callParts(call, "python");
+    const receiver = parts?.qualifier?.split(".")[0];
+    if (!parts || parts.callee !== "add_api_route" || !receiver || !receivers.has(receiver) || receivers.get(receiver)!.boundAt >= call.startIndex) continue;
+    const positional = pythonPositionalArguments(call);
+    const route = pythonStaticString(positional[0] ?? null);
+    const handler = pythonDottedName(positional[1] ?? null);
+    const methods = pythonStaticHttpMethods(pythonKeywordArgument(call, "methods"));
+    if (route !== null && handler && methods && directHandlers.has(handler) && acceptedHandlers.has(handler)) {
+      addFromNode(handler, pythonKeywordArgument(call, "dependencies"));
+    }
+  }
+  return out;
+}
+
 function directPythonAssertCall(assertion: Node): { callee: string; qualifier?: string; via: "free" | "qualified" } | null {
   const subject = namedChildren(assertion)[0];
   if (!subject) return null;
@@ -1491,7 +1899,7 @@ function extractPythonProofCalls(root: Node): TreeSitterPythonProofCall[] {
   return out;
 }
 
-export function extractTreeSitterStructure(content: string, language: string): TreeSitterStructure {
+export function extractTreeSitterStructure(content: string, language: string, relPath = ""): TreeSitterStructure {
   const parser = parserFor(language);
   if (!parser) return { imports: [], calls: [] };
   const tree = parser.parse(content);
@@ -1528,6 +1936,9 @@ export function extractTreeSitterStructure(content: string, language: string): T
             if (rv) callerReceivers.set(name, { receiverVar: rv, receiverType: recv });
           }
         }
+        if (name && language === "python" && node.type === "function_definition") {
+          name = pythonQualifiedFunctionName(node) ?? name;
+        }
         if (name) {
           nextCaller = name;
           nextShadowed = localBindings(node, language);
@@ -1543,6 +1954,10 @@ export function extractTreeSitterStructure(content: string, language: string): T
   };
   visit(root, null, new Set(), false);
   const imports = extractImports(root, language);
+  const pythonBehaviorContracts = language === "python" ? extractPythonBehaviorContracts(root, imports, relPath) : undefined;
+  const pythonDependencies = language === "python"
+    ? extractPythonDependencies(root, imports, new Set((pythonBehaviorContracts ?? []).map((contract) => contract.handler).filter((handler): handler is string => Boolean(handler))))
+    : undefined;
   const result = {
     ...(language === "java" ? { packageName: javaPackage(root), javaClasses: javaClassInfos(root), javaProofCalls: extractJavaProofCalls(root, imports) } : {}),
     ...(language === "go" ? { packageName: goPackage(root), goCtorResults: extractGoCtorResults(root) } : {}),
@@ -1552,7 +1967,7 @@ export function extractTreeSitterStructure(content: string, language: string): T
     imports,
     calls,
     ...(language === "go" ? { goProofCalls: extractGoProofCalls(root, imports) } : {}),
-    ...(language === "python" ? { pythonProofCalls: extractPythonProofCalls(root) } : {})
+    ...(language === "python" ? { pythonProofCalls: extractPythonProofCalls(root), pythonBehaviorContracts, pythonDependencies } : {})
   };
   tree.delete();
   return result;

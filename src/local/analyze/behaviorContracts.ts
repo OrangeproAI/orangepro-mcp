@@ -1,7 +1,7 @@
 import { slugify } from "../util/ids.js";
 
 export type BehaviorContractKind = "http_endpoint" | "graphql_operation" | "queue_processor" | "scheduled_task" | "event_consumer";
-export type BehaviorContractFramework = "nestjs" | "express" | "fastify" | "file_route";
+export type BehaviorContractFramework = "express" | "fastify" | "nestjs" | "file_route" | "fastapi";
 
 export interface BehaviorContract {
   id: string;
@@ -13,6 +13,10 @@ export interface BehaviorContract {
   file: string;
   handler?: string;
   controller?: string;
+  /** Python/FastAPI only: whether every statically visible router prefix was composed. */
+  route_prefix_status?: "resolved" | "unresolved";
+  /** Python/FastAPI only: the statically composed local prefix, when present. */
+  route_prefix?: string;
   source: "framework";
 }
 

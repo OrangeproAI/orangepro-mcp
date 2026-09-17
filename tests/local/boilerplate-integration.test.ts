@@ -86,9 +86,9 @@ describe("boilerplate exclusion is wired into analyze, disclosed via counter", (
     opInit(root, DEPS);
     opAnalyze(root, { source: root }, DEPS);
 
-    expect(symbol(root, "__repr__")!.denominator_eligible).toBe(false);
-    expect(symbol(root, "get_user")!.denominator_eligible).toBe(true);
-    expect(symbol(root, "__init__")!.denominator_eligible).toBe(true);
+    expect(symbol(root, "Service.__repr__")!.denominator_eligible).toBe(false);
+    expect(symbol(root, "Service.get_user")!.denominator_eligible).toBe(true);
+    expect(symbol(root, "Service.__init__")!.denominator_eligible).toBe(true);
     expect(analysis(root)?.excluded_boilerplate).toBe(1); // __repr__ only
   });
 

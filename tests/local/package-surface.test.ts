@@ -64,7 +64,14 @@ function packedFiles(): string[] {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024
   });
-  return JSON.parse(out)[0].files.map((f: { path: string }) => f.path);
+  const parsed = JSON.parse(out);
+  const record = Array.isArray(parsed)
+    ? parsed[0]
+    : Array.isArray(parsed?.files)
+      ? parsed
+      : Object.values(parsed as Record<string, unknown>).find((value) => Array.isArray((value as { files?: unknown[] })?.files));
+  if (!record || !Array.isArray(record.files)) throw new Error("npm pack --dry-run --json returned no file list");
+  return record.files.map((f: { path: string }) => f.path);
 }
 
 describe("public package surface is local-only", () => {
@@ -77,6 +84,18 @@ describe("public package surface is local-only", () => {
     expect(Object.keys(pkg.bin).sort()).toEqual(["opro", "orangepro-local"]);
     expect(pkg.bin["opro"]).toBe("dist/local/cli.js");
     expect(pkg.bin["orangepro-local"]).toBe("dist/local/cli.js");
+  });
+
+  it("prepublish cannot bypass typecheck", () => {
+    expect(pkg.scripts.prepublishOnly).toContain("npm run typecheck");
+    expect(pkg.scripts.prepublishOnly).toContain("npm run build");
+    expect(pkg.scripts.prepublishOnly).toContain("npm test");
+  });
+
+  it("release helper aligns the lockfile without changing dependency resolution", () => {
+    const release = readFileSync(resolve(ROOT, "scripts/release.mjs"), "utf8");
+    expect(release).toContain('updateJson("package-lock.json"');
+    expect(release).not.toMatch(/npm\s+install/);
   });
 
   it("npm pack ships no hosted dist / src / tests / scripts / .env files", () => {

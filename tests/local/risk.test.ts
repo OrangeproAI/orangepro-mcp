@@ -437,16 +437,17 @@ describe("rankRiskGaps — irreversibility floor, scheduled silence, ranking hyg
     expect(a.impact).toBe(b.impact);
   });
 
-  it("NEGATIVE: a destructive sink behind a PROVEN scheduled entry gets no silence multiplier", () => {
+  it("NEGATIVE: a destructive sink behind an Associated scheduled entry gets no silence multiplier when Associated rows are requested", () => {
     const g = graph();
     const run = symbol("sym:service/worker/scanner/task.go#task.Run", "task.Run", "service/worker/scanner/task.go");
     const hf = withExt(symbol("sym:service/worker/scanner/task.go#task.handleFailures", "task.handleFailures", "service/worker/scanner/task.go"), ["t.store.DeleteRow"]);
     g.nodes = [run, hf, testCase("test:scanner_test.go")];
     g.edges = [edge(run.external_id, hf.external_id, "CALLS"), edge(run.external_id, "test:scanner_test.go", "TESTED_BY")];
-    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
-    const r = ranked.find((x) => x.id === run.external_id);
-    // statically linked → detection 5, never 5 × 1.25
-    expect(r === undefined || (r.detection_difficulty ?? 0) <= 5).toBe(true);
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "", includeAssociated: true });
+    const r = ranked.find((x) => x.id === run.external_id)!;
+    // Static invocation-backed association is D5, never Proven and never 5 × 1.25.
+    expect(r.detection_tier).toBe("associated");
+    expect(r.detection_difficulty).toBe(5);
   });
 
   it("HYGIENE: test-support paths, declaration one-liners, and trivial accessors never take a risk slot", () => {
@@ -484,6 +485,33 @@ describe("rankRiskGaps — irreversibility floor, scheduled silence, ranking hyg
     const ids = rankRiskGaps(g, { limit: 10, repoRoot: "" }).map((row) => row.id);
     expect(ids).not.toContain(helper.external_id);
     expect(ids).toContain(product.external_id);
+  });
+
+  it("HYGIENE: Python class suppression is post-normalization and does not rescale peer methods", () => {
+    const base = graph();
+    const container = {
+      ...symbol("sym:src/api/service.py#AccountService", "AccountService", "src/api/service.py"),
+      properties: { file: "src/api/service.py", symbol_kind: "class", start_line: 1, end_line: 20 }
+    };
+    const method = {
+      ...symbol("sym:src/api/service.py#AccountService.run", "AccountService.run", "src/api/service.py"),
+      properties: { file: "src/api/service.py", symbol_kind: "method", member_of: "AccountService", start_line: 2, end_line: 10 }
+    };
+    const peer = symbol("sym:src/api/other.py#execute", "execute", "src/api/other.py");
+    base.nodes = [container, method, peer];
+    const suppressed = structuredClone(base);
+    suppressed.nodes[0]!.properties.ranking_exclusion_reason = "python_structural_container";
+
+    const before = rankRiskGaps(base, { limit: 10, repoRoot: "" });
+    const after = rankRiskGaps(suppressed, { limit: 10, repoRoot: "" });
+    expect(before.map((r) => r.id)).toContain(container.external_id);
+    expect(after.map((r) => r.id)).not.toContain(container.external_id);
+    for (const id of [method.external_id, peer.external_id]) {
+      const a = before.find((r) => r.id === id)!;
+      const b = after.find((r) => r.id === id)!;
+      expect({ probability: b.probability, impact: b.impact, detection: b.detection_difficulty, score: b.risk_score })
+        .toEqual({ probability: a.probability, impact: a.impact, detection: a.detection_difficulty, score: a.risk_score });
+    }
   });
 });
 

@@ -40,7 +40,7 @@ describe("artifact identity", () => {
   it("changes only the expected downstream identities for analyzer, config and oracle inputs", () => {
     const g = graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } });
     const base = buildArtifactIdentity(g, inputs);
-    const analyzer = buildArtifactIdentity(g, { ...inputs, analyzerVersion: "orangepro.analyzer.v2" });
+    const analyzer = buildArtifactIdentity(g, { ...inputs, analyzerVersion: "orangepro.analyzer.test-different" });
     const config = buildArtifactIdentity(g, { ...inputs, configHash: "config-b" });
     const oracle = buildArtifactIdentity(g, { ...inputs, oracleVersion: "oracle-v2" });
     expect(analyzer.repository_snapshot).toBe(base.repository_snapshot);

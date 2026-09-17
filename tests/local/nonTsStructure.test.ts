@@ -113,7 +113,8 @@ describe("non-TS structural imports/calls", () => {
       ].join("\n")
     });
     expect(edgeStrings(root, "IMPORTS")).toContain("src/app/view.py -> src/app/db.py");
-    expect(edgeStrings(root, "CALLS")).toEqual([]);
+    expect(edgeStrings(root, "CALLS")).toContain("sym:src/app/view.py#show -> sym:src/app/view.py#connect");
+    expect(edgeStrings(root, "CALLS")).not.toContain("sym:src/app/view.py#show -> sym:src/app/db.py#connect");
   });
 
   it("Python: loop, except, and lambda bindings shadow named imports", () => {

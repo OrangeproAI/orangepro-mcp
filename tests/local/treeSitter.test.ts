@@ -48,7 +48,8 @@ describe("tree-sitter extraction (PR-1, language-agnostic)", () => {
     const got = names(py, "python");
     expect(got).toContain("top_level/function");
     expect(got).toContain("Service/class");
-    expect(got).toContain("do_work/function"); // a method is a function_definition; still a behavior
+    expect(got).toContain("Service.do_work/method");
+    expect(got).not.toContain("do_work/function");
   });
 
   it("Go: functions AND receiver methods (regex only caught top-level funcs)", () => {
