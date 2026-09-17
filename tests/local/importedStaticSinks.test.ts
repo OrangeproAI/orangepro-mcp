@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { analyzeRepo } from "../../src/local/analyze/analyzer.js";
 import { makeProofEdges, makeTestCaseNode } from "../../src/local/graph/factories.js";
+import { LOCAL_GRAPH_SCHEMA_VERSION, type LocalGraph } from "../../src/local/graph/ontology.js";
 import { loadLedger } from "../../src/local/ledger.js";
 import { rankRiskGaps } from "../../src/local/score/risk.js";
 import { buildBehaviorReportData } from "../../src/local/viz/behaviorReportData.js";
@@ -26,6 +27,24 @@ function repo(files: Record<string, string>): string {
   return root;
 }
 
+function toGraph(fragment: ReturnType<typeof analyzeRepo>, root: string): LocalGraph {
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  return {
+    schema_version: LOCAL_GRAPH_SCHEMA_VERSION,
+    workspace: { name: "sink-fixture", root, root_hash: "fixture-root", source_upload_policy: "metadata_only" },
+    created_at: timestamp,
+    updated_at: timestamp,
+    sources: fragment.sources,
+    nodes: fragment.nodes,
+    edges: fragment.edges,
+    candidate_edges: fragment.candidate_edges,
+    generation_runs: [],
+    generated_tests: [],
+    manifest: { generated_at: timestamp, git: null, files: fragment.file_entries },
+    analysis: fragment.analysis
+  };
+}
+
 describe("imported static sink retention", () => {
   it("retains named external static delete and replace calls for risk scoring without emitting CALLS evidence", () => {
     const root = repo({
@@ -35,7 +54,7 @@ describe("imported static sink retention", () => {
         "export async function replaceAssets() { await ApiCatalog.replaceAssets([]); }"
       ].join("\n")
     });
-    const graph = analyzeRepo(root, { readContent: true });
+    const graph = toGraph(analyzeRepo(root, { readContent: true }), root);
     const deleteNode = graph.nodes.find((n) => n.external_id === "sym:src/commands/cmd.ts#deleteServer")!;
     const replaceNode = graph.nodes.find((n) => n.external_id === "sym:src/commands/cmd.ts#replaceAssets")!;
 
@@ -87,14 +106,7 @@ describe("imported static sink retention", () => {
         "export async function deleteServer() { await ApiCatalog.deleteServer('x'); }"
       ].join("\n")
     });
-    const graph = analyzeRepo(root, { readContent: true });
-    graph.workspace = {
-      name: "sink-fixture",
-      root,
-      root_hash: "fixture-root",
-      source_upload_policy: "metadata_only"
-    };
-    Object.assign(graph, { manifest: { generated_at: "", git: null, files: graph.file_entries } });
+    const graph = toGraph(analyzeRepo(root, { readContent: true }), root);
     const symbol = graph.nodes.find((n) => n.external_id === "sym:src/commands/cmd.ts#deleteServer")!;
     graph.nodes.push(makeTestCaseNode({
       testRel: "test/cmd.test.ts",
