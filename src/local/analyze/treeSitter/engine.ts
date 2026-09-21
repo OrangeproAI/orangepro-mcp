@@ -74,6 +74,12 @@ export interface TreeSitterPythonProofCall extends TreeSitterRawCall {
   /** Pytest nodeid suffix: `test_name` or `TestClass::test_name`. Structural metadata only. */
   testName: string;
   assertion: "pytest_assert";
+  /**
+   * For an invocation through one local instance (`obj = Cls(); obj.method()`),
+   * the imported production class that uniquely owns the receiver. This remains
+   * static association metadata; it never promotes a behavior to Proven.
+   */
+  instanceClass?: string;
 }
 
 export interface TreeSitterPythonDependency {
@@ -1855,21 +1861,198 @@ function singlePythonComparisonCall(comparison: Node): Node | null {
   return calls.length === 1 ? calls[0] ?? null : null;
 }
 
+function pythonDirectAssignment(stmt: Node): { target: Node; value: Node } | null {
+  const assignment = stmt.type === "assignment" || stmt.type === "annotated_assignment"
+    ? stmt
+    : namedChildren(stmt).find((child) => child.type === "assignment" || child.type === "annotated_assignment");
+  if (!assignment) return null;
+  const target = assignment.childForFieldName("left");
+  const value = assignment.childForFieldName("right");
+  return target && value ? { target, value } : null;
+}
+
+function pythonSingleCall(node: Node): Node | null {
+  const calls = [...(node.type === "call" ? [node] : []), ...node.descendantsOfType("call").filter((call): call is Node => Boolean(call))];
+  const unique = [...new Map(calls.map((call) => [`${call.startIndex}:${call.endIndex}`, call])).values()];
+  return unique.length === 1 ? unique[0] ?? null : null;
+}
+
+function pythonExactCall(node: Node | null): Node | null {
+  if (!node) return null;
+  if (node.type === "call") return node;
+  if (node.type === "await" || node.type === "parenthesized_expression") {
+    const children = namedChildren(node);
+    return children.length === 1 ? pythonExactCall(children[0] ?? null) : null;
+  }
+  return null;
+}
+
+function pythonDirectAssertedResult(assertion: Node, results: ReadonlyMap<string, unknown>): string | null {
+  const subject = namedChildren(assertion)[0];
+  if (subject?.type !== "comparison_operator") return null;
+  const operands = namedChildren(subject);
+  if (operands.length !== 2) return null;
+  const candidates = operands.filter((operand) => operand.type === "identifier" && results.has(operand.text));
+  if (candidates.length !== 1) return null;
+  const name = candidates[0]!.text;
+  const occurrences = subject.descendantsOfType("identifier")
+    .filter((identifier): identifier is Node => Boolean(identifier))
+    .filter((identifier) => identifier.text === name);
+  return occurrences.length === 1 ? name : null;
+}
+
+function pythonLexicalNodes(root: Node): Node[] {
+  const out: Node[] = [];
+  const visit = (node: Node): void => {
+    for (const child of namedChildren(node)) {
+      if (child.type === "function_definition" || child.type === "class_definition" || child.type === "lambda") continue;
+      out.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+function pythonBindingNames(node: Node): string[] {
+  if (node.type === "assignment" || node.type === "annotated_assignment" || node.type === "augmented_assignment" || node.type === "named_expression") {
+    const target = node.childForFieldName("left") ?? node.childForFieldName("name");
+    if (target?.type === "attribute") {
+      const dotted = pythonDottedName(target);
+      return dotted ? [dotted.split(".")[0] ?? dotted] : [];
+    }
+    return target ? pythonBindingTargetNames(target) : [];
+  }
+  if (node.type === "for_statement") {
+    const target = node.childForFieldName("left");
+    return target ? pythonBindingTargetNames(target) : [];
+  }
+  if (node.type === "delete_statement") {
+    return namedChildren(node).flatMap((target) => {
+      if (target.type === "attribute") {
+        const dotted = pythonDottedName(target);
+        return dotted ? [dotted.split(".")[0] ?? dotted] : [];
+      }
+      return pythonBindingTargetNames(target);
+    });
+  }
+  return [];
+}
+
+function pythonAssignedInstanceProofCalls(block: Node): Array<{
+  assertion: Node;
+  call: { callee: string; qualifier?: string; via: "free" | "qualified" };
+  instanceClass: string;
+}> {
+  const testFunction = block.parent;
+  const decorated = testFunction?.parent?.type === "decorated_definition" ? testFunction.parent : testFunction;
+  const parameterNames = testFunction?.childForFieldName("parameters")?.descendantsOfType("identifier").map((node) => node?.text).filter(Boolean) ?? [];
+  if (parameterNames.some((name) => name !== "self" && name !== "cls")) return [];
+  if (/\b(?:monkeypatch|mocker|patch|Mock|MagicMock|AsyncMock|create_autospec)\b/.test(decorated?.text ?? "")) return [];
+
+  const lexicalNodes = pythonLexicalNodes(block);
+  const assignments = lexicalNodes.filter((node) => node.type === "assignment" || node.type === "annotated_assignment");
+  const assertions = lexicalNodes.filter((node) => node.type === "assert_statement");
+  if (assertions.length !== 1) return [];
+  const mutationCounts = new Map<string, number>();
+  for (const node of lexicalNodes) {
+    for (const name of pythonBindingNames(node)) mutationCounts.set(name, (mutationCounts.get(name) ?? 0) + 1);
+  }
+
+  const instances = new Map<string, { className: string; assignedAt: number }>();
+  const orderedAssignments = assignments.map(pythonDirectAssignment).filter((assignment): assignment is { target: Node; value: Node } => Boolean(assignment));
+  for (const { target, value } of orderedAssignments) {
+    if (target.type !== "identifier" || mutationCounts.get(target.text) !== 1) continue;
+    const constructor = pythonSingleCall(value);
+    const parts = constructor ? callParts(constructor, "python") : null;
+    if (!parts || parts.qualifier || !/^[A-Za-z_]\w*$/.test(parts.callee)) continue;
+    if ((mutationCounts.get(parts.callee) ?? 0) > 0) continue;
+    instances.set(target.text, { className: parts.callee, assignedAt: target.startIndex });
+  }
+
+  for (const { target, value } of orderedAssignments) {
+    if (target.type === "identifier" && value.type === "identifier" && instances.has(value.text)) return [];
+  }
+
+  const trackedNames = new Set([
+    ...instances.keys(),
+    ...[...instances.values()].map((instance) => instance.className)
+  ]);
+  for (const callNode of lexicalNodes.filter((node) => node.type === "call")) {
+    const call = callParts(callNode, "python");
+    const receiver = call?.qualifier?.split(".")[0] ?? "";
+    if (instances.has(receiver)) continue;
+    const args = callNode.childForFieldName("arguments");
+    const argumentNames = args
+      ? [
+          ...(args.type === "identifier" ? [args] : []),
+          ...args.descendantsOfType("identifier").filter((identifier): identifier is Node => Boolean(identifier))
+        ].map((identifier) => identifier.text)
+      : [];
+    if (argumentNames.some((name) => trackedNames.has(name))) return [];
+  }
+
+  const results = new Map<string, { call: { callee: string; qualifier?: string; via: "free" | "qualified" }; instanceClass: string }>();
+  const instanceCalls = lexicalNodes.filter((node) => node.type === "call").filter((callNode) => {
+    const call = callParts(callNode, "python");
+    const receiver = call?.qualifier?.split(".")[0] ?? "";
+    return instances.has(receiver);
+  });
+  if (instanceCalls.length !== 1) return [];
+  for (const { target, value } of orderedAssignments) {
+    if (target.type !== "identifier" || mutationCounts.get(target.text) !== 1) continue;
+    const callNode = pythonExactCall(value);
+    const call = callNode ? callParts(callNode, "python") : null;
+    const receiver = call?.qualifier?.split(".")[0] ?? "";
+    const instance = instances.get(receiver);
+    if (call && instance && instance.assignedAt < value.startIndex) {
+      results.set(target.text, { call, instanceClass: instance.className });
+    }
+  }
+
+  const out: Array<{
+    assertion: Node;
+    call: { callee: string; qualifier?: string; via: "free" | "qualified" };
+    instanceClass: string;
+  }> = [];
+  for (const stmt of assertions) {
+    const direct = directPythonAssertCall(stmt);
+    const directReceiver = direct?.qualifier?.split(".")[0] ?? "";
+    const directInstance = instances.get(directReceiver);
+    if (direct && directInstance && directInstance.assignedAt < stmt.startIndex) {
+      out.push({ assertion: stmt, call: direct, instanceClass: directInstance.className });
+    }
+    const subject = namedChildren(stmt)[0];
+    const assertionCalls = subject
+      ? [...(subject.type === "call" ? [subject] : []), ...subject.descendantsOfType("call").filter((call): call is Node => Boolean(call))]
+      : [];
+    if (assertionCalls.length > 0) continue;
+    const observed = pythonDirectAssertedResult(stmt, results);
+    const result = observed ? results.get(observed) : undefined;
+    if (result) out.push({ assertion: stmt, ...result });
+  }
+  return out;
+}
+
 function extractPythonProofCalls(root: Node): TreeSitterPythonProofCall[] {
   const out: TreeSitterPythonProofCall[] = [];
   const seen = new Set<string>();
   const add = (
     testName: string,
     shadowed: Set<string>,
-    call: { callee: string; qualifier?: string; via: "free" | "qualified" } | null
+    call: { callee: string; qualifier?: string; via: "free" | "qualified" } | null,
+    instanceClass?: string
   ): void => {
     if (!call) return;
-    const key = `${testName}|${call.qualifier ?? ""}|${call.callee}`;
+    const key = `${testName}|${instanceClass ?? ""}|${call.qualifier ?? ""}|${call.callee}`;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ caller: testName, testName, ...call, shadowed: [...shadowed], assertion: "pytest_assert" });
+    out.push({ caller: testName, testName, ...call, shadowed: [...shadowed], assertion: "pytest_assert", ...(instanceClass ? { instanceClass } : {}) });
   };
   const processBlock = (block: Node, testName: string, shadowed: Set<string>): void => {
+    for (const associated of pythonAssignedInstanceProofCalls(block)) {
+      add(testName, shadowed, associated.call, associated.instanceClass);
+    }
     for (const stmt of blockStatements(block)) {
       if (stmt.type === "assert_statement") add(testName, shadowed, directPythonAssertCall(stmt));
       if (stmt.type === "function_definition" || stmt.type === "class_definition" || stmt.type === "lambda") continue;

@@ -3,7 +3,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { autoProve, containedGeneratedPath, existingAssociatedTests, isEligibleProvableTarget, isRoastSurvivor, orderExistingAttempts, NO_KEY_MESSAGE, AutoProveDeps } from "../../src/local/autoProve.js";
+import {
+  autoProve,
+  containedGeneratedPath,
+  existingAssociatedTests,
+  isEligibleProvableTarget,
+  isRoastSurvivor,
+  orderExistingAttempts,
+  orderRankedProofCandidates,
+  proofLanguageOrder,
+  proofRunnerRoot,
+  NO_KEY_MESSAGE,
+  AutoProveDeps
+} from "../../src/local/autoProve.js";
 import type { AutoProveAttempt } from "../../src/local/autoProve.js";
 import { loadLedger } from "../../src/local/ledger.js";
 import { opAnalyze, opDynamicProof, opInit, opProveLoop, opRtm, opStart } from "../../src/local/operations.js";
@@ -829,6 +841,86 @@ describe("autoProve — Fix 3: rank hard edges first + cap weak fan-out", () => 
   });
 });
 
+describe("autoProve — project-aware proof scheduling", () => {
+  function schedNode(id: string, file: string): GraphNode {
+    return {
+      kind: "CodeSymbol",
+      external_id: id,
+      title: id.split("#")[1] ?? id,
+      denominator_eligible: true,
+      properties: { file, symbol_kind: file.endsWith(".go") ? "function" : "function", behavior_surface: "entrypoint_adjacent" }
+    } as unknown as GraphNode;
+  }
+
+  it("keeps hard before weak, then gives the dominant language first while preserving in-group order", () => {
+    const root = mkdtempSync(join(tmpdir(), "autoprove-schedule-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "python"), { recursive: true });
+    mkdirSync(join(root, "nested/go"), { recursive: true });
+    mkdirSync(join(root, "nested/rust/src"), { recursive: true });
+    writeFileSync(join(root, "pyproject.toml"), "[project]\nname='fixture'\nversion='0.0.0'\n");
+    writeFileSync(join(root, "nested/go/go.mod"), "module example.test/nested\n\ngo 1.22\n");
+    writeFileSync(join(root, "nested/rust/Cargo.toml"), "[package]\nname='fixture-rs'\nversion='0.0.0'\n");
+
+    const go = schedNode("sym:nested/go/main.go#Run", "nested/go/main.go");
+    const pyA = schedNode("sym:python/a.py#alpha", "python/a.py");
+    const pyB = schedNode("sym:python/b.py#beta", "python/b.py");
+    const graph = { nodes: [go, pyA, pyB], edges: [], candidate_edges: [] } as unknown as LocalGraph;
+    const nodeById = new Map(graph.nodes.map((node) => [node.external_id, node]));
+    const map = new Map<string, { test: string; hard: boolean }[]>([
+      [go.external_id, [{ test: "nested/go/main_test.go", hard: true }]],
+      [pyA.external_id, [{ test: "python/test_a.py", hard: true }]],
+      [pyB.external_id, [{ test: "python/test_b.py", hard: false }]]
+    ]);
+
+    expect(proofLanguageOrder(graph)).toEqual(["python", "go"]);
+    expect(proofRunnerRoot(root, go.properties.file as string, "nested/go/main_test.go")).toBe("nested/go");
+    expect(proofRunnerRoot(root, "nested/rust/src/lib.rs")).toBe("nested/rust");
+    expect(proofRunnerRoot(root, pyA.properties.file as string, "python/test_a.py")).toBe(".");
+    expect(proofRunnerRoot(root, "../outside/main.go", "../outside/main_test.go")).toBe(".");
+    expect(orderExistingAttempts(map, 3, { graph, nodeById, sourceRoot: root }).map((item) => item.symId)).toEqual([
+      pyA.external_id,
+      go.external_id,
+      pyB.external_id
+    ]);
+    expect(orderRankedProofCandidates([
+      { id: go.external_id, file: "nested/go/main.go" },
+      { id: pyB.external_id, file: "python/b.py" },
+      { id: pyA.external_id, file: "python/a.py" }
+    ], graph, root).map((item) => item.id)).toEqual([pyB.external_id, pyA.external_id, go.external_id]);
+  });
+
+  it("preserves the legacy order exactly for a monolingual candidate set", () => {
+    const pyA = schedNode("sym:a.py#alpha", "a.py");
+    const pyB = schedNode("sym:b.py#beta", "b.py");
+    const graph = { nodes: [pyA, pyB], edges: [], candidate_edges: [] } as unknown as LocalGraph;
+    const original = [
+      { id: pyB.external_id, file: "b.py" },
+      { id: pyA.external_id, file: "a.py" }
+    ];
+    expect(orderRankedProofCandidates(original, graph, "/tmp/fixture")).toEqual(original);
+  });
+
+  it("falls back to the analyzed root when a Python test is outside the target's nested project", () => {
+    const root = mkdtempSync(join(tmpdir(), "autoprove-python-root-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "apps/api"), { recursive: true });
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(join(root, "apps/api/pyproject.toml"), "[project]\nname='api'\nversion='0.0.0'\n");
+    expect(proofRunnerRoot(root, "apps/api/service.py", "tests/test_service.py")).toBe(".");
+  });
+
+  it("uses nested pytest and tox configuration as Python runner-root boundaries", () => {
+    for (const marker of ["pytest.ini", ".pytest.ini", "tox.ini"]) {
+      const root = mkdtempSync(join(tmpdir(), "autoprove-pytest-root-"));
+      tempDirs.push(root);
+      mkdirSync(join(root, "apps/api/tests"), { recursive: true });
+      writeFileSync(join(root, `apps/api/${marker}`), "[pytest]\n");
+      expect(proofRunnerRoot(root, "apps/api/service.py", "apps/api/tests/test_service.py")).toBe("apps/api");
+    }
+  });
+});
+
 // ── R-1: baseline classification + sibling dedup (loop-level, no proof-semantics change) ──
 /** A synthetic proveLoop result: baseline RED with a given (already-redacted) failure line. */
 function baselineRed(failureSummary: string): ProveLoopResult {
@@ -839,11 +931,7 @@ function baselineRed(failureSummary: string): ProveLoopResult {
   } as unknown as ProveLoopResult;
 }
 
-/**
- * Same-file siblings (createOrder + createInvoice) whose package declares an impossible
- * engines.node, so ANY runner Node is out of range → a genuine package-level engine_mismatch
- * (the sole IMPORT_TIME_CATEGORY that dedups same-file siblings).
- */
+/** Two files in one broken root plus a healthy nested package, all with hard test links. */
 function makeWorkspaceEngineMismatch(): string {
   const dir = mkdtempSync(join(tmpdir(), "autoprove-engine-"));
   tempDirs.push(dir);
@@ -853,11 +941,18 @@ function makeWorkspaceEngineMismatch(): string {
     "utf8"
   );
   writeFileSync(
-    join(dir, "orderService.ts"),
+    join(dir, "a-orderService.ts"),
     [
       "export function createOrder(id: string): string {",
       "  return `order-${id}`;",
       "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  writeFileSync(
+    join(dir, "b-invoiceService.ts"),
+    [
       "export function createInvoice(id: string): string {",
       "  return `invoice-${id}`;",
       "}",
@@ -866,14 +961,42 @@ function makeWorkspaceEngineMismatch(): string {
     "utf8"
   );
   writeFileSync(
-    join(dir, "orderService.test.ts"),
+    join(dir, "a-orderService.test.ts"),
     [
       "import { describe, expect, it } from 'vitest';",
-      "import { createInvoice, createOrder } from './orderService';",
-      "describe('orderService', () => {",
+      "import { createOrder } from './a-orderService';",
+      "describe('order', () => {",
       "  it('creates an order id', () => { expect(createOrder('42')).toBe('order-42'); });",
+      "});",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  writeFileSync(
+    join(dir, "b-invoiceService.test.ts"),
+    [
+      "import { describe, expect, it } from 'vitest';",
+      "import { createInvoice } from './b-invoiceService';",
+      "describe('invoice', () => {",
       "  it('creates an invoice id', () => { expect(createInvoice('7')).toBe('invoice-7'); });",
       "});",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  mkdirSync(join(dir, "nested"), { recursive: true });
+  writeFileSync(
+    join(dir, "nested/package.json"),
+    JSON.stringify({ name: "healthy-child", version: "1.0.0", type: "module", engines: { node: ">=20" } }, null, 2),
+    "utf8"
+  );
+  writeFileSync(join(dir, "nested/c-service.ts"), "export function createChild(): string { return 'child'; }\n", "utf8");
+  writeFileSync(
+    join(dir, "nested/c-service.test.ts"),
+    [
+      "import { expect, it } from 'vitest';",
+      "import { createChild } from './c-service';",
+      "it('creates child', () => { expect(createChild()).toBe('child'); });",
       ""
     ].join("\n"),
     "utf8"
@@ -893,22 +1016,22 @@ function provenLoop(): ProveLoopResult {
 }
 
 describe("autoProve — R-1 sibling dedup + accurate classification", () => {
-  it("K same-file siblings sharing one engine_mismatch root cause → 1 attempt, K-1 deduped (budget preserved)", async () => {
-    const W = makeWorkspaceEngineMismatch(); // createOrder + createInvoice share orderService.ts; engines.node >=999
-    // A NON-assertion baseline-red: the runner Node is out of the declared engines range → engine_mismatch,
-    // a package-level fact shared by every sibling in the file (safe to dedup).
-    const proveLoop = vi.fn(() => baselineRed("SyntaxError: Unexpected reserved word"));
+  it("a project-wide engine mismatch skips only that runner root and preserves budget for a healthy nested package", async () => {
+    const W = makeWorkspaceEngineMismatch();
+    let call = 0;
+    const proveLoop = vi.fn(() => (++call === 1 ? baselineRed("SyntaxError: Unexpected reserved word") : provenLoop()));
     const res = await autoProve(W, {}, baseDeps(NO_ENV, { proveLoop }));
 
-    expect(proveLoop).toHaveBeenCalledTimes(1); // second sibling deduped WITHOUT re-running
-    expect(res.attempted).toBe(1); // dedup did not consume the attempt budget
-    expect(res.proven).toBe(0);
-    expect(res.needs_setup.length).toBe(2); // one real + one deduped, both needs_setup
+    expect(proveLoop).toHaveBeenCalledTimes(2); // broken root once, healthy nested root once
+    expect(res.attempted).toBe(2); // quarantined sibling did not consume the attempt budget
+    expect(res.proven).toBe(1);
+    expect(res.needs_setup.length).toBe(2); // one real failure + one quarantined sibling
     const deduped = res.needs_setup.filter((a) => a.deduped === true);
     expect(deduped.length).toBe(1);
     expect(deduped[0].category).toBe("engine_mismatch");
-    // Every needs_setup here is the package-level engine_mismatch root cause (no generic DB label).
+    expect(deduped[0]).toMatchObject({ project_root: ".", blocked_by: expect.stringContaining("#create") });
     expect(res.needs_setup.every((a) => a.category === "engine_mismatch")).toBe(true);
+    // The mocked loop does not write a real certificate; scheduling alone never mints Proven.
     expect(opRtm(W, { format: "json" }).summary.proven).toBe(0);
   });
 

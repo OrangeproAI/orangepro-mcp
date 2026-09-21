@@ -1968,10 +1968,45 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const targetRel = resolvePythonImport(testRel, binding.module) ?? undefined;
       return { targetRel, imported: binding.imported, kind: binding.kind };
     };
-    const resolvePythonProofTarget = (testRel: string, structure: TreeSitterStructure, qualifier: string | undefined, callee: string, shadowed: Set<string>): string | null => {
+    const resolvePythonClassTarget = (
+      testRel: string,
+      structure: TreeSitterStructure,
+      classLocal: string
+    ): { targetRel: string; className: string } | null => {
+      const binding = pythonProofImportBinding(testRel, structure, classLocal);
+      if (!binding) return null;
+      if (binding.kind !== "named" || !binding.targetRel || !binding.imported || isNonProductFile(binding.targetRel)) return null;
+      if (symbolKind(binding.targetRel, binding.imported) === "class") {
+        return { targetRel: binding.targetRel, className: binding.imported };
+      }
+      // One explicit, unique package re-export hop (`pkg.__init__: from .impl import Cls`).
+      // Ambiguity, wildcard exports, cycles, or a second hop fail closed.
+      const exportStructure = nonTsStructureByFile.get(binding.targetRel)?.structure;
+      const exports = (exportStructure?.imports ?? []).filter(
+        (candidate) => candidate.kind === "named" && candidate.local === binding.imported && candidate.imported === binding.imported
+      );
+      if (exports.length !== 1) return null;
+      const targetRel = resolvePythonImport(binding.targetRel, exports[0]!.module);
+      return targetRel && targetRel !== binding.targetRel && !isNonProductFile(targetRel) && symbolKind(targetRel, binding.imported) === "class"
+        ? { targetRel, className: binding.imported }
+        : null;
+    };
+    const resolvePythonProofTarget = (
+      testRel: string,
+      structure: TreeSitterStructure,
+      qualifier: string | undefined,
+      callee: string,
+      shadowed: Set<string>,
+      instanceClass?: string
+    ): string | null => {
       const conv = conventionSibling(testRel, "python", codeFileSet);
       const conventionTargetRel = conv?.relPath && !isNonProductFile(conv.relPath) ? conv.relPath : null;
       const hasWildcardImport = structure.imports.some((i) => i.imported === "*");
+      if (instanceClass) {
+        if (!qualifier || shadowed.has(instanceClass) || hasWildcardImport) return null;
+        const resolved = resolvePythonClassTarget(testRel, structure, instanceClass);
+        return resolved ? pythonQualifiedMemberId(resolved.targetRel, resolved.className, callee) : null;
+      }
       if (!qualifier) {
         if (shadowed.has(callee)) return null;
         const binding = pythonProofImportBinding(testRel, structure, callee);
@@ -2372,7 +2407,14 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const testExternalId = `test:${testRel}`;
       for (const proof of structure.pythonProofCalls ?? []) {
         pythonProofAttempted++;
-        const symId = resolvePythonProofTarget(testRel, structure, proof.qualifier, proof.callee, new Set(proof.shadowed));
+        const symId = resolvePythonProofTarget(
+          testRel,
+          structure,
+          proof.qualifier,
+          proof.callee,
+          new Set(proof.shadowed),
+          proof.instanceClass
+        );
         if (!symId) continue;
         const edgeKey = `${testExternalId}|${symId}`;
         if (seenPythonProof.has(edgeKey)) continue;

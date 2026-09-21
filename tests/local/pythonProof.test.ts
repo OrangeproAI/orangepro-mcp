@@ -142,6 +142,294 @@ describe("Python hard proof", () => {
     expect(hardCoverEdges(root)).toEqual(["test:src/app/test_calc.py -> sym:src/app/calc.py#Calculator.total"]);
   });
 
+  it("associates an asserted result from one uniquely assigned imported instance", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    result = calculator.total()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(root)).toEqual([
+      { from: "test:tests/test_calc.py", to: "sym:app/calc.py#Calculator.total", testName: "test_total" }
+    ]);
+  });
+
+  it("resolves a unique named-import alias back to the production class owner", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator as ImportedCalculator",
+        "",
+        "def test_total():",
+        "    calculator = ImportedCalculator()",
+        "    result = calculator.total()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:tests/test_calc.py -> sym:app/calc.py#Calculator.total"]);
+  });
+
+  it("associates an awaited instance result through one exact package re-export hop", () => {
+    const root = repo({
+      "pkg/__init__.py": "from .router import Router\n",
+      "pkg/router.py": ["class Router:", "    async def acompletion(self):", "        return 3"].join("\n"),
+      "tests/test_router.py": [
+        "from pkg import Router",
+        "",
+        "async def test_completion():",
+        "    router = Router()",
+        "    result = await router.acompletion()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(root)).toEqual([
+      { from: "test:tests/test_router.py", to: "sym:pkg/router.py#Router.acompletion", testName: "test_completion" }
+    ]);
+  });
+
+  it("does not associate assigned instances when the invocation result is unrelated to the assertion", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    calculator.total()",
+        "    assert 1 == 1"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("fails closed on reassigned or patched Python instance receivers", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from unittest.mock import patch",
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    calculator = Calculator()",
+        "    with patch.object(Calculator, 'total', return_value=3):",
+        "        result = calculator.total()",
+        "        assert result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("does not associate fixture-provided receivers or tests with multiple receiver calls", () => {
+    const fixtureRoot = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total(calculator):",
+        "    assert calculator.total() == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(fixtureRoot)).toEqual([]);
+
+    const repeatedRoot = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    calculator.total()",
+        "    result = calculator.total()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(repeatedRoot)).toEqual([]);
+  });
+
+  it("does not associate an instance method when the test contains more than one assertion", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    result = calculator.total()",
+        "    assert result == 3",
+        "    assert calculator is not None"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("does not associate stored results consumed through an assertion helper call", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    result = calculator.total()",
+        "    assert normalize(result) == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("requires an explicit production class import for assigned-instance Association", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "class Calculator:",
+        "    def total(self):",
+        "        return 999",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    result = calculator.total()",
+        "    assert result == 999"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("rejects transformed instance-method results before assertion", () => {
+    const root = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    result = calculator.total() + 1",
+        "    assert result == 4"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("rejects method replacement and more than one assigned-instance call across the test", () => {
+    const replacedRoot = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    calculator = Calculator()",
+        "    calculator.total = lambda: 4",
+        "    result = calculator.total()",
+        "    assert result == 4"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(replacedRoot)).toEqual([]);
+
+    const twoInstancesRoot = repo({
+      "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Calculator",
+        "",
+        "def test_total():",
+        "    first = Calculator()",
+        "    second = Calculator()",
+        "    first_result = first.total()",
+        "    second.total()",
+        "    assert first_result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(twoInstancesRoot)).toEqual([]);
+  });
+
+  it("rejects tracked receiver escape to setters or arbitrary helpers", () => {
+    for (const mutation of [
+      "setattr(calculator, 'total', lambda: 4)",
+      "object.__setattr__(calculator, 'total', lambda: 4)",
+      "replace(calculator)"
+    ]) {
+      const root = repo({
+        "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+        "tests/test_calc.py": [
+          "from app.calc import Calculator",
+          "",
+          "def test_total():",
+          "    calculator = Calculator()",
+          `    ${mutation}`,
+          "    result = calculator.total()",
+          "    assert result == 4"
+        ].join("\n")
+      });
+      expect(hardCoverEdges(root)).toEqual([]);
+    }
+  });
+
+  it("rejects any local alias of a tracked instance before assertion", () => {
+    for (const mutation of [
+      "alias.total = lambda: 4",
+      "setattr(alias, 'total', lambda: 4)",
+      "alias.__class__.total = lambda self: 4"
+    ]) {
+      const root = repo({
+        "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+        "tests/test_calc.py": [
+          "from app.calc import Calculator",
+          "",
+          "def test_total():",
+          "    calculator = Calculator()",
+          "    alias = calculator",
+          `    ${mutation}`,
+          "    result = calculator.total()",
+          "    assert result == 4"
+        ].join("\n")
+      });
+      expect(hardCoverEdges(root)).toEqual([]);
+    }
+  });
+
+  it("rejects duplicated, chained, container, and vacuous stored-result assertions", () => {
+    for (const assertion of [
+      "assert (result, result) == (3, 3)",
+      "assert 2 < result < 4",
+      "assert result == result"
+    ]) {
+      const root = repo({
+        "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
+        "tests/test_calc.py": [
+          "from app.calc import Calculator",
+          "",
+          "def test_total():",
+          "    calculator = Calculator()",
+          "    result = calculator.total()",
+          `    ${assertion}`
+        ].join("\n")
+      });
+      expect(hardCoverEdges(root)).toEqual([]);
+    }
+  });
+
+  it("keeps same-named methods bound to the constructed class owner", () => {
+    const root = repo({
+      "app/calc.py": [
+        "class Calculator:", "    def total(self):", "        return 3",
+        "class Other:", "    def total(self):", "        return 4"
+      ].join("\n"),
+      "tests/test_calc.py": [
+        "from app.calc import Other",
+        "",
+        "def test_total():",
+        "    subject = Other()",
+        "    result = subject.total()",
+        "    assert result == 4"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:tests/test_calc.py -> sym:app/calc.py#Other.total"]);
+  });
+
   it("does not confirm local helper names that shadow product functions", () => {
     const root = repo({
       "src/app/calc.py": "def add():\n    return 1\n",

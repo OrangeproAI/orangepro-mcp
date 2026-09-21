@@ -13,7 +13,7 @@
  * No key ⇒ writes NO files, mints NO proof, returns explicit guidance.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, posix, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 
 import { generateTests, readDeclaredDeps, unresolvedLocalImports } from "./generate/generator.js";
 import { GENERATED_DIR, runHintsFor } from "./generate/runHints.js";
@@ -22,7 +22,7 @@ import { resolveProviderConfig } from "./localConfig.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
 import { resolveContained } from "./reprove/paths.js";
 import { buildRtm } from "./rtm.js";
-import { loadLedger } from "./ledger.js";
+import { loadLedger, targetLanguage } from "./ledger.js";
 import { reportProgress } from "./util/progress.js";
 import { loadGraph, workspacePaths } from "./workspace.js";
 import { systemClock } from "./util/time.js";
@@ -30,12 +30,10 @@ import { redactSecrets } from "./util/redact.js";
 import {
   classifyBaselineFailure,
   EXPERIMENTAL_SQLITE_TEST_ENV,
-  IMPORT_TIME_CATEGORIES,
   isNeedsSetupCategory,
   readEnginesNode,
   targetNeedsExperimentalSqlite,
-  type BaselineCategory,
-  type BaselineClassification
+  type BaselineCategory
 } from "./proofRunnability.js";
 import type { Clock } from "./util/time.js";
 import type { FileReader } from "./types.js";
@@ -373,11 +371,79 @@ const GEN_WINDOW = 5;
 // a provable hard-edge symbol is tried. Small K; promote to a flag if a repo needs a wider sweep.
 const EXISTING_LANE_MAX_WEAK_PER_SYMBOL = 3;
 
+const RUNNER_ROOT_MARKERS: Readonly<Record<string, readonly string[]>> = {
+  typescript: ["package.json"],
+  javascript: ["package.json"],
+  python: ["pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", ".pytest.ini", "tox.ini"],
+  go: ["go.mod"],
+  java: ["pom.xml", "build.gradle", "build.gradle.kts"],
+  rs: ["Cargo.toml"]
+};
+
+/**
+ * The nearest language runner root for a target, bounded by the analyzed source root.
+ * A nested root is accepted only when the selected existing test is inside it too;
+ * otherwise proof execution falls back to the analyzed root, matching the oracle's
+ * containment rule rather than inventing a cross-project plan.
+ */
+export function proofRunnerRoot(sourceRoot: string, targetRel: string, testRel?: string): string {
+  const stop = resolve(sourceRoot);
+  const targetAbs = resolve(stop, targetRel);
+  if (targetAbs !== stop && !targetAbs.startsWith(stop + sep)) return ".";
+  const language = targetLanguage(`sym:${targetRel}#target`);
+  const markers = RUNNER_ROOT_MARKERS[language] ?? [];
+  let dir = dirname(targetAbs);
+  let found = stop;
+  for (;;) {
+    if (markers.some((marker) => existsSync(join(dir, marker)))) {
+      found = dir;
+      break;
+    }
+    if (dir === stop) break;
+    const parent = dirname(dir);
+    if (parent === dir || (parent !== stop && !parent.startsWith(stop + sep))) break;
+    dir = parent;
+  }
+  if (testRel && found !== stop) {
+    const testFile = testRel.split("::", 1)[0] ?? testRel;
+    const testAbs = resolve(stop, testFile);
+    if (
+      (testAbs !== stop && !testAbs.startsWith(stop + sep))
+      || (testAbs !== found && !testAbs.startsWith(found + sep))
+    ) found = stop;
+  }
+  const rel = relative(stop, found).split(sep).join("/");
+  return rel || ".";
+}
+
+/** Dominant-language order from all denominator-eligible code behaviors. */
+export function proofLanguageOrder(graph: LocalGraph): string[] {
+  const counts = new Map<string, number>();
+  const first = new Map<string, number>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "CodeSymbol" || node.denominator_eligible !== true) continue;
+    const language = targetLanguage(node.external_id);
+    if (!first.has(language)) first.set(language, first.size);
+    counts.set(language, (counts.get(language) ?? 0) + 1);
+  }
+  return [...counts.keys()].sort((a, b) => (counts.get(b)! - counts.get(a)!) || (first.get(a)! - first.get(b)!));
+}
+
 export const NO_KEY_MESSAGE =
   "No provider key; auto-prove skipped — add OPENAI_API_KEY / ANTHROPIC_API_KEY, or use the OrangePro MCP in your coding agent.";
 
 /** How a single attempted target resolved. Only `proven` moves public Proven. */
 export type AutoProveClass = "proven" | "non_killing" | "needs_setup" | "gen_failed";
+export type AutoProveSetupCategory = BaselineCategory | "runner_missing" | "module_root_missing" | "go_package_build_failure";
+
+/** Only failures proven to apply across a runner project may quarantine its siblings. */
+const PROJECT_WIDE_BLOCKERS: ReadonlySet<AutoProveSetupCategory> = new Set([
+  "engine_mismatch",
+  "tsconfig_missing",
+  "runner_missing",
+  "module_root_missing",
+  "go_package_build_failure"
+]);
 
 export interface AutoProveAttempt {
   target_symbol: string;
@@ -392,8 +458,12 @@ export interface AutoProveAttempt {
    * (module_not_found / experimental_builtin / engine_mismatch / db_or_external /
    * logic_failure / unknown). Sanitized metadata only — never raw stderr.
    */
-  category?: BaselineCategory;
-  /** R-1: marked from a same-file sibling's shared root cause WITHOUT re-running (dedup). */
+  category?: AutoProveSetupCategory;
+  /** Runner project root relative to the analyzed source (`.` = repository root). */
+  project_root?: string;
+  /** Target whose classified project-wide failure caused this candidate to be skipped. */
+  blocked_by?: string;
+  /** Marked from a shared project-wide root cause WITHOUT re-running. */
   deduped?: boolean;
 }
 
@@ -405,6 +475,9 @@ export interface AutoProveSkip {
   target_symbol?: string;
   title: string;
   reason: string;
+  language?: string;
+  project_root?: string;
+  blocked_by?: string;
 }
 
 export interface AutoProveResult {
@@ -519,7 +592,7 @@ interface ClassifyContext {
 interface ProofClassification {
   classification: AutoProveClass;
   reason?: string;
-  category?: BaselineCategory;
+  category?: AutoProveSetupCategory;
 }
 
 /**
@@ -531,15 +604,29 @@ interface ProofClassification {
 function classifyProof(result: ProveLoopResult, ctx: ClassifyContext): ProofClassification {
   if ("status" in result && result.status === "unrunnable") {
     // Setup did not run (env non-event) — nothing was minted, target needs setup.
-    return { classification: "needs_setup", reason: result.reason };
+    const reason = result.reason;
+    const category: AutoProveSetupCategory | undefined = /runner binary not found|unsupported or unknown test runner/i.test(reason)
+      ? "runner_missing"
+      : /no go\.mod found|no pom\.xml|no maven or gradle|build\.gradle|no python project root/i.test(reason)
+        ? "module_root_missing"
+        : undefined;
+    return { classification: "needs_setup", reason, category };
   }
   const dyn = result as DynamicProofResult;
   const record = dyn.record;
   if (record.closed) return { classification: "proven" };
   const cert = record.dynamic_proof;
   if (cert && cert.baseline_green === false) {
+    const failureSummary = dyn.oracle.baseline?.failureSummary;
+    if (ctx.targetFileRel.endsWith(".go") && /^#\s+\S+/m.test(failureSummary ?? "")) {
+      return {
+        classification: "needs_setup",
+        reason: "The Go package did not compile before the selected test could run.",
+        category: "go_package_build_failure"
+      };
+    }
     const { category, reason } = classifyBaselineFailure({
-      failureSummary: dyn.oracle.baseline?.failureSummary,
+      failureSummary,
       enginesNode: readEnginesNode(ctx.sourceRoot, ctx.targetFileRel),
       runnerNode: ctx.runnerNode ?? process.version
     });
@@ -564,18 +651,40 @@ function mutantStatusOf(result: ProveLoopResult): string | undefined {
  * generation lane read "<runner> <file>" -> never matched), silently disabling cross-lane
  * dedup. NEVER merges across different files or a different failure class.
  */
-function dedupKey(runner: string | undefined, targetFileRel: string): string {
-  return `${runner ?? "auto"}\u0000${targetFileRel}`;
+interface ProjectBlock {
+  category: AutoProveSetupCategory;
+  reason: string;
+  blockedBy: string;
+  scopeLabel: string;
 }
 
-/** A same-file sibling deduped WITHOUT re-running: shares the first attempt's redacted reason. */
-function dedupedAttempt(targetSymbol: string, testPath: string, targetFileRel: string, blocked: BaselineClassification): AutoProveAttempt {
+function projectBlockKey(language: string, projectRoot: string): string {
+  return `${language}\u0000${projectRoot}`;
+}
+
+function projectBlockKeys(language: string, projectRoot: string, targetFileRel: string): string[] {
+  return [
+    projectBlockKey(language, projectRoot),
+    `${projectBlockKey(language, projectRoot)}\u0000package:${dirname(targetFileRel).split(sep).join("/")}`
+  ];
+}
+
+function classifiedProjectBlockKey(category: AutoProveSetupCategory, language: string, projectRoot: string, targetFileRel: string): string {
+  return category === "go_package_build_failure"
+    ? projectBlockKeys(language, projectRoot, targetFileRel)[1]!
+    : projectBlockKey(language, projectRoot);
+}
+
+/** A same-project candidate skipped WITHOUT re-running after a classified project-wide failure. */
+function dedupedAttempt(targetSymbol: string, testPath: string, projectRoot: string, blocked: ProjectBlock): AutoProveAttempt {
   return {
     target_symbol: targetSymbol,
     test_path: testPath,
     classification: "needs_setup",
-    reason: `${blocked.reason} (shared root cause with a sibling in ${targetFileRel}; not re-run).`,
+    reason: `${blocked.reason} (shared project/toolchain cause in ${blocked.scopeLabel}; not re-run).`,
     category: blocked.category,
+    project_root: projectRoot,
+    blocked_by: blocked.blockedBy,
     deduped: true
   };
 }
@@ -713,6 +822,14 @@ export interface ExistingAttemptRef {
   testRel: string;
   hard: boolean;
   testName?: string;
+  language?: string;
+  projectRoot?: string;
+}
+
+interface ExistingAttemptScheduleContext {
+  graph: LocalGraph;
+  nodeById: Map<string, GraphNode>;
+  sourceRoot: string;
 }
 
 /**
@@ -725,7 +842,8 @@ export interface ExistingAttemptRef {
  */
 export function orderExistingAttempts(
   testsBySymbol: Map<string, AssocTest[]>,
-  maxWeakPerSymbol: number = EXISTING_LANE_MAX_WEAK_PER_SYMBOL
+  maxWeakPerSymbol: number = EXISTING_LANE_MAX_WEAK_PER_SYMBOL,
+  schedule?: ExistingAttemptScheduleContext
 ): ExistingAttemptRef[] {
   const hard: ExistingAttemptRef[] = [];
   const weak: ExistingAttemptRef[] = [];
@@ -736,7 +854,65 @@ export function orderExistingAttempts(
       else if (weakCount++ < maxWeakPerSymbol) weak.push({ symId, testRel: t.test, hard: false });
     }
   }
-  return [...hard, ...weak];
+  if (!schedule) return [...hard, ...weak];
+  const languageOrder = proofLanguageOrder(schedule.graph);
+  const languageRank = new Map(languageOrder.map((language, index) => [language, index]));
+  const decorate = (attempt: ExistingAttemptRef, index: number): ExistingAttemptRef & { index: number } => {
+    const node = schedule.nodeById.get(attempt.symId);
+    const targetRel = node ? symbolFileOf(node) : attempt.symId.replace(/^sym:/, "").split("#")[0]!;
+    return {
+      ...attempt,
+      language: targetLanguage(attempt.symId),
+      projectRoot: proofRunnerRoot(schedule.sourceRoot, targetRel, attempt.testRel),
+      index
+    };
+  };
+  const stableProjectOrder = (attempts: ExistingAttemptRef[]): ExistingAttemptRef[] => {
+    const decorated = attempts.map(decorate);
+    const firstProject = new Map<string, number>();
+    for (const item of decorated) {
+      const key = `${item.language}\u0000${item.projectRoot}`;
+      if (!firstProject.has(key)) firstProject.set(key, firstProject.size);
+    }
+    return decorated
+      .sort((a, b) =>
+        ((languageRank.get(a.language!) ?? Number.MAX_SAFE_INTEGER) - (languageRank.get(b.language!) ?? Number.MAX_SAFE_INTEGER))
+        || ((firstProject.get(`${a.language}\u0000${a.projectRoot}`) ?? 0) - (firstProject.get(`${b.language}\u0000${b.projectRoot}`) ?? 0))
+        || (a.index - b.index)
+      )
+      .map(({ index: _index, ...attempt }) => attempt);
+  };
+  return [...stableProjectOrder(hard), ...stableProjectOrder(weak)];
+}
+
+/**
+ * Stable scheduling view over the existing ORS-ranked candidate list. This changes
+ * only which runner receives a scarce proof attempt first; it never changes scores,
+ * evidence tiers, or the persisted priority-gap order.
+ */
+export function orderRankedProofCandidates<T extends { id: string; file: string }>(
+  candidates: T[],
+  graph: LocalGraph,
+  sourceRoot: string
+): T[] {
+  const languageOrder = proofLanguageOrder(graph);
+  if (languageOrder.length <= 1) return candidates;
+  const languageRank = new Map(languageOrder.map((language, index) => [language, index]));
+  const firstProject = new Map<string, number>();
+  const decorated = candidates.map((candidate, index) => {
+    const language = targetLanguage(candidate.id);
+    const projectRoot = proofRunnerRoot(sourceRoot, candidate.file);
+    const projectKey = `${language}\u0000${projectRoot}`;
+    if (!firstProject.has(projectKey)) firstProject.set(projectKey, firstProject.size);
+    return { candidate, index, language, projectKey };
+  });
+  return decorated
+    .sort((a, b) =>
+      ((languageRank.get(a.language) ?? Number.MAX_SAFE_INTEGER) - (languageRank.get(b.language) ?? Number.MAX_SAFE_INTEGER))
+      || ((firstProject.get(a.projectKey) ?? 0) - (firstProject.get(b.projectKey) ?? 0))
+      || (a.index - b.index)
+    )
+    .map(({ candidate }) => candidate);
 }
 
 interface ExistingLaneResult {
@@ -769,7 +945,7 @@ function proveExistingAssociatedTests(
   proveLoop: ProveLoopFn,
   proveDeps: OperationDeps,
   alreadyProven: ReadonlySet<string>,
-  importTimeBlocked: Map<string, BaselineClassification>,
+  projectBlocked: Map<string, ProjectBlock>,
   budget: number
 ): ExistingLaneResult {
   const attempts: AutoProveAttempt[] = [];
@@ -781,9 +957,13 @@ function proveExistingAssociatedTests(
   const changed = opts.changedFiles && opts.changedFiles.length > 0 ? new Set(opts.changedFiles) : null;
   const reader = fileReaderFor(sourceRoot); // R-2: source scan for the node:sqlite env profile
   // Fix 3: hard TESTED_BY/COVERS pairs first, weak MAY_* pairs after and capped per symbol.
-  const queue = orderExistingAttempts(existingAssociatedTests(graph, nodeById));
+  const queue = orderExistingAttempts(existingAssociatedTests(graph, nodeById), EXISTING_LANE_MAX_WEAK_PER_SYMBOL, {
+    graph,
+    nodeById,
+    sourceRoot
+  });
 
-  for (const { symId, testRel, hard, testName } of queue) {
+  for (const { symId, testRel, hard, testName, language, projectRoot } of queue) {
     if (attempted >= budget) break;
     const node = nodeById.get(symId);
     // Redundant with existingAssociatedTests' own filter, but the eligibility barrier is
@@ -797,19 +977,20 @@ function proveExistingAssociatedTests(
     // Proven earlier THIS run — one closing existing test per symbol is enough.
     if (provenSymbols.has(symId)) continue;
     const targetFileRel = symbolFileOf(node!);
-    // R-1 sibling dedup: a prior same-file attempt hit a package-level env root cause
-    // (engine_mismatch: runner Node outside the declared engines range). Every sibling in this
-    // file fails baseline identically → mark it
-    // needs_setup WITHOUT re-running (and WITHOUT consuming the attempt budget).
+    const targetLanguageName = language ?? targetLanguage(symId);
+    const runnerRoot = projectRoot ?? proofRunnerRoot(sourceRoot, targetFileRel, testRel);
+    // A prior candidate in this exact runner project hit a classified project-wide
+    // toolchain/environment failure. Preserve the budget and explain the skip.
     const isPython = isPythonFile(targetFileRel);
     const candidateTestRels = isPython
       ? pytestNodeidsForTarget(sourceRoot, testRel, testName).filter((candidate) => isRunnableTestForTarget(node!, candidate))
       : [testRel];
     if (candidateTestRels.length === 0) continue;
     const proofTestRel = candidateTestRels[0]!;
-    const blocked = importTimeBlocked.get(dedupKey(undefined, targetFileRel));
+    const blockedKey = projectBlockKeys(targetLanguageName, runnerRoot, targetFileRel).find((key) => projectBlocked.has(key));
+    const blocked = blockedKey ? projectBlocked.get(blockedKey) : undefined;
     if (blocked) {
-      const attempt = dedupedAttempt(symId, proofTestRel, targetFileRel, blocked);
+      const attempt = dedupedAttempt(symId, proofTestRel, runnerRoot, blocked);
       attempts.push(attempt);
       needsSetup.push(attempt);
       continue;
@@ -874,7 +1055,8 @@ function proveExistingAssociatedTests(
         target_symbol: symId,
         test_path: displayTest,
         classification: "needs_setup",
-        reason: `Proof could not run: ${redactSecrets(errMsg(e))}`
+        reason: `Proof could not run: ${redactSecrets(errMsg(e))}`,
+        project_root: runnerRoot
       };
       attempts.push(attempt);
       needsSetup.push(attempt);
@@ -887,6 +1069,7 @@ function proveExistingAssociatedTests(
       classification,
       reason,
       category,
+      project_root: runnerRoot,
       mutant_status: mutantStatusOf(result)
     };
     attempts.push(attempt);
@@ -897,9 +1080,18 @@ function proveExistingAssociatedTests(
     }
     if (classification === "needs_setup") {
       needsSetup.push(attempt);
-      // Cache an import-time root cause so same-file siblings dedup instead of re-running.
-      if (category && IMPORT_TIME_CATEGORIES.has(category)) {
-        importTimeBlocked.set(dedupKey(undefined, targetFileRel), { category, reason: reason ?? "" });
+      // Quarantine only a classified project-wide root cause. Target/test-specific
+      // red baselines and surviving mutants never suppress siblings.
+      if (category && PROJECT_WIDE_BLOCKERS.has(category)) {
+        const scopeLabel = category === "go_package_build_failure"
+          ? dirname(targetFileRel).split(sep).join("/") || "."
+          : runnerRoot;
+        projectBlocked.set(classifiedProjectBlockKey(category, targetLanguageName, runnerRoot, targetFileRel), {
+          category,
+          reason: reason ?? "",
+          blockedBy: symId,
+          scopeLabel
+        });
       }
     }
     // non_killing → keep trying this symbol's other associated tests, if any.
@@ -945,9 +1137,10 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
       .filter(Boolean)
   );
 
-  // R-1: shared sibling-dedup cache of import-time baseline failures. Spans BOTH lanes so a
-  // node:sqlite-style root cause found once is never re-run across same-file siblings.
-  const importTimeBlocked = new Map<string, BaselineClassification>();
+  // Shared, run-local quarantine for classified project-wide toolchain failures.
+  // Keyed by language + bounded runner root; never populated by a test-specific red
+  // baseline, an unknown failure, or a surviving mutant.
+  const projectBlocked = new Map<string, ProjectBlock>();
 
   // ONE unified dynamic-proof budget for the whole pass (existing-first → then generation).
   // Default 5 ("dynamically prove top 5"); `--auto-limit N` overrides it, clamped to
@@ -956,7 +1149,7 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
   const autoLimit = Math.max(1, Math.min(MAX_AUTO_LIMIT, Math.floor(opts.autoLimit ?? DEFAULT_AUTO_LIMIT)));
 
   // ── Lane 1: existing associated tests — NO key required, runs FIRST (PR 1.5). ──
-  const ex = proveExistingAssociatedTests(root, graph, sourceRoot, nodeById, opts, proveLoop, proveDeps, alreadyProven, importTimeBlocked, autoLimit);
+  const ex = proveExistingAssociatedTests(root, graph, sourceRoot, nodeById, opts, proveLoop, proveDeps, alreadyProven, projectBlocked, autoLimit);
 
   if (opts.existingOnly) {
     const status: AutoProveResult["status"] = ex.proven > 0 ? "proven-run" : ex.attempted > 0 ? "ran-no-proof" : "no-targets";
@@ -1016,6 +1209,7 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     const changed = new Set(opts.changedFiles);
     candidates = candidates.filter((g) => changed.has(g.file));
   }
+  candidates = orderRankedProofCandidates(candidates, graph, sourceRoot);
 
   const attempts: AutoProveAttempt[] = [];
   const needsSetup: AutoProveAttempt[] = [];
@@ -1071,14 +1265,24 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
 
       const { target_symbol, replacement, runner } = hint.prove_run.args;
       const targetFileRel = symbolFile(target_symbol);
-      // R-1 sibling dedup (cross-lane): a same-file target already hit an import-time env root
-      // cause → a fresh generated test importing the same module fails identically. Skip it
-      // WITHOUT generating/writing/running or consuming the attempt budget.
-      const blocked = importTimeBlocked.get(dedupKey(undefined, targetFileRel));
+      const language = targetLanguage(target_symbol);
+      const projectRoot = proofRunnerRoot(sourceRoot, targetFileRel);
+      // Cross-lane quarantine: a classified project-wide runner failure already
+      // explains why this generated candidate cannot run. Skip without spending budget.
+      const blockedKey = projectBlockKeys(language, projectRoot, targetFileRel).find((key) => projectBlocked.has(key));
+      const blocked = blockedKey ? projectBlocked.get(blockedKey) : undefined;
       if (blocked) {
-        const attempt = dedupedAttempt(target_symbol, "", targetFileRel, blocked);
+        const attempt = dedupedAttempt(target_symbol, "", projectRoot, blocked);
         attempts.push(attempt);
         needsSetup.push(attempt);
+        skipped.push({
+          target_symbol,
+          title: test.title,
+          reason: attempt.reason ?? "Skipped after a project-wide proof failure.",
+          language,
+          project_root: projectRoot,
+          blocked_by: blocked.blockedBy
+        });
         continue;
       }
       const filename = basename(hint.prove_run.args.test_path);
@@ -1145,7 +1349,8 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
           target_symbol,
           test_path: writeRel,
           classification: "needs_setup",
-          reason: `Proof could not run: ${redactSecrets(errMsg(e))}`
+          reason: `Proof could not run: ${redactSecrets(errMsg(e))}`,
+          project_root: projectRoot
         };
         attempts.push(attempt);
         needsSetup.push(attempt);
@@ -1159,15 +1364,23 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
         classification,
         reason,
         category,
+        project_root: projectRoot,
         mutant_status: mutantStatusOf(result)
       };
       attempts.push(attempt);
       if (classification === "proven") proven++;
       else if (classification === "needs_setup") {
         needsSetup.push(attempt);
-        // Cache an import-time root cause so same-file siblings dedup instead of re-running.
-        if (category && IMPORT_TIME_CATEGORIES.has(category)) {
-          importTimeBlocked.set(dedupKey(undefined, targetFileRel), { category, reason: reason ?? "" });
+        if (category && PROJECT_WIDE_BLOCKERS.has(category)) {
+          const scopeLabel = category === "go_package_build_failure"
+            ? dirname(targetFileRel).split(sep).join("/") || "."
+            : projectRoot;
+          projectBlocked.set(classifiedProjectBlockKey(category, language, projectRoot, targetFileRel), {
+            category,
+            reason: reason ?? "",
+            blockedBy: target_symbol,
+            scopeLabel
+          });
         }
       }
       // non_killing stays in `attempts` only — an honest skip, never Proven.

@@ -26,7 +26,7 @@ import { readEnginesNode, satisfiesNodeRange, type BaselineCategory } from "./pr
 import type { ArtifactIdentity, LocalGraph } from "./graph/ontology.js";
 import type { RtmResult } from "./rtm.js";
 
-export const PROOF_ATTEMPTS_SCHEMA_VERSION = "orangepro.proof_attempts.v1";
+export const PROOF_ATTEMPTS_SCHEMA_VERSION = "orangepro.proof_attempts.v2";
 export const PROOF_ATTEMPTS_FILE = "proof-attempts.json";
 export const PROOF_DOCTOR_SCHEMA_VERSION = "orangepro.proof_doctor.v1";
 
@@ -46,6 +46,8 @@ export interface ProofAttemptRecord {
   reason?: string;
   deduped?: boolean;
   language: string;
+  project_root?: string;
+  blocked_by?: string;
 }
 
 export interface ProofAttemptsFile {
@@ -60,7 +62,14 @@ export interface ProofAttemptsFile {
   attempted: number;
   proven: number;
   attempts: ProofAttemptRecord[];
-  skipped: Array<{ target_symbol?: string; title: string; reason: string }>;
+  skipped: Array<{
+    target_symbol?: string;
+    title: string;
+    reason: string;
+    language?: string;
+    project_root?: string;
+    blocked_by?: string;
+  }>;
 }
 
 /** Doctor-level blocker categories = R-1 baseline categories + derived setup causes. */
@@ -190,8 +199,17 @@ interface AutoProveLike {
     reason?: string;
     category?: string;
     deduped?: boolean;
+    project_root?: string;
+    blocked_by?: string;
   }>;
-  skipped: Array<{ target_symbol?: string; title: string; reason: string }>;
+  skipped: Array<{
+    target_symbol?: string;
+    title: string;
+    reason: string;
+    language?: string;
+    project_root?: string;
+    blocked_by?: string;
+  }>;
 }
 
 /**
@@ -222,12 +240,17 @@ export function distillProofAttempts(
       category: a.category,
       reason: a.reason ? redactSecrets(a.reason) : undefined,
       deduped: a.deduped,
-      language: targetLanguage(a.target_symbol)
+      language: targetLanguage(a.target_symbol),
+      project_root: a.project_root,
+      blocked_by: a.blocked_by
     })),
     skipped: auto.skipped.map((s) => ({
       target_symbol: s.target_symbol,
       title: s.title,
-      reason: redactSecrets(s.reason)
+      reason: redactSecrets(s.reason),
+      language: s.language,
+      project_root: s.project_root,
+      blocked_by: s.blocked_by
     }))
   };
 }
