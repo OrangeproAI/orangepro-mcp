@@ -1038,6 +1038,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           const behaviorSurfaceExcluded = callableBehaviorCandidate && surfaceExclusionReason !== null && !cliDenominatorOverride;
           const notEntryPointAdjacent = callableBehaviorCandidate && !eligible && !behaviorSurfaceExcluded;
           const rankingExclusion = builtInRankExclusion(file.relPath);
+          const pythonRankingExclusion = treeStructure?.pythonRankingExclusions?.find((candidate) => candidate.symbol === sym.name);
           if (isBoilerplate) excludedBoilerplate++;
           nodes.push(
             makeNode({
@@ -1065,7 +1066,13 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                       : {}),
                 ...(behaviorSurfaceExcluded ? { denominator_reason_code: "infra_behavior_surface" } : {}),
                 ...(notEntryPointAdjacent ? { denominator_reason_code: "not_entry_point_adjacent" } : {}),
-                ...(rankingExclusion
+                ...(pythonRankingExclusion
+                  ? {
+                      ranking_exclusion_code: pythonRankingExclusion.code === "python_trivial_thread_local_initializer" ? "trivial_constructor" : "enum_declaration",
+                      ranking_exclusion_reason_code: pythonRankingExclusion.code,
+                      ranking_exclusion_reason: pythonRankingExclusion.reason
+                    }
+                  : rankingExclusion
                   ? {
                       ranking_exclusion_reason_code: rankingExclusion.code,
                       ranking_exclusion_reason: rankingExclusion.reason
@@ -1251,6 +1258,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     // edge, while the SAME module pair reached later by a runtime import must
     // still produce the test->source linkage.
     const seenImports = new Set<string>();
+    const tsImportFacts = new Map<string, GraphEdge>();
     const seenTestLinks = new Set<string>();
     // Per-file import bindings (local name → {imported, target file+abs}).
     // Runtime bindings resolve direct calls; type bindings resolve injected-field
@@ -1293,16 +1301,26 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const pairKey = `${fromRel}|${targetRel}`;
       if (!seenImports.has(pairKey)) {
         seenImports.add(pairKey);
-        edges.push(
-          makeEdge({
+        const importEdge = makeEdge({
             from_external_id: fromRel,
             to_external_id: targetRel,
             relationship_type: "IMPORTS",
             evidence_strength: "hard",
             review_status: "auto_detected",
             provenance: prov(fromRel)
-          })
-        );
+          });
+        edges.push(importEdge);
+        tsImportFacts.set(pairKey, importEdge);
+      }
+      if (e.importKind === "runtime") {
+        const importEdge = tsImportFacts.get(pairKey);
+        for (const binding of e.bindings) {
+          if (binding.imported === "*" || binding.imported === "default") continue;
+          const targetId = `sym:${targetRel}#${binding.imported}`;
+          if (!importEdge || !codeSymbolIds.has(targetId) || isNonProductFile(targetRel)) continue;
+          const named = (importEdge.properties?.symbol_imports ?? []) as string[];
+          if (!named.includes(targetId)) importEdge.properties = { ...importEdge.properties, symbol_imports: [...named, targetId] };
+        }
       }
       if (e.fromRole === "test" && e.importKind === "runtime" && e.targetRole !== "test") {
         importResolvedTests.add(fromRel);
@@ -1698,6 +1716,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     type NonTsImportBinding = { targetRel?: string; targetDir?: string; imported?: string; module?: string; kind: "module" | "named" };
     const importBindingsByFile = new Map<string, Map<string, NonTsImportBinding>>();
     const seenImports = new Set(edges.filter((e) => e.relationship_type === "IMPORTS").map((e) => `${e.from_external_id}|${e.to_external_id}`));
+    const nonTsImportFacts = new Map(edges.filter((e) => e.relationship_type === "IMPORTS").map((e) => [`${e.from_external_id}|${e.to_external_id}`, e]));
     const seenCalls = new Set(edges.filter((e) => e.relationship_type === "CALLS").map((e) => `${e.from_external_id}|${e.to_external_id}`));
 
     const emitImport = (fromRel: string, targetRel: string): void => {
@@ -1705,16 +1724,16 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const key = `${fromRel}|${targetRel}`;
       if (seenImports.has(key)) return;
       seenImports.add(key);
-      edges.push(
-        makeEdge({
+      const importEdge = makeEdge({
           from_external_id: fromRel,
           to_external_id: targetRel,
           relationship_type: "IMPORTS",
           evidence_strength: "hard",
           review_status: "auto_detected",
           provenance: prov(fromRel)
-        })
-      );
+        });
+      edges.push(importEdge);
+      nonTsImportFacts.set(key, importEdge);
     };
     const emitCall = (callerId: string, calleeId: string, fromRel: string): void => {
       if (callerId === calleeId || !codeSymbolIds.has(callerId) || !codeSymbolIds.has(calleeId)) return;
@@ -1767,6 +1786,12 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       return null;
     };
     const resolvePythonImport = (fromRel: string, mod: string): string | null => (mod.startsWith(".") ? resolveRelativePython(fromRel, mod) : uniquePythonModule(mod));
+    const pythonModulePresentInRepo = (mod: string): boolean => {
+      if (!mod || mod.startsWith(".")) return true;
+      const modulePath = mod.replace(/\./g, "/");
+      const prefixes = [modulePath, `src/${modulePath}`];
+      return [...codeFileSet].some((file) => prefixes.some((prefix) => file === `${prefix}.py` || file.startsWith(`${prefix}/`)));
+    };
     const resolveRelativeModule = (fromRel: string, mod: string, exts: string[]): string | null => {
       const raw = mod.replace(/^\.\//, "");
       const base = path.posix.normalize(path.posix.join(dirOf(fromRel), raw));
@@ -1810,6 +1835,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     };
     const shouldRetainPythonReceiverFieldSink = (qualifier: string, callee: string): boolean => {
       if (!/^(?:delete|destroy|purge|drop|erase|wipe|truncate|terminate|revoke|remove|replace|overwrite)/i.test(callee)) return false;
+      if (/^(?:deleted|purged|dropped|destroyed|removed)[A-Za-z0-9_]*$/i.test(callee)) return false;
       const tokens = qualifier
         .replace(/\([^)]*\)/g, "")
         .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -1820,6 +1846,24 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         "db", "database", "model", "orm", "prisma", "repo", "repository", "record", "redis",
         "mongo", "sql", "session", "store", "storage", "table"
       ]).has(token));
+    };
+    const isPythonConstructorTerminal = (callee: string, chain: string): boolean => {
+      const destructive = /^(?:delete(?!d)|purge|drop|destroy)[A-Za-z0-9_]*$/i.test(callee)
+        && !/^(?:deleted|purged|dropped|destroyed)[A-Za-z0-9_]*$/i.test(callee);
+      const receiverFields = chain
+        .slice(0, chain.lastIndexOf("."))
+        .replace(/^[A-Z][A-Za-z0-9_]*\([^()]*\)\.?/, "")
+        .split(".")
+        .filter(Boolean);
+      const persistentRemove = /^remove[A-Za-z0-9_]*$/i.test(callee)
+        && receiverFields.some((attribute) => /(?:store|client|db|repo|repository|persistence|manager|queue|bucket|index|table|storage|dao)/i.test(attribute));
+      return destructive || persistentRemove;
+    };
+    const resolvePythonConstructorBinding = (fromRel: string, local: string): string | null => {
+      if (symbolKind(fromRel, local) === "class") return `sym:${fromRel}#${local}`;
+      const binding = importBindingsByFile.get(fromRel)?.get(local);
+      if (!binding || binding.kind !== "named" || !binding.targetRel || !binding.imported || isNonProductFile(binding.targetRel)) return null;
+      return symbolKind(binding.targetRel, binding.imported) === "class" ? `sym:${binding.targetRel}#${binding.imported}` : null;
     };
     const guardedCsharpMemberTarget = (fromRel: string, className: string, methodName: string): string | null => {
       const ownNamespace = nonTsStructureByFile.get(fromRel)?.structure.moduleName;
@@ -1968,6 +2012,21 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const targetRel = resolvePythonImport(testRel, binding.module) ?? undefined;
       return { targetRel, imported: binding.imported, kind: binding.kind };
     };
+    const resolvePythonClassExport = (fromRel: string, targetRel: string | undefined, className: string): { targetRel: string; className: string } | null => {
+      if (!targetRel || isNonProductFile(targetRel)) return null;
+      if (symbolKind(targetRel, className) === "class") return { targetRel, className };
+      // One explicit, unique re-export hop only. The export must bind the same
+      // class name (no aliases/wildcards), and its terminal must be in-repo.
+      const exportStructure = nonTsStructureByFile.get(targetRel)?.structure;
+      const exports = (exportStructure?.imports ?? []).filter(
+        (candidate) => candidate.kind === "named" && candidate.local === className && candidate.imported === className
+      );
+      if (exports.length !== 1) return null;
+      const terminalRel = resolvePythonImport(targetRel, exports[0]!.module);
+      return terminalRel && terminalRel !== targetRel && !isNonProductFile(terminalRel) && symbolKind(terminalRel, className) === "class"
+        ? { targetRel: terminalRel, className }
+        : null;
+    };
     const resolvePythonClassTarget = (
       testRel: string,
       structure: TreeSitterStructure,
@@ -1976,36 +2035,125 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const binding = pythonProofImportBinding(testRel, structure, classLocal);
       if (!binding) return null;
       if (binding.kind !== "named" || !binding.targetRel || !binding.imported || isNonProductFile(binding.targetRel)) return null;
-      if (symbolKind(binding.targetRel, binding.imported) === "class") {
-        return { targetRel: binding.targetRel, className: binding.imported };
-      }
-      // One explicit, unique package re-export hop (`pkg.__init__: from .impl import Cls`).
-      // Ambiguity, wildcard exports, cycles, or a second hop fail closed.
-      const exportStructure = nonTsStructureByFile.get(binding.targetRel)?.structure;
-      const exports = (exportStructure?.imports ?? []).filter(
-        (candidate) => candidate.kind === "named" && candidate.local === binding.imported && candidate.imported === binding.imported
-      );
-      if (exports.length !== 1) return null;
-      const targetRel = resolvePythonImport(binding.targetRel, exports[0]!.module);
-      return targetRel && targetRel !== binding.targetRel && !isNonProductFile(targetRel) && symbolKind(targetRel, binding.imported) === "class"
-        ? { targetRel, className: binding.imported }
-        : null;
+      // An aliased import is exact only when its local name does not impersonate
+      // another class declared by the imported module. `Other as Calculator`
+      // otherwise makes constructor syntax look like the real Calculator class.
+      if (classLocal !== binding.imported && symbolKind(binding.targetRel, classLocal) === "class") return null;
+      return resolvePythonClassExport(testRel, binding.targetRel, binding.imported);
     };
+    /** Resolve a structural class reference such as `Imported`, `mod.Imported`. */
+    const resolvePythonClassReference = (
+      fromRel: string,
+      structure: TreeSitterStructure,
+      classRef: string
+    ): { targetRel: string; className: string } | null => {
+      const parts = classRef.split(".");
+      if (parts.length === 1) return resolvePythonClassTarget(fromRel, structure, classRef);
+      if (parts.length !== 2) return null;
+      const binding = pythonProofImportBinding(fromRel, structure, parts[0]!);
+      if (!binding || binding.kind !== "module" || !binding.targetRel) return null;
+      return resolvePythonClassExport(fromRel, binding.targetRel, parts[1]!);
+    };
+    /** Exact in-repo base class resolution for a production class declaration. */
+    const resolvePythonBaseClass = (fromRel: string, baseRef: string): { targetRel: string; className: string } | null => {
+      const source = nonTsStructureByFile.get(fromRel)?.structure;
+      if (!source) return null;
+      if (!baseRef.includes(".") && symbolKind(fromRel, baseRef) === "class") return { targetRel: fromRel, className: baseRef };
+      return resolvePythonClassReference(fromRel, source, baseRef);
+    };
+    const pythonClassInfo = (targetRel: string, className: string) =>
+      nonTsStructureByFile.get(targetRel)?.structure.pythonClasses?.find((info) => info.name === className);
+    /**
+     * Resolve an instance or class/static method through only explicitly declared
+     * in-repo base classes. A declaration on the concrete class wins MRO lookup;
+     * when no declaration exists there, multiple base hits are ambiguity, not a
+     * reason to pick one.
+     */
+    const resolvePythonMroMethod = (
+      targetRel: string,
+      className: string,
+      methodName: string,
+      classStaticOnly: boolean,
+      visited = new Set<string>()
+    ): string | null => {
+      const key = `${targetRel}#${className}`;
+      if (visited.has(key)) return null;
+      visited.add(key);
+      const own = pythonQualifiedMemberId(targetRel, className, methodName);
+      const info = pythonClassInfo(targetRel, className);
+      if (own) {
+        return !classStaticOnly || info?.classStaticMethods.includes(methodName) ? own : null;
+      }
+      if (!info || info.bases.length === 0) return null;
+      const baseHits = info.bases
+        .map((base) => resolvePythonBaseClass(targetRel, base))
+        .filter((base): base is { targetRel: string; className: string } => Boolean(base))
+        .map((base) => resolvePythonMroMethod(base.targetRel, base.className, methodName, classStaticOnly, new Set(visited)))
+        .filter((id): id is string => Boolean(id));
+      return [...new Set(baseHits)].length === 1 ? baseHits[0]! : null;
+    };
+    const PYTHON_UNIQUE_METHOD_STOPLIST = new Set(["get", "set", "run", "call", "update", "close", "start", "stop", "process", "handle", "execute"]);
+    const uniqueEligiblePythonMethod = (methodName: string): { symId: string; targetRel: string; owner: string } | null => {
+      if (PYTHON_UNIQUE_METHOD_STOPLIST.has(methodName) || /^__.*__$/.test(methodName)) return null;
+      const matches: Array<{ symId: string; targetRel: string; owner: string; eligible: boolean }> = [];
+      for (const node of nodes) {
+        if (node.kind !== "CodeSymbol" || node.properties.symbol_kind !== "method" || typeof node.properties.file !== "string") continue;
+        const targetRel = node.properties.file;
+        if (!targetRel.endsWith(".py") || isNonProductFile(targetRel) || node.title?.split(".").pop() !== methodName) continue;
+        const name = node.title ?? "";
+        const owner = typeof node.properties.member_of === "string" ? node.properties.member_of : null;
+        // Uniqueness is global to in-repo production class methods; denominator
+        // eligibility decides whether the sole candidate may become a proof edge,
+        // never whether a conflicting owner is ignored.
+        if (owner) matches.push({ symId: node.external_id, targetRel, owner, eligible: Boolean(eligiblePythonSymbol(targetRel, name)) });
+      }
+      const match = matches.length === 1 ? matches[0]! : null;
+      return match?.eligible ? match : null;
+    };
+    const importsUniquePythonMethodOwner = (
+      testRel: string,
+      structure: TreeSitterStructure,
+      candidate: { targetRel: string; owner: string }
+    ): boolean => structure.imports.some((binding) => {
+      const targetRel = resolvePythonImport(testRel, binding.module);
+      if (targetRel !== candidate.targetRel) return false;
+      return binding.kind === "module" || (binding.kind === "named" && binding.imported === candidate.owner);
+    });
     const resolvePythonProofTarget = (
       testRel: string,
       structure: TreeSitterStructure,
       qualifier: string | undefined,
       callee: string,
       shadowed: Set<string>,
-      instanceClass?: string
+      instanceClass?: string,
+      associationRule?: NonNullable<TreeSitterStructure["pythonProofCalls"]>[number]["associationRule"]
     ): string | null => {
       const conv = conventionSibling(testRel, "python", codeFileSet);
       const conventionTargetRel = conv?.relPath && !isNonProductFile(conv.relPath) ? conv.relPath : null;
       const hasWildcardImport = structure.imports.some((i) => i.imported === "*");
       if (instanceClass) {
         if (!qualifier || shadowed.has(instanceClass) || hasWildcardImport) return null;
-        const resolved = resolvePythonClassTarget(testRel, structure, instanceClass);
-        return resolved ? pythonQualifiedMemberId(resolved.targetRel, resolved.className, callee) : null;
+        const resolved = resolvePythonClassReference(testRel, structure, instanceClass);
+        if (!resolved) return null; // constructor/class origin must be exact; uniqueness alone never suffices.
+        const classStaticOnly = associationRule === "class_static_method";
+        const owned = resolvePythonMroMethod(resolved.targetRel, resolved.className, callee, classStaticOnly);
+        if (owned) return owned;
+        // `Class.method()` has a distinct, strict contract: if the exact class/MRO
+        // declares that method but not as @classmethod/@staticmethod, uniqueness
+        // elsewhere must not silently turn an invalid instance call into coverage.
+        if (classStaticOnly && resolvePythonMroMethod(resolved.targetRel, resolved.className, callee, false)) return null;
+        // An exact receiver origin owns this attempt. Missing methods, an MRO
+        // miss, or a class/static eligibility failure must never fall through to
+        // a same-named method on another class.
+        return null;
+      }
+      if (associationRule === "unique_method_name_import") {
+        // The extractor admits only one lower-case local receiver here; local
+        // assignment necessarily appears in `shadowed`, so do not apply the
+        // free-call shadow guard to the qualifier itself.
+        if (!qualifier || !/^[a-z_][A-Za-z0-9_]*$/.test(qualifier) || shadowed.has(callee) || hasWildcardImport) return null;
+        const candidate = uniqueEligiblePythonMethod(callee);
+        return candidate && importsUniquePythonMethodOwner(testRel, structure, candidate) ? candidate.symId : null;
       }
       if (!qualifier) {
         if (shadowed.has(callee)) return null;
@@ -2061,8 +2209,61 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           }
           continue;
         }
-        if (targetRel) emitImport(rel, targetRel);
+        if (targetRel) {
+          emitImport(rel, targetRel);
+          if (language === "python" && i.kind === "named" && i.imported && i.imported !== "*" && symbolKind(targetRel, i.imported) !== undefined) {
+            const importEdge = nonTsImportFacts.get(`${rel}|${targetRel}`);
+            const targetId = `sym:${targetRel}#${i.imported}`;
+            const named = (importEdge?.properties?.symbol_imports ?? []) as string[];
+            if (importEdge && !named.includes(targetId)) importEdge.properties = { ...importEdge.properties, symbol_imports: [...named, targetId] };
+          }
+        }
         addImportBinding(rel, i.local, { ...(targetRel ? { targetRel } : {}), ...(targetDir ? { targetDir } : {}) }, i.imported, i.kind, i.module);
+      }
+    }
+    // Attribute references are structural facts only when the parser identified a
+    // direct module binding, that binding resolves uniquely, and its name was not
+    // shadowed. Calls are already represented by CALLS and must not count twice.
+    for (const [rel, { language, structure }] of nonTsStructureByFile) {
+      if (language !== "python") continue;
+      for (const ref of structure.pythonModuleAttributes ?? []) {
+        const binding = importBindingsByFile.get(rel)?.get(ref.local);
+        if (binding?.kind !== "module" || !binding.targetRel || isNonProductFile(binding.targetRel)) continue;
+        const targetId = `sym:${binding.targetRel}#${ref.attribute}`;
+        if (!codeSymbolIds.has(targetId)) continue;
+        const importEdge = nonTsImportFacts.get(`${rel}|${binding.targetRel}`);
+        if (!importEdge) continue;
+        const refs = { ...(importEdge.properties?.symbol_references as Record<string, number> | undefined) };
+        refs[targetId] = (refs[targetId] ?? 0) + 1;
+        importEdge.properties = { ...importEdge.properties, symbol_references: refs };
+      }
+    }
+    // Ranking facts stay graph-only. Declaration/initializer shapes were proved by
+    // tree-sitter; thin delegates are admitted here only when their exact import
+    // binding has no in-repo target. The scorer never reads source to reconstruct it.
+    for (const [rel, { language, structure }] of nonTsStructureByFile) {
+      if (language !== "python") continue;
+      for (const delegate of structure.pythonThinDelegates ?? []) {
+        const binding = importBindingsByFile.get(rel)?.get(delegate.importLocal);
+        const node = nodeByExternalId.get(`sym:${rel}#${delegate.symbol}`);
+        if (!node || !binding || binding.targetRel || binding.targetDir || pythonModulePresentInRepo(binding.module ?? "")) continue;
+        node.properties.ranking_exclusion_code = "thin_external_delegate";
+        node.properties.ranking_exclusion_reason_code = "python_thin_external_delegate";
+        node.properties.ranking_exclusion_reason = "Thin external delegate with one bare-parameter return call — retained in the graph but excluded from priority ranking.";
+      }
+      for (const call of structure.pythonConstructorChainCalls ?? []) {
+        if (!isPythonConstructorTerminal(call.callee.split(".").pop() ?? "", call.callee)) continue;
+        const constructorSymbol = resolvePythonConstructorBinding(rel, call.constructorLocal);
+        const node = nodeByExternalId.get(`sym:${rel}#${call.caller}`);
+        if (!node || !constructorSymbol) continue;
+        recordExternalCallee(node.external_id, call.callee);
+        const current = Array.isArray(node.properties.constructor_chain_sinks)
+          ? node.properties.constructor_chain_sinks.filter((value): value is { callee: string; constructor_symbol: string } =>
+              Boolean(value && typeof value === "object" && typeof (value as { callee?: unknown }).callee === "string" && typeof (value as { constructor_symbol?: unknown }).constructor_symbol === "string"))
+          : [];
+        if (!current.some((value) => value.callee === call.callee && value.constructor_symbol === constructorSymbol) && current.length < 8) {
+          node.properties.constructor_chain_sinks = [...current, { callee: call.callee, constructor_symbol: constructorSymbol }];
+        }
       }
     }
     // Go package-level method index (dir → "Recv.M" → file) for receiver calls that
@@ -2131,7 +2332,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             } else if (b && !b.targetRel && shouldRetainPythonImportedSink(b, c.callee)) {
               const qualifier = b.kind === "named" ? c.qualifier.replace(/\([^)]*\)/g, "") : c.qualifier;
               recordImportedStaticCallee(callerId, `${qualifier}.${c.callee}`);
-            } else if (!b && c.qualifier.includes(".") && shouldRetainPythonReceiverFieldSink(c.qualifier, c.callee)) {
+            } else if (!b && !c.qualifier.includes("(") && c.qualifier.includes(".") && shouldRetainPythonReceiverFieldSink(c.qualifier, c.callee)) {
               // Attribute-chain receiver (`self.repo.delete`, `store.client.replace`):
               // retain a name fact only. Scoring applies its own persistence + verb
               // policy; no graph edge or evidence claim is created here.
@@ -2191,6 +2392,37 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         ? `sym:${binding.targetRel}#${targetName}`
         : null;
     };
+    const resolvePythonMockTargetId = (testRel: string, structure: TreeSitterStructure, reference: string): string | null => {
+      const parts = reference.split(".").filter(Boolean);
+      if (parts.length < 2) return null;
+      // `patch.object(ImportedClass, "method")` / `ImportedClass.method = MagicMock()`.
+      const binding = structure.imports.filter((entry) => entry.local === parts[0]);
+      if (binding.length === 1) {
+        const imported = binding[0]!;
+        const targetRel = resolvePythonImport(testRel, imported.module);
+        const targetName = imported.kind === "module"
+          ? parts.slice(1).join(".")
+          : [imported.imported, ...parts.slice(1)].filter(Boolean).join(".");
+        if (targetRel && !isNonProductFile(targetRel) && symbolsByFile.get(targetRel)?.has(targetName)) {
+          return `sym:${targetRel}#${targetName}`;
+        }
+      }
+      // `patch("package.module.Class.method")`: find one exact in-repo module
+      // prefix, then require the remaining class-method symbol to exist there.
+      for (let i = 1; i < parts.length - 1; i++) {
+        const targetRel = uniquePythonModule(parts.slice(0, i).join("."));
+        const targetName = parts.slice(i).join(".");
+        if (targetRel && !isNonProductFile(targetRel) && symbolsByFile.get(targetRel)?.has(targetName)) {
+          return `sym:${targetRel}#${targetName}`;
+        }
+      }
+      return null;
+    };
+    const mockedPythonTargetIds = (testRel: string, structure: TreeSitterStructure): Set<string> => new Set(
+      (structure.pythonMockedMethods ?? [])
+        .map((reference) => resolvePythonMockTargetId(testRel, structure, reference))
+        .filter((id): id is string => Boolean(id))
+    );
     const seenPythonDependencyEdges = new Set<string>();
     for (const [rel, { language, structure }] of nonTsStructureByFile) {
       if (language !== "python") continue;
@@ -2303,7 +2535,6 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           (n) =>
             n.kind === "CodeSymbol" &&
             n.properties.symbol_kind === "method" &&
-            n.denominator_eligible === true &&
             typeof n.properties.file === "string" &&
             n.properties.file.endsWith(".py") &&
             typeof n.properties.member_of === "string"
@@ -2314,11 +2545,11 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       if (
         node.kind === "CodeSymbol" &&
         node.properties.symbol_kind === "class" &&
-        node.denominator_eligible === true &&
         typeof node.properties.file === "string" &&
         pythonOwnersWithMethods.has(`${node.properties.file}#${node.title ?? ""}`)
       ) {
-        node.properties.ranking_exclusion_reason = "python_structural_container";
+        node.properties.ranking_exclusion_code = "python_class_with_methods";
+        node.properties.ranking_exclusion_reason = "Python class has mapped method symbols — retained in graph and denominator, but methods own its priority ranking.";
         pythonStructuralContainersExcluded++;
       }
     }
@@ -2413,9 +2644,32 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           proof.qualifier,
           proof.callee,
           new Set(proof.shadowed),
-          proof.instanceClass
+          proof.instanceClass,
+          proof.associationRule
         );
         if (!symId) continue;
+        // A sibling test's mock is irrelevant. Include only this test's body and
+        // decorators, its recursively used fixtures, and module autouse fixtures.
+        // Opaque fixture selection fails closed; the AST traversal resolves finite,
+        // locally declared parametrized fixtures and their actual mocks before this gate.
+        const unknownMockScope = structure.pythonUnknownMockScopeTests?.includes(proof.testName) ?? false;
+        if (unknownMockScope) continue;
+        const references = structure.pythonMocksByTest?.[proof.testName] ?? structure.pythonMockedMethods ?? [];
+        const scopedStructure = { ...structure, pythonMockedMethods: references };
+        const mockedTargets = mockedPythonTargetIds(testRel, scopedStructure);
+        const mockedReferences = new Set(references);
+        const unresolvedMockedMethodNames = new Set(
+          references.filter((reference) => !resolvePythonMockTargetId(testRel, structure, reference))
+            .map((reference) => reference.split(".").pop())
+            .filter((name): name is string => Boolean(name))
+        );
+        if (mockedTargets.has(symId)) continue;
+        // Keep exact unresolved local receiver and unique-method-name negatives.
+        const localMockReference = proof.qualifier
+          ? `${pythonQualifierRoot(proof.qualifier)}.${proof.callee}`
+          : null;
+        if (localMockReference && mockedReferences.has(localMockReference)) continue;
+        if (unresolvedMockedMethodNames.has(proof.callee) && uniqueEligiblePythonMethod(proof.callee)?.symId === symId) continue;
         const edgeKey = `${testExternalId}|${symId}`;
         if (seenPythonProof.has(edgeKey)) continue;
         seenPythonProof.add(edgeKey);
@@ -2423,13 +2677,26 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         const pythonEdgeProps = /^(?:Test[A-Za-z0-9_]*::)?test_[A-Za-z0-9_]+$/.test(proof.testName)
           ? { test_name: proof.testName }
           : undefined;
+        const pythonAssociationProps = proof.associationRule
+          ? {
+              static_association: {
+                detector: proof.associationRule === "unique_method_name_import" ? "unique_method_name_import" : "python_static_association",
+                rule: proof.associationRule,
+                reason: proof.associationRule === "unique_method_name_import"
+                  ? "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never dynamic Proven."
+                  : "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
+              }
+            }
+          : undefined;
         edges.push(
           ...makeProofEdges({
             testRel,
             symId,
-            provenance: prov(testRel, hashString(`${symId}:${proof.assertion}`)),
+            provenance: proof.associationRule
+              ? { ...prov(testRel, hashString(`${symId}:${proof.assertion}`)), detector: proof.associationRule === "unique_method_name_import" ? "unique_method_name_import" : "python_static_association" }
+              : prov(testRel, hashString(`${symId}:${proof.assertion}`)),
             lastVerified: proofVerifiedAt,
-            ...(pythonEdgeProps ? { properties: pythonEdgeProps } : {})
+            ...(pythonEdgeProps || pythonAssociationProps ? { properties: { ...pythonEdgeProps, ...pythonAssociationProps } } : {})
           })
         );
       }

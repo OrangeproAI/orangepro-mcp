@@ -26,10 +26,24 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
+      - name: Reject repository-specific literals in shipped source
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse HEAD^ 2>/dev/null || git hash-object -t tree /dev/null)"
+          fi
+          if git --no-pager diff --no-color --unified=0 "$BASE" HEAD -- src packages | grep -iE '^\+.*(litellm|prisma|mylocal|llmproviders|fastuuid|budget)'; then
+            echo "Repository-specific source rule detected. Keep product rules structural and generic."
+            exit 1
+          fi
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck

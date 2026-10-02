@@ -7,7 +7,7 @@ import { languageOf, roleOf, isTestFile, testLayerOf } from "../../src/local/ana
 import { detectFrameworksFromManifest, detectFromPackageJson, frameworkFromConfig } from "../../src/local/analyze/frameworks.js";
 import { extractSymbols, extractTestNames } from "../../src/local/analyze/symbols.js";
 import { analyzeRepo } from "../../src/local/analyze/analyzer.js";
-import { preloadTreeSitter } from "../../src/local/analyze/treeSitter/engine.js";
+import { extractTreeSitterStructure, preloadTreeSitter } from "../../src/local/analyze/treeSitter/engine.js";
 import type { GraphNode } from "../../src/local/graph/ontology.js";
 
 describe("classify", () => {
@@ -889,5 +889,376 @@ describe("analyzeRepo", () => {
           ((e.from_external_id === symId && e.to_external_id === testId) || (e.from_external_id === testId && e.to_external_id === symId))
       )
     ).toBe(false);
+  });
+
+  it("retains direct Python test links when a different test patches the same exact target", async () => {
+    await preloadTreeSitter(["python"]);
+    mkdirSync(join(dir, "src", "tasks"), { recursive: true });
+    mkdirSync(join(dir, "tests", "tasks"), { recursive: true });
+    writeFileSync(
+      join(dir, "src", "tasks", "workers.py"),
+      [
+        "class Worker:",
+        "    def process(self):",
+        "        return 'done'",
+        "class Helper:",
+        "    def assist(self):",
+        "        return 'help'",
+        "class Dependency:",
+        "    def fetch(self):",
+        "        return 'data'",
+        "class LocalWorker:",
+        "    def process(self):",
+        "        return 'local'",
+        "class UniqueWorker:",
+        "    def execute_unique(self):",
+        "        return 'unique'",
+        "class StaticWorker:",
+        "    @staticmethod",
+        "    def inspect():",
+        "        return 'static'"
+      ].join("\n")
+    );
+    const testSource = [
+        "from unittest.mock import AsyncMock as AM, MagicMock as MM, patch as p",
+        "import unittest.mock as um",
+        "from src.tasks.workers import Worker, Helper, Dependency, LocalWorker, UniqueWorker, StaticWorker",
+        "def test_worker_direct():",
+        "    item = Worker()",
+        "    assert item.process() == 'done'",
+        "def test_worker_method_is_mocked_elsewhere():",
+        "    with p.object(Worker, 'process'):",
+        "        pass",
+        "def test_helper_with_dependency_mock():",
+        "    item = Helper()",
+        "    assert item.assist() == 'help'",
+        "def test_dependency_method_is_mocked():",
+        "    Dependency.fetch = MM()",
+        "def test_local_worker_direct():",
+        "    local = LocalWorker()",
+        "    assert local.process() == 'local'",
+        "def test_local_worker_method_is_mocked_elsewhere():",
+        "    local = LocalWorker()",
+        "    with um.patch.object(local, 'process'):",
+        "        pass",
+        "def test_unique_worker_direct():",
+        "    config = UniqueWorker()",
+        "    assert config.execute_unique() == 'unique'",
+        "def test_unique_worker_method_is_mocked_elsewhere():",
+        "    mock_config = UniqueWorker()",
+        "    mock_config.execute_unique = AM()",
+        "def test_static_worker_direct():",
+        "    assert StaticWorker.inspect() == 'static'",
+        "def test_static_worker_method_is_mocked_elsewhere(monkeypatch):",
+        "    monkeypatch.setattr('src.tasks.workers.StaticWorker.inspect', MM())"
+      ].join("\n");
+    writeFileSync(join(dir, "tests", "tasks", "test_workers.py"), testSource);
+
+    expect(extractTreeSitterStructure(testSource, "python").pythonMockedMethods).toEqual([
+      "Dependency.fetch",
+      "LocalWorker.process",
+      "UniqueWorker.execute_unique",
+      "Worker.process",
+      "src.tasks.workers.StaticWorker.inspect"
+    ]);
+
+    const fragment = analyzeRepo(dir);
+    const testId = "test:tests/tasks/test_workers.py";
+    const hasProofPair = (symId: string): boolean => fragment.edges.some(
+      (edge) =>
+        edge.relationship_type === "TESTED_BY" &&
+        ((edge.from_external_id === symId && edge.to_external_id === testId) || (edge.from_external_id === testId && edge.to_external_id === symId))
+    );
+
+    expect(hasProofPair("sym:src/tasks/workers.py#Worker.process")).toBe(true);
+    expect(hasProofPair("sym:src/tasks/workers.py#LocalWorker.process")).toBe(true);
+    expect(hasProofPair("sym:src/tasks/workers.py#UniqueWorker.execute_unique")).toBe(true);
+    expect(hasProofPair("sym:src/tasks/workers.py#StaticWorker.inspect")).toBe(true);
+    // The exact Worker.process patch must not suppress a different production
+    // method, nor does the exact Dependency.fetch replacement affect Helper.
+    expect(hasProofPair("sym:src/tasks/workers.py#Helper.assist")).toBe(true);
+  });
+
+  it("links direct Python instances and only finite local parametrized fixture selections without bypassing target mocks", async () => {
+    await preloadTreeSitter(["python"]);
+    mkdirSync(join(dir, "src", "handlers"), { recursive: true });
+    mkdirSync(join(dir, "tests", "handlers"), { recursive: true });
+    writeFileSync(
+      join(dir, "src", "handlers", "audio.py"),
+      [
+        "class LocalHandler:",
+        "    def _has_text_content(self, response):",
+        "        return bool(response)",
+        "class AudioHandler:",
+        "    def transform_request(self, audio):",
+        "        return audio"
+      ].join("\n")
+    );
+    writeFileSync(
+      join(dir, "tests", "handlers", "test_audio.py"),
+      [
+        "from unittest.mock import patch",
+        "import pytest",
+        "from src.handlers.audio import AudioHandler, LocalHandler",
+        "@pytest.fixture",
+        "def bytes_case():",
+        "    return b'bytes'",
+        "@pytest.fixture",
+        "def text_case():",
+        "    return b'text'",
+        "class TestLocalHandler:",
+        "    def test_has_text_content(self):",
+        "        handler = LocalHandler()",
+        "        response = {'text': 'ok'}",
+        "        assert handler._has_text_content(response)",
+        "@pytest.mark.parametrize(",
+        "    'fixture_name',",
+        "    ['bytes_case', 'text_case'],",
+        ")",
+        "def test_transform_request(fixture_name, request):",
+        "    handler = AudioHandler()",
+        "    audio = request.getfixturevalue(fixture_name)",
+        "    assert handler.transform_request(audio) == audio"
+      ].join("\n")
+    );
+    writeFileSync(
+      join(dir, "tests", "handlers", "test_audio_target_mock.py"),
+      [
+        "from unittest.mock import patch",
+        "import pytest",
+        "from src.handlers.audio import AudioHandler",
+        "@pytest.fixture",
+        "def patched_case():",
+        "    with patch.object(AudioHandler, 'transform_request'):",
+        "        yield b'patched'",
+        "@pytest.mark.parametrize('fixture_name', ['patched_case'])",
+        "def test_transform_request_with_target_patch(fixture_name, request):",
+        "    handler = AudioHandler()",
+        "    audio = request.getfixturevalue(fixture_name)",
+        "    assert handler.transform_request(audio) == audio"
+      ].join("\n")
+    );
+    writeFileSync(
+      join(dir, "tests", "handlers", "test_audio_unknown_fixture.py"),
+      [
+        "import pytest",
+        "from src.handlers.audio import AudioHandler",
+        "@pytest.fixture",
+        "def local_case():",
+        "    return b'local'",
+        "@pytest.mark.parametrize('fixture_name', ['local_case', 'external_case'])",
+        "def test_with_unknown_fixture(fixture_name, request):",
+        "    handler = AudioHandler()",
+        "    audio = request.getfixturevalue(fixture_name)",
+        "    assert handler.transform_request(audio) == audio",
+        "@pytest.mark.parametrize('fixture_name', make_fixture_names())",
+        "def test_with_dynamic_names(fixture_name, request):",
+        "    handler = AudioHandler()",
+        "    audio = request.getfixturevalue(fixture_name)",
+        "    assert handler.transform_request(audio) == audio"
+      ].join("\n")
+    );
+    writeFileSync(
+      join(dir, "tests", "handlers", "test_audio_literal_unknown.py"),
+      [
+        "from src.handlers.audio import AudioHandler",
+        "def test_with_external_fixture(request):",
+        "    handler = AudioHandler()",
+        "    audio = request.getfixturevalue('external_case')",
+        "    assert handler.transform_request(audio) == audio"
+      ].join("\n")
+    );
+
+    const fragment = analyzeRepo(dir);
+    const testId = "test:tests/handlers/test_audio.py";
+    const mockedTestId = "test:tests/handlers/test_audio_target_mock.py";
+    const testedBy = (symbol: string): boolean => fragment.edges.some(
+      (edge) => edge.relationship_type === "TESTED_BY" && edge.from_external_id === symbol && edge.to_external_id === testId
+    );
+    const testedByMockedTest = (symbol: string): boolean => fragment.edges.some(
+      (edge) => edge.relationship_type === "TESTED_BY" && edge.from_external_id === symbol && edge.to_external_id === mockedTestId
+    );
+
+    expect(testedBy("sym:src/handlers/audio.py#LocalHandler._has_text_content")).toBe(true);
+    expect(testedBy("sym:src/handlers/audio.py#AudioHandler.transform_request")).toBe(true);
+    expect(testedByMockedTest("sym:src/handlers/audio.py#AudioHandler.transform_request")).toBe(false);
+    expect(fragment.edges.some((edge) => edge.relationship_type === "TESTED_BY" &&
+      edge.from_external_id === "sym:src/handlers/audio.py#AudioHandler.transform_request" &&
+      edge.to_external_id === "test:tests/handlers/test_audio_unknown_fixture.py")).toBe(false);
+    expect(fragment.edges.some((edge) => edge.relationship_type === "TESTED_BY" &&
+      edge.from_external_id === "sym:src/handlers/audio.py#AudioHandler.transform_request" &&
+      edge.to_external_id === "test:tests/handlers/test_audio_literal_unknown.py")).toBe(false);
+  });
+
+  it("retains only a narrow Python constructor-chain destructive callee", async () => {
+    await preloadTreeSitter(["python"]);
+    mkdirSync(join(dir, "src", "commands"), { recursive: true });
+    mkdirSync(join(dir, "src", "models"), { recursive: true });
+    writeFileSync(join(dir, "src", "models", "archive.py"), "class Archive:\n    pass\n");
+    writeFileSync(join(dir, "src", "models", "other.py"), "class Archive:\n    pass\n");
+    writeFileSync(join(dir, "src", "models", "__init__.py"), "from .archive import Archive\n");
+    writeFileSync(
+      join(dir, "src", "commands", "cleanup.py"),
+      [
+        "from src.models.archive import Archive as Store",
+        "class LocalArchive:",
+        "    pass",
+        "def clear(conn):",
+        "    return Store(conn).table.delete(where={})",
+        "async def clear_awaited(conn):",
+        "    response: Final = await Store(conn).table.delete(where={})",
+        "    return response",
+        "def clear_assigned(conn):",
+        "    response = Store(conn).table.delete(where={})",
+        "    return response",
+        "def wrapped(conn):",
+        "    response = wrap(Store(conn).table.delete(where={}))",
+        "    return response",
+        "def clear_local(conn):",
+        "    return LocalArchive(conn).table.delete()",
+        "def nested(conn):",
+        "    return make(conn).table.delete()",
+        "def extra_call(conn):",
+        "    return Store(conn).table().delete()",
+        "def past(conn):",
+        "    return Store(conn).table.deleted()",
+        "def detach(conn):",
+        "    return Store(conn).view.remove_item()",
+        "def conditional(conn, enabled):",
+        "    if enabled:",
+        "        return Store(conn).table.delete()",
+        "def looped(conn, rows):",
+        "    for _ in rows:",
+        "        Store(conn).table.delete()",
+        "def local_alias(conn):",
+        "    Alias = Store",
+        "    return Alias(conn).table.delete()"
+      ].join("\n")
+    );
+    writeFileSync(join(dir, "src", "commands", "wild.py"), "from src.models.archive import *\ndef clear(conn):\n    return Archive(conn).table.delete()\n");
+    writeFileSync(join(dir, "src", "commands", "reexport.py"), "from src.models import Archive\ndef clear(conn):\n    return Archive(conn).table.delete()\n");
+
+    const fragment = analyzeRepo(dir);
+    const props = (name: string, file = "src/commands/cleanup.py") => fragment.nodes.find(
+      (node) => node.external_id === `sym:${file}#${name}`
+    )?.properties;
+    const callees = (name: string, file?: string): unknown => props(name, file)?.external_callees;
+    const sinks = (name: string, file?: string): unknown => props(name, file)?.constructor_chain_sinks;
+
+    expect(callees("clear")).toEqual(["Store(conn).table.delete"]);
+    expect(sinks("clear")).toEqual([{ callee: "Store(conn).table.delete", constructor_symbol: "sym:src/models/archive.py#Archive" }]);
+    expect(sinks("clear_awaited")).toEqual([{ callee: "Store(conn).table.delete", constructor_symbol: "sym:src/models/archive.py#Archive" }]);
+    expect(sinks("clear_assigned")).toEqual([{ callee: "Store(conn).table.delete", constructor_symbol: "sym:src/models/archive.py#Archive" }]);
+    expect(sinks("wrapped")).toBeUndefined();
+    expect(sinks("clear_local")).toEqual([{ callee: "LocalArchive(conn).table.delete", constructor_symbol: "sym:src/commands/cleanup.py#LocalArchive" }]);
+    expect(callees("nested")).toBeUndefined();
+    expect(callees("extra_call")).toBeUndefined();
+    expect(callees("past")).toBeUndefined();
+    expect(callees("detach")).toBeUndefined();
+    expect(callees("conditional")).toBeUndefined();
+    expect(callees("looped")).toBeUndefined();
+    expect(callees("local_alias")).toBeUndefined();
+    expect(sinks("clear", "src/commands/wild.py")).toBeUndefined();
+    expect(sinks("clear", "src/commands/reexport.py")).toBeUndefined();
+  });
+
+  it("persists Python ranking exclusions only from exact AST shapes", async () => {
+    await preloadTreeSitter(["python"]);
+    mkdirSync(join(dir, "vendor_local"), { recursive: true });
+    writeFileSync(join(dir, "vendor_local", "runtime.py"), "def run(value):\n    return value\n");
+    writeFileSync(
+      join(dir, "src", "ranking.py"),
+      [
+        "import threading as threads",
+        "from enum import Enum, Flag as StdFlag",
+        "import vendor_sdk as vendor",
+        "import helper_sdk as _driver",
+        "import vendor_local as local_vendor",
+        "driver = _driver",
+        "class Holder(threads.local):",
+        "    def __init__(self, value=None):",
+        "        \"\"\"state\"\"\"",
+        "        super().__init__()",
+        "        self.value = value",
+        "        self.empty = None",
+        "class Unsafe(threads.local):",
+        "    def __init__(self):",
+        "        self.value = load()",
+        "class Color(Enum):",
+        "    RED = 1",
+        "class Behaviour(StdFlag):",
+        "    READ = 1",
+        "    def active(self):",
+        "        return True",
+        "def relay(value):",
+        "    return vendor.run(value)",
+        "def forwarded(value):",
+        "    return driver.run(value)",
+        "def transformed(value):",
+        "    return vendor.run(value.strip())",
+        "def side_effect(value):",
+        "    audit(value)",
+        "    return vendor.run(value)",
+        "def local_namespace(value):",
+        "    return local_vendor.run(value)"
+      ].join("\n")
+    );
+
+    const fragment = analyzeRepo(dir);
+    const code = (symbol: string): unknown => fragment.nodes.find(
+      (node) => node.external_id === `sym:src/ranking.py#${symbol}`
+    )?.properties.ranking_exclusion_reason_code;
+
+    expect(code("Holder.__init__")).toBe("python_trivial_thread_local_initializer");
+    expect(code("Color")).toBe("python_stdlib_enum_declaration");
+    expect(code("relay")).toBe("python_thin_external_delegate");
+    const rankCode = (name: string): unknown => fragment.nodes.find((node) => node.external_id === `sym:src/ranking.py#${name}`)?.properties.ranking_exclusion_code;
+    expect(rankCode("Holder.__init__")).toBe("trivial_constructor");
+    expect(rankCode("Color")).toBe("enum_declaration");
+    expect(rankCode("relay")).toBe("thin_external_delegate");
+    expect(rankCode("Behaviour")).toBe("python_class_with_methods");
+    expect(rankCode("Unsafe")).toBe("python_class_with_methods");
+    expect(fragment.nodes.find((node) => node.external_id === "sym:src/ranking.py#Behaviour")?.properties.ranking_exclusion_reason).toContain("mapped method");
+    expect(code("forwarded")).toBe("python_thin_external_delegate");
+    expect(code("Unsafe.__init__")).toBeUndefined();
+    expect(code("Behaviour")).toBeUndefined();
+    expect(code("transformed")).toBeUndefined();
+    expect(code("side_effect")).toBeUndefined();
+    expect(code("local_namespace")).toBeUndefined();
+  });
+  it("pins named Python imports and non-call module attributes to only the referenced symbol", async () => {
+    await preloadTreeSitter(["python"]);
+    mkdirSync(join(dir, "src", "api"), { recursive: true });
+    writeFileSync(join(dir, "src", "api", "mod.py"), [
+      "def a():", "    return 1", "def b():", "    return 2", "def c():", "    return 3",
+      "class Service:", "    def one(self):", "        return 1", "    def two(self):", "        return 2",
+      "class Marker:", "    pass"
+    ].join("\n"));
+    writeFileSync(join(dir, "src", "api", "consumer.py"), [
+      "import src.api.mod as module", "from src.api.mod import b", "def use():", "    module.a()", "    ref = module.c", "    b()",
+      "    return ref"
+    ].join("\n"));
+    const fragment = analyzeRepo(dir);
+    const symbols = fragment.nodes.filter((node) => node.kind === "CodeSymbol" && node.properties.file === "src/api/mod.py");
+    const find = (name: string) => symbols.find((node) => node.title === name)!;
+    const imp = fragment.edges.find((edge) => edge.relationship_type === "IMPORTS" && edge.from_external_id === "src/api/consumer.py" && edge.to_external_id === "src/api/mod.py")!;
+    expect(imp.properties?.symbol_imports).toEqual([find("b").external_id]);
+    expect(imp.properties?.symbol_references).toEqual({ [find("c").external_id]: 1 });
+    expect(fragment.edges.some((edge) => edge.relationship_type === "CALLS" && edge.to_external_id === find("a").external_id)).toBe(true);
+    expect(find("Service").properties.ranking_exclusion_code).toBe("python_class_with_methods");
+    expect(find("Service").denominator_eligible).toBe(true);
+    expect(find("Service.one").properties.ranking_exclusion_code).toBeUndefined();
+    expect(find("Service.two").properties.ranking_exclusion_code).toBeUndefined();
+    expect(find("Marker").properties.ranking_exclusion_code).toBeUndefined();
+  });
+  it("retains TS/Go symbol definitions while attaching exact TS named-import metadata", () => {
+    mkdirSync(join(dir, "src", "api"), { recursive: true });
+    writeFileSync(join(dir, "src", "api", "target.ts"), "export function a() { return 1; }\nexport function b() { return 2; }\n");
+    writeFileSync(join(dir, "src", "api", "consumer.ts"), "import { b } from './target';\nexport function run() { return b(); }\n");
+    writeFileSync(join(dir, "src", "api", "worker.go"), "package api\nfunc Execute() {}\n");
+    const fragment = analyzeRepo(dir);
+    const imp = fragment.edges.find((edge) => edge.relationship_type === "IMPORTS" && edge.from_external_id === "src/api/consumer.ts" && edge.to_external_id === "src/api/target.ts")!;
+    expect(imp.properties?.symbol_imports).toEqual(["sym:src/api/target.ts#b"]);
+    expect(fragment.nodes.some((node) => node.external_id === "sym:src/api/worker.go#Execute" && node.properties.ranking_exclusion_code === undefined)).toBe(true);
   });
 });

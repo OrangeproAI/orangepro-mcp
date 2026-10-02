@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOCAL_GRAPH_SCHEMA_VERSION, type LocalGraph } from "../../src/local/graph/ontology.js";
 import { opAnalyze, opInit } from "../../src/local/operations.js";
-import { buildArtifactIdentity, comparisonCompatibility, repositorySnapshot } from "../../src/local/provenance.js";
+import { buildArtifactIdentity, comparisonCompatibility, repositorySnapshot, ANALYZER_VERSION, PROOF_ORACLE_VERSION } from "../../src/local/provenance.js";
+import { ORS_VERSION } from "../../src/local/score/risk.js";
 import { loadGraph, workspacePaths } from "../../src/local/workspace.js";
 
 const dirs: string[] = [];
@@ -53,6 +54,19 @@ describe("artifact identity", () => {
     expect(comparisonCompatibility(base, config)).toBe("ranking_changed");
     expect(comparisonCompatibility(base, oracle)).toBe("experiment_changed");
     expect(comparisonCompatibility(null, base)).toBe("provenance_incomplete");
+  });
+
+  it("pins analyzer v5, targeted-mutation oracle v3, and the stable-population ORS identity", () => {
+    const identity = buildArtifactIdentity(graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } }), inputs);
+
+    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v5");
+    expect(PROOF_ORACLE_VERSION).toBe("orangepro.targeted_mutation_oracle.v3");
+    expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v2");
+    expect(identity).toMatchObject({
+      analyzer_version: "orangepro.analyzer.v5",
+      oracle_version: "orangepro.targeted_mutation_oracle.v3",
+      ors_version: "orangepro.ors.stable_population.v2"
+    });
   });
 
   it("keeps Git commit and dirty state as metadata, not material identity", () => {

@@ -134,7 +134,7 @@ describe("G2 — Java module-root walk-up (bounded by the invocation root)", () 
   });
 });
 
-describe("G2 — Python sandbox narrowing (nearest project root, fail-safe)", () => {
+describe("G2/R7.1 — Python spike owns nearest test-project root selection", () => {
   function pythonFixture(splitTest: boolean): { ws: string; source: string } {
     const ws = temp();
     const source = join(ws, "app");
@@ -149,7 +149,7 @@ describe("G2 — Python sandbox narrowing (nearest project root, fail-safe)", ()
     return { ws, source };
   }
 
-  it("narrows the sandbox to the owning pyproject dir when target AND test live inside it", () => {
+  it("passes the bounded analyzed root so the spike can derive the owning test project", () => {
     const { ws, source } = pythonFixture(false);
     const cap = capturing();
     expect(() =>
@@ -165,12 +165,12 @@ describe("G2 — Python sandbox narrowing (nearest project root, fail-safe)", ()
         { ...deps, dynamicProofRunner: cap.runner }
       )
     ).toThrow("CAPTURED-ARGS");
-    expect(flag(cap.args(), "--root")).toBe(join(resolve(source), "pkg"));
-    expect(flag(cap.args(), "--target")).toBe("app.py");
-    expect(flag(cap.args(), "--test")).toBe("tests/test_app.py");
+    expect(flag(cap.args(), "--root")).toBe(resolve(source));
+    expect(flag(cap.args(), "--target")).toBe("pkg/app.py");
+    expect(flag(cap.args(), "--test")).toBe("pkg/tests/test_app.py");
   });
 
-  it("falls back to the analyzed root when the test lives OUTSIDE the project dir (narrowing only, never breaking)", () => {
+  it("keeps the repo sandbox when test and target projects differ so the spike can use the test-owned root", () => {
     const { ws, source } = pythonFixture(true);
     const cap = capturing();
     expect(() =>

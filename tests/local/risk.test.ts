@@ -104,6 +104,48 @@ function aiCandidate(from: string, to: string, relationship_type: "MAY_BE_TESTED
 }
 
 describe("rankRiskGaps", () => {
+  it("counts 100 exact module calls without spreading file imports across sibling symbols", () => {
+    const g = graph();
+    const targets = ["a", "b", "c"].map((name) => symbol(`sym:src/mod.py#${name}`, name, "src/mod.py"));
+    g.nodes = [...targets, ...Array.from({ length: 100 }, (_, i) => symbol(`sym:src/reader${i}.py#run`, "run", `src/reader${i}.py`))];
+    for (let i = 0; i < 100; i++) {
+      const reader = g.nodes[i + targets.length]!;
+      g.edges.push(edge(`src/reader${i}.py`, "src/mod.py", "IMPORTS"));
+      g.edges.push(edge(reader.external_id, targets[0]!.external_id, "CALLS"));
+    }
+    const ranks = new Map(rankRiskGaps(g, { limit: 200, repoRoot: "" }).map((r) => [r.id, r]));
+    expect(targets.map((t) => ranks.get(t.external_id)?.incoming_refs)).toEqual([100, 0, 0]);
+    expect(ranks.get(targets[0]!.external_id)!.risk_score).toBeGreaterThan(ranks.get(targets[1]!.external_id)!.risk_score);
+  });
+
+  it("attributes named import and non-call module attribute facts to their exact symbols only", () => {
+    const g = graph();
+    const targets = ["a", "b", "c"].map((name) => symbol(`sym:src/mod.py#${name}`, name, "src/mod.py"));
+    g.nodes = targets;
+    const named = edge("src/reader.py", "src/mod.py", "IMPORTS");
+    named.properties = { symbol_imports: [targets[1]!.external_id] };
+    const attribute = edge("src/another.py", "src/mod.py", "IMPORTS");
+    attribute.properties = { symbol_references: { [targets[2]!.external_id]: 2 } };
+    g.edges = [named, attribute];
+    const ranks = new Map(rankRiskGaps(g, { limit: 10, repoRoot: "" }).map((r) => [r.id, r]));
+    expect(targets.map((t) => ranks.get(t.external_id)?.incoming_refs)).toEqual([0, 1, 2]);
+  });
+
+  it("leaves TS and Go ranking units intact when Python class exclusion is present", () => {
+    const g = graph();
+    const py = { ...symbol("sym:src/api/holder.py#Holder", "Holder", "src/api/holder.py"), properties: { file: "src/api/holder.py", symbol_kind: "class", start_line: 1, end_line: 20, ranking_exclusion_code: "python_class_with_methods" } };
+    const methods = ["one", "two"].map((name) => ({ ...symbol(`sym:src/api/holder.py#Holder.${name}`, `Holder.${name}`, "src/api/holder.py", true, "Holder"), properties: { file: "src/api/holder.py", symbol_kind: "method", member_of: "Holder", start_line: 3, end_line: 10 } }));
+    const empty = { ...symbol("sym:src/api/empty.py#Empty", "Empty", "src/api/empty.py"), properties: { file: "src/api/empty.py", symbol_kind: "class", start_line: 1, end_line: 10 } };
+    const tsClass = { ...symbol("sym:src/api/widget.ts#Widget", "Widget", "src/api/widget.ts"), properties: { file: "src/api/widget.ts", symbol_kind: "class", start_line: 1, end_line: 20 } };
+    const goClass = { ...symbol("sym:src/api/widget.go#Widget", "Widget", "src/api/widget.go"), properties: { file: "src/api/widget.go", symbol_kind: "class", start_line: 1, end_line: 20 } };
+    g.nodes = [py, ...methods, empty, tsClass, goClass];
+    const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" }).map((r) => r.id);
+    expect(ranked).not.toContain(py.external_id);
+    for (const node of [...methods, empty, tsClass, goClass]) expect(ranked).toContain(node.external_id);
+    expect(g.nodes).toHaveLength(6);
+    expect(g.nodes.every((node) => node.denominator_eligible)).toBe(true);
+  });
+
   it("keeps an unchanged behavior stable when a peer becomes Associated", () => {
     const g = graph();
     const a = symbol("sym:src/api/a.ts#runA", "runA", "src/api/a.ts");
@@ -145,13 +187,14 @@ describe("rankRiskGaps", () => {
     ];
 
     const ranked = rankRiskGaps(g, { limit: 10, repoRoot: "" });
-    // ORS = P × I × D. handleUser (entry point, high impact) and caller (fan-out, high probability)
-    // both outrank saveUser. Confirmed and non-eligible symbols are excluded.
-    expect(ranked.map((r) => r.id)).toEqual(["sym:src/api/users.ts#handleUser", "sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveUser"]);
-    expect(ranked[0]).toMatchObject({ entry_point: true, incoming_refs: 1, git_churn: 0 });
-    expect(ranked[0].reasons).toContain("near an API/route/handler entry point");
-    expect(ranked[0].reasons[0]).toMatch(/^ORS \d+(\.\d+)? ≈ P\d+ × I\d+ × D\d+$/);
-    expect(ranked[0].detection_difficulty).toBe(10);
+    // A file-only import cannot inflate handleUser; caller's fan-out and saveUser's
+    // exact incoming call now take precedence. Confirmed/noneligible nodes stay out.
+    expect(ranked.map((r) => r.id)).toEqual(["sym:src/core/caller.ts#caller", "sym:src/core/save.ts#saveUser", "sym:src/api/users.ts#handleUser"]);
+    const handle = ranked.find((r) => r.title === "handleUser")!;
+    expect(handle).toMatchObject({ entry_point: true, incoming_refs: 0, git_churn: 0 });
+    expect(handle.reasons).toContain("near an API/route/handler entry point");
+    expect(handle.reasons[0]).toMatch(/^ORS \d+(\.\d+)? ≈ P\d+ × I\d+ × D\d+$/);
+    expect(handle.detection_difficulty).toBe(10);
     expect(ranked.some((r) => r.id.includes("confirmed"))).toBe(false);
     expect(ranked.some((r) => r.id.includes("helper"))).toBe(false);
   });
@@ -327,6 +370,7 @@ describe("rankRiskGaps", () => {
     expect(gap.git_churn).toBeGreaterThan(0);
     expect(gap.reasons.join(" ")).toContain("git churn");
     expect(gap.churn_available).toBe(true);
+    expect(gap.is_new_code).toBe(true);
 
     const health = inspectRiskInputHealth(root);
     expect(health.history).toBe("full");
@@ -338,7 +382,28 @@ describe("rankRiskGaps", () => {
     const partial = inspectRiskInputHealth(root);
     expect(partial.history).toBe("partial");
     expect(partial.churnAvailable).toBe(false);
-    expect(partial.reason).toContain("partial-clone");
+    expect(partial.reason).toContain("partial clone");
+  });
+
+  it("attributes streamed rename churn to the current destination path", () => {
+    const root = mkdtempSync(join(tmpdir(), "opro-risk-rename-"));
+    dirs.push(root);
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src/old.ts"), "export function current() {\n  return 1;\n}\n");
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "OrangePro", GIT_AUTHOR_EMAIL: "opro@example.com", GIT_COMMITTER_NAME: "OrangePro", GIT_COMMITTER_EMAIL: "opro@example.com" };
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: root, stdio: "ignore", env: gitEnv });
+    execFileSync("git", ["mv", "src/old.ts", "src/current.ts"], { cwd: root, stdio: "ignore" });
+    writeFileSync(join(root, "src/current.ts"), "export function current() {\n  return 2;\n}\n");
+    execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "rename and change"], { cwd: root, stdio: "ignore", env: gitEnv });
+
+    const g = graph(root);
+    g.nodes = [symbol("sym:src/current.ts#current", "current", "src/current.ts")];
+    const [gap] = rankRiskGaps(g, { limit: 1, repoRoot: root });
+    expect(gap.git_churn).toBeGreaterThan(0);
+    expect(gap.churn_state).toBe("complete");
   });
 });
 
@@ -527,7 +592,7 @@ describe("per-repo risk config (riskConfig.ts) — classification + overrides wi
     const a = loadRiskConfig("");
     const b = loadRiskConfig("/nonexistent/repo");
     expect(a.hash).toBe(b.hash);
-    expect(a.config.tuning).toEqual({ irreversibility_floor: true, silence_multiplier: true });
+    expect(a.config.tuning).toEqual({ irreversibility_floor: true, silence_multiplier: true, churn_window_days: 180 });
   });
 
   it("an override WITHOUT a reason is ignored with a warning (a tuned report must never pass as clean)", () => {
@@ -648,6 +713,16 @@ describe("round three — reviewer reproductions as fixtures", () => {
     expect(configDisclosureFor(graph(root), root).warnings.length).toBeGreaterThan(0);
   });
 
+  it("hashes and discloses a non-empty custom Python proof runner command", () => {
+    const customRoot = repoWith(JSON.stringify({ tuning: { churn_window_days: 90 }, proof: { python_runner: "uv run python -m pytest -p no:warnings", attempt_limit: 17, baseline_green_target: 4 } }));
+    const autoRoot = repoWith(JSON.stringify({ proof: { python_runner: "auto", attempt_limit: 17, baseline_green_target: 4 } }));
+    const custom = loadRiskConfig(customRoot);
+    expect(custom.config.proof).toEqual({ python_runner: "uv run python -m pytest -p no:warnings", attempt_limit: 17, baseline_green_target: 4 });
+    expect(custom.hash).not.toBe(loadRiskConfig(autoRoot).hash);
+    expect(configDisclosureFor(graph(customRoot), customRoot).proof).toEqual(custom.config.proof);
+    expect(configDisclosureFor(graph(customRoot), customRoot).tuning).toEqual({ churn_window_days: 90 });
+  });
+
   it("#2 a suppressed symbol is DISCLOSED with its reason, not silently dropped", () => {
     const root = repoWith(JSON.stringify({ overrides: [{ symbol: "sym:src/noise.go#noise.Run", action: "suppress", reason: "generated shim, not product behavior" }] }));
     const g = graph(root);
@@ -685,6 +760,197 @@ describe("round three — reviewer reproductions as fixtures", () => {
     const all = rankRiskGaps(g, { limit: Number.MAX_SAFE_INTEGER, repoRoot: "" });
     const sinks = all.filter((r) => r.sink_callee);
     expect(sinks.map((r) => r.id)).toContain(low.external_id);
+  });
+});
+
+describe("Round 7 structural ranking exclusions and constructor-chain sinks", () => {
+  const repo = (files: Record<string, string>): string => {
+    const root = mkdtempSync(join(tmpdir(), "opro-r7-"));
+    dirs.push(root);
+    for (const [file, content] of Object.entries(files)) {
+      mkdirSync(join(root, file, ".."), { recursive: true });
+      writeFileSync(join(root, file), content);
+    }
+    return root;
+  };
+  const classSymbol = (id: string, title: string, file: string, start: number, end: number) => ({
+    ...symbol(id, title, file), properties: { file, symbol_kind: "class", start_line: start, end_line: end }
+  });
+  const methodSymbol = (id: string, title: string, file: string, owner: string, start: number, end: number) => ({
+    ...symbol(id, title, file), properties: { file, symbol_kind: "method", member_of: owner, start_line: start, end_line: end }
+  });
+
+  it("excludes only a literal/parameter thread-local initializer, including a literal self assignment", () => {
+    const root = repo({
+      "src/holder.py": [
+        "import threading",
+        "class Holder(threading.local):",
+        "    def __init__(self, value=None):",
+        "        \"\"\"state\"\"\"",
+        "        super().__init__()",
+        "        self.user = 'hello'",
+        "        self.value = value",
+        "        self.empty = None",
+        "class Unsafe(threading.local):",
+        "    def __init__(self):",
+        "        self.x = load()",
+        "class Branched(threading.local):",
+        "    def __init__(self, value):",
+        "        if value:",
+        "            self.value = value",
+        "class Looped(threading.local):",
+        "    def __init__(self):",
+        "        for value in []:",
+        "            self.value = value"
+      ].join("\n")
+    });
+    const g = graph(root);
+    g.nodes = [
+      classSymbol("sym:src/holder.py#Holder", "Holder", "src/holder.py", 2, 7),
+      { ...methodSymbol("sym:src/holder.py#Holder.__init__", "Holder.__init__", "src/holder.py", "Holder", 3, 7), properties: { ...methodSymbol("sym:x#x", "x", "src/holder.py", "Holder", 3, 7).properties, ranking_exclusion_reason_code: "python_trivial_thread_local_initializer" } },
+      classSymbol("sym:src/holder.py#Unsafe", "Unsafe", "src/holder.py", 9, 11),
+      methodSymbol("sym:src/holder.py#Unsafe.__init__", "Unsafe.__init__", "src/holder.py", "Unsafe", 10, 11),
+      classSymbol("sym:src/holder.py#Branched", "Branched", "src/holder.py", 12, 15),
+      methodSymbol("sym:src/holder.py#Branched.__init__", "Branched.__init__", "src/holder.py", "Branched", 13, 15),
+      classSymbol("sym:src/holder.py#Looped", "Looped", "src/holder.py", 16, 19),
+      methodSymbol("sym:src/holder.py#Looped.__init__", "Looped.__init__", "src/holder.py", "Looped", 17, 19)
+    ];
+    const ids = rankRiskGaps(g, { repoRoot: root, limit: 20 }).map((row) => row.id);
+    expect(ids).not.toContain("sym:src/holder.py#Holder.__init__");
+    expect(ids).toEqual(expect.arrayContaining([
+      "sym:src/holder.py#Unsafe.__init__",
+      "sym:src/holder.py#Branched.__init__",
+      "sym:src/holder.py#Looped.__init__"
+    ]));
+  });
+
+  it("excludes only stdlib enum declarations without methods", () => {
+    const root = repo({
+      "src/kinds.py": [
+        "from enum import Enum, Flag as StdFlag",
+        "import enum as enums",
+        "class Color(Enum):",
+        "    RED = 1",
+        "    BLUE = 2",
+        "    GREEN = 3",
+        "class Mode(enums.IntFlag):",
+        "    READ = 1",
+        "    WRITE = 2",
+        "    EXECUTE = 4",
+        "class Behaviour(StdFlag):",
+        "    X = 1",
+        "    def active(self):",
+        "        return True",
+        "class Enum:",
+        "    ONE = 1",
+        "    TWO = 2",
+        "    THREE = 3",
+        "class UserNamed(Enum):",
+        "    ONE = 1",
+        "    TWO = 2",
+        "    THREE = 3"
+      ].join("\n")
+    });
+    const g = graph(root);
+    g.nodes = [
+      { ...classSymbol("sym:src/kinds.py#Color", "Color", "src/kinds.py", 3, 6), properties: { ...classSymbol("sym:x#x", "x", "src/kinds.py", 3, 6).properties, ranking_exclusion_reason_code: "python_stdlib_enum_declaration" } },
+      { ...classSymbol("sym:src/kinds.py#Mode", "Mode", "src/kinds.py", 7, 10), properties: { ...classSymbol("sym:x#x", "x", "src/kinds.py", 7, 10).properties, ranking_exclusion_reason_code: "python_stdlib_enum_declaration" } },
+      classSymbol("sym:src/kinds.py#Behaviour", "Behaviour", "src/kinds.py", 11, 14),
+      classSymbol("sym:src/kinds.py#Enum", "Enum", "src/kinds.py", 15, 18),
+      classSymbol("sym:src/kinds.py#UserNamed", "UserNamed", "src/kinds.py", 19, 22)
+    ];
+    const ids = rankRiskGaps(g, { repoRoot: root, limit: 20 }).map((row) => row.id);
+    expect(ids).not.toEqual(expect.arrayContaining(["sym:src/kinds.py#Color", "sym:src/kinds.py#Mode"]));
+    expect(ids).toEqual(expect.arrayContaining(["sym:src/kinds.py#Behaviour", "sym:src/kinds.py#Enum", "sym:src/kinds.py#UserNamed"]));
+  });
+
+  it("excludes only an exact external bare-parameter delegate and keeps sensitive, altered, and side-effecting wrappers", () => {
+    const root = repo({
+      "src/wrappers.py": [
+        "import vendor_lib as vendor",
+        "from vendor_objects import client",
+        "def relay(value: str, count=1):",
+        "    \"\"\"delegate\"\"\"",
+        "    return vendor.run(value, count)",
+        "def object_relay(value):",
+        "    return client.run(value)",
+        "def password_hash(password):",
+        "    return vendor.hash(password)",
+        "def altered(value):",
+        "    return vendor.run(value.strip())",
+        "def side_effect(value):",
+        "    audit(value)",
+        "    return vendor.run(value)",
+        "def alias(value):",
+        "    return value",
+        "import vendor_lib as _backend",
+        "backend = _backend",
+        "def forwarded(value):",
+        "    return backend.run(value)",
+        "import helper_lib as _driver",
+        "driver = _driver",
+        "driver = _driver",
+        "def duplicated_alias(value):",
+        "    return driver.run(value)",
+        "import service_lib as _service",
+        "service = _service.client",
+        "def derived_alias(value):",
+        "    return service.run(value)"
+      ].join("\n")
+    });
+    const g = graph(root);
+    g.nodes = [
+      { ...symbol("sym:src/wrappers.py#relay", "relay", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 3, end_line: 5, ranking_exclusion_reason_code: "python_thin_external_delegate" } },
+      { ...symbol("sym:src/wrappers.py#object_relay", "object_relay", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 6, end_line: 7, ranking_exclusion_reason_code: "python_thin_external_delegate" } },
+      { ...symbol("sym:src/wrappers.py#password_hash", "password_hash", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 8, end_line: 9 } },
+      { ...symbol("sym:src/wrappers.py#altered", "altered", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 10, end_line: 11 } },
+      { ...symbol("sym:src/wrappers.py#side_effect", "side_effect", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 12, end_line: 14 } },
+      { ...symbol("sym:src/wrappers.py#alias", "alias", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 15, end_line: 16 } },
+      { ...symbol("sym:src/wrappers.py#forwarded", "forwarded", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 19, end_line: 20, ranking_exclusion_reason_code: "python_thin_external_delegate" } },
+      { ...symbol("sym:src/wrappers.py#duplicated_alias", "duplicated_alias", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 24, end_line: 25 } },
+      { ...symbol("sym:src/wrappers.py#derived_alias", "derived_alias", "src/wrappers.py"), properties: { file: "src/wrappers.py", symbol_kind: "function", start_line: 28, end_line: 29 } }
+    ];
+    const ids = rankRiskGaps(g, { repoRoot: root, limit: 20 }).map((row) => row.id);
+    expect(ids).not.toContain("sym:src/wrappers.py#relay");
+    expect(ids).not.toContain("sym:src/wrappers.py#object_relay");
+    expect(ids).not.toContain("sym:src/wrappers.py#forwarded");
+    expect(ids).toEqual(expect.arrayContaining([
+      "sym:src/wrappers.py#password_hash",
+      "sym:src/wrappers.py#altered",
+      "sym:src/wrappers.py#side_effect",
+      "sym:src/wrappers.py#alias",
+      "sym:src/wrappers.py#duplicated_alias",
+      "sym:src/wrappers.py#derived_alias"
+    ]));
+  });
+
+  it("accepts exactly one visible in-repo class constructor before a destructive terminal and rejects unsafe chains", () => {
+    const g = graph();
+    const repoClass = classSymbol("sym:src/commands.py#Repo", "Repo", "src/commands.py", 1, 2);
+    const sameNameElsewhere = classSymbol("sym:src/other.py#Repo", "Repo", "src/other.py", 1, 2);
+    const importedClass = classSymbol("sym:src/repository.py#Store", "Store", "src/repository.py", 1, 2);
+    const ambiguousClass = classSymbol("sym:src/other_repository.py#Store", "Store", "src/other_repository.py", 1, 2);
+    const good = { ...symbol("sym:src/commands.py#clean", "clean", "src/commands.py"), properties: { file: "src/commands.py", external_callees: ["Repo(db).view.delete"], constructor_chain_sinks: [{ callee: "Repo(db).view.delete", constructor_symbol: repoClass.external_id }] } };
+    const imported = { ...symbol("sym:src/imported_command.py#clean", "clean", "src/imported_command.py"), properties: { file: "src/imported_command.py", external_callees: ["Store(db).table.removeItem"], constructor_chain_sinks: [{ callee: "Store(db).table.removeItem", constructor_symbol: importedClass.external_id }] } };
+    const nested = { ...symbol("sym:src/commands.py#nested", "nested", "src/commands.py"), properties: { file: "src/commands.py", external_callees: ["make().x().delete"] } };
+    const participle = { ...symbol("sym:src/commands.py#past", "past", "src/commands.py"), properties: { file: "src/commands.py", external_callees: ["Repo(db).table.deleted"] } };
+    const nonPersistentRemove = { ...symbol("sym:src/commands.py#detach", "detach", "src/commands.py"), properties: { file: "src/commands.py", external_callees: ["Repo(db).view.removeItem"] } };
+    const collision = { ...symbol("sym:src/wrong.py#collision", "collision", "src/wrong.py"), properties: { file: "src/wrong.py", external_callees: ["Repo(db).table.delete"] } };
+    const ambiguous = { ...symbol("sym:src/ambiguous.py#clean", "clean", "src/ambiguous.py"), properties: { file: "src/ambiguous.py", external_callees: ["Store(db).table.delete"] } };
+    g.nodes = [repoClass, sameNameElsewhere, importedClass, ambiguousClass, good, imported, nested, participle, nonPersistentRemove, collision, ambiguous];
+    g.edges = [
+      edge("src/imported_command.py", "src/repository.py", "IMPORTS"),
+      edge("src/ambiguous.py", "src/repository.py", "IMPORTS"),
+      edge("src/ambiguous.py", "src/other_repository.py", "IMPORTS")
+    ];
+    const rows = new Map(rankRiskGaps(g, { repoRoot: "", limit: 20 }).map((row) => [row.id, row]));
+    expect(rows.get(good.external_id)?.sink_callee).toBe("Repo(db).view.delete");
+    expect(rows.get(imported.external_id)?.sink_callee).toBe("Store(db).table.removeItem");
+    expect(rows.get(nested.external_id)?.sink_callee).toBeUndefined();
+    expect(rows.get(participle.external_id)?.sink_callee).toBeUndefined();
+    expect(rows.get(nonPersistentRemove.external_id)?.sink_callee).toBeUndefined();
+    expect(rows.get(collision.external_id)?.sink_callee).toBeUndefined();
+    expect(rows.get(ambiguous.external_id)?.sink_callee).toBeUndefined();
   });
 });
 

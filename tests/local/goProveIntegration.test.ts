@@ -75,6 +75,37 @@ function asProof(res: ProveLoopResult): DynamicProofResult & { behavior_coverage
 }
 
 describe("Go dynamic-proof mint mapping (unit, no toolchain needed)", () => {
+  it("persists redacted runner diagnostics without changing an unproven Go verdict", () => {
+    const { ws, source } = analyzedGo("proven");
+    const res = opDynamicProof(ws, {
+      target_symbol: "sym:compute.go#Compute",
+      source,
+      test_run: "^TestCompute$"
+    }, {
+      ...deps,
+      dynamicProofRunner: () => ({
+        exitCode: 2,
+        stderr: "api_key=private-value",
+        stdout: JSON.stringify({
+          status: "unrunnable",
+          proven: false,
+          reason: "baseline did not start",
+          testRun: "^TestCompute$",
+          baseline: { exitCode: 2, timedOut: false },
+          mutant: { skipped: true }
+        })
+      })
+    });
+    expect(res.record.closed).toBe(false);
+    expect(res.record.dynamic_proof).toMatchObject({
+      command: expect.stringContaining("go-dynamic-proof-spike.mjs"),
+      cwd: source,
+      exit_code: 2,
+      duration_ms: expect.any(Number),
+      stderr_tail: ["<redacted:credential>"]
+    });
+  });
+
   it("maps a proven Go verdict onto assertionFailure=true (close)", () => {
     const oracle = __mapGoOracleForTest({
       status: "proven",
@@ -178,6 +209,14 @@ describe.skipIf(!GO)("Go dynamic-proof mint path (real toolchain)", () => {
     expect(cert?.target_not_mocked).toBe(true);
     expect(cert?.runner).toBe("go");
     expect(cert?.sentinel).toBe("go-zero-return");
+    expect(cert).toMatchObject({
+      command: expect.stringContaining("go-dynamic-proof-spike.mjs"),
+      cwd: source,
+      exit_code: 0,
+      duration_ms: expect.any(Number),
+      stdout_tail: [],
+      stderr_tail: []
+    });
 
     // RTM counts it as Dynamically Proven.
     const rtm = opRtm(ws, { format: "json" });

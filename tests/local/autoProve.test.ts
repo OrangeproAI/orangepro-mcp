@@ -546,6 +546,38 @@ function makeWorkspaceWithExistingTests(): string {
   return dir;
 }
 
+function makePythonWorkspaceWithExistingTests(): string {
+  const dir = mkdtempSync(join(tmpdir(), "autoprove-python-existing-"));
+  tempDirs.push(dir);
+  writeFileSync(join(dir, "pyproject.toml"), "[project]\nname='fixture'\nversion='0.0.0'\n", "utf8");
+  writeFileSync(
+    join(dir, "service.py"),
+    [
+      "def first_value() -> int:",
+      "    return 1",
+      "def second_value() -> int:",
+      "    return 2",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  writeFileSync(
+    join(dir, "test_service.py"),
+    [
+      "from service import first_value, second_value",
+      "async def test_first_value():",
+      "    assert first_value() == 1",
+      "def test_second_value():",
+      "    assert second_value() == 2",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  opInit(dir, { clock, env: NO_ENV });
+  opAnalyze(dir, { source: dir }, { clock, env: NO_ENV });
+  return dir;
+}
+
 /** A generated test targeting the untested gap symbol (used by the generation-lane test). */
 function fakePaymentTest(): GeneratedTest {
   return fakeTest({
@@ -724,6 +756,7 @@ describe("autoProve — PR 1.5 existing-associated-tests-first", () => {
           relationship_type: "COVERS",
           from_external_id: testCase.external_id,
           to_external_id: target.external_id,
+          evidence_strength: "hard",
           properties: { test_name: "TestCalc::test_add" }
         }
       ],
@@ -852,7 +885,7 @@ describe("autoProve — project-aware proof scheduling", () => {
     } as unknown as GraphNode;
   }
 
-  it("keeps hard before weak, then gives the dominant language first while preserving in-group order", () => {
+  it("keeps non-Python queue order unchanged when Python candidates are absent", () => {
     const root = mkdtempSync(join(tmpdir(), "autoprove-schedule-"));
     tempDirs.push(root);
     mkdirSync(join(root, "python"), { recursive: true });
@@ -863,31 +896,51 @@ describe("autoProve — project-aware proof scheduling", () => {
     writeFileSync(join(root, "nested/rust/Cargo.toml"), "[package]\nname='fixture-rs'\nversion='0.0.0'\n");
 
     const go = schedNode("sym:nested/go/main.go#Run", "nested/go/main.go");
-    const pyA = schedNode("sym:python/a.py#alpha", "python/a.py");
-    const pyB = schedNode("sym:python/b.py#beta", "python/b.py");
-    const graph = { nodes: [go, pyA, pyB], edges: [], candidate_edges: [] } as unknown as LocalGraph;
+    const java = schedNode("sym:nested/rust/Worker.java#run", "nested/rust/Worker.java");
+    const graph = { nodes: [go, java], edges: [], candidate_edges: [] } as unknown as LocalGraph;
     const nodeById = new Map(graph.nodes.map((node) => [node.external_id, node]));
     const map = new Map<string, { test: string; hard: boolean }[]>([
       [go.external_id, [{ test: "nested/go/main_test.go", hard: true }]],
-      [pyA.external_id, [{ test: "python/test_a.py", hard: true }]],
-      [pyB.external_id, [{ test: "python/test_b.py", hard: false }]]
+      [java.external_id, [{ test: "nested/rust/WorkerTest.java", hard: true }]]
     ]);
 
-    expect(proofLanguageOrder(graph)).toEqual(["python", "go"]);
+    expect(proofLanguageOrder(graph)).toEqual(["go", "java"]);
     expect(proofRunnerRoot(root, go.properties.file as string, "nested/go/main_test.go")).toBe("nested/go");
     expect(proofRunnerRoot(root, "nested/rust/src/lib.rs")).toBe("nested/rust");
-    expect(proofRunnerRoot(root, pyA.properties.file as string, "python/test_a.py")).toBe(".");
     expect(proofRunnerRoot(root, "../outside/main.go", "../outside/main_test.go")).toBe(".");
     expect(orderExistingAttempts(map, 3, { graph, nodeById, sourceRoot: root }).map((item) => item.symId)).toEqual([
-      pyA.external_id,
       go.external_id,
-      pyB.external_id
+      java.external_id
     ]);
     expect(orderRankedProofCandidates([
       { id: go.external_id, file: "nested/go/main.go" },
-      { id: pyB.external_id, file: "python/b.py" },
-      { id: pyA.external_id, file: "python/a.py" }
-    ], graph, root).map((item) => item.id)).toEqual([pyB.external_id, pyA.external_id, go.external_id]);
+      { id: java.external_id, file: "nested/rust/Worker.java" }
+    ], graph, root).map((item) => item.id)).toEqual([go.external_id, java.external_id]);
+  });
+
+  it("orders Python by ORS before a lower-risk direct association, then uses direct and pytest testpaths only for equal scores", () => {
+    const root = mkdtempSync(join(tmpdir(), "autoprove-python-ors-"));
+    tempDirs.push(root);
+    writeFileSync(join(root, "pyproject.toml"), "[tool.pytest.ini_options]\ntestpaths = ['selected']\n");
+    const high = schedNode("sym:high.py#high", "high.py");
+    const direct = schedNode("sym:direct.py#direct", "direct.py");
+    const selected = schedNode("sym:selected.py#selected", "selected.py");
+    const plain = schedNode("sym:plain.py#plain", "plain.py");
+    const callers = Array.from({ length: 8 }, (_, i) => ({ relationship_type: "CALLS", from_external_id: `external:caller-${i}`, to_external_id: high.external_id }));
+    const graph = { workspace: { root }, nodes: [high, direct, selected, plain], edges: callers, candidate_edges: [] } as unknown as LocalGraph;
+    const nodeById = new Map(graph.nodes.map((node) => [node.external_id, node]));
+    const map = new Map<string, { test: string; hard: boolean }[]>([
+      [direct.external_id, [{ test: "tests/test_direct.py", hard: true }]],
+      [high.external_id, [{ test: "tests/test_high.py", hard: false }]],
+      [plain.external_id, [{ test: "other/test_plain.py", hard: false }]],
+      [selected.external_id, [{ test: "selected/test_selected.py", hard: false }]]
+    ]);
+
+    const order = orderExistingAttempts(map, 3, { graph, nodeById, sourceRoot: root }).map((item) => item.symId);
+    // `high` has the stronger ORS signal, so a lower-ORS direct test cannot displace it.
+    expect(order.slice(0, 2)).toEqual([high.external_id, direct.external_id]);
+    // The equal-score remainder is direct/source-stable except that configured testpaths win.
+    expect(order.slice(2)).toEqual([selected.external_id, plain.external_id]);
   });
 
   it("preserves the legacy order exactly for a monolingual candidate set", () => {
@@ -901,13 +954,13 @@ describe("autoProve — project-aware proof scheduling", () => {
     expect(orderRankedProofCandidates(original, graph, "/tmp/fixture")).toEqual(original);
   });
 
-  it("falls back to the analyzed root when a Python test is outside the target's nested project", () => {
+  it("derives the Python runner root from the test even when the target is elsewhere in the repo", () => {
     const root = mkdtempSync(join(tmpdir(), "autoprove-python-root-"));
     tempDirs.push(root);
-    mkdirSync(join(root, "apps/api"), { recursive: true });
-    mkdirSync(join(root, "tests"), { recursive: true });
+    mkdirSync(join(root, "apps/api/tests"), { recursive: true });
+    mkdirSync(join(root, "shared"), { recursive: true });
     writeFileSync(join(root, "apps/api/pyproject.toml"), "[project]\nname='api'\nversion='0.0.0'\n");
-    expect(proofRunnerRoot(root, "apps/api/service.py", "tests/test_service.py")).toBe(".");
+    expect(proofRunnerRoot(root, "shared/service.py", "apps/api/tests/test_service.py")).toBe("apps/api");
   });
 
   it("uses nested pytest and tox configuration as Python runner-root boundaries", () => {
@@ -918,6 +971,27 @@ describe("autoProve — project-aware proof scheduling", () => {
       writeFileSync(join(root, `apps/api/${marker}`), "[pytest]\n");
       expect(proofRunnerRoot(root, "apps/api/service.py", "apps/api/tests/test_service.py")).toBe("apps/api");
     }
+  });
+
+  it("uses each test root's own declared testpaths as an equal-ORS tie-breaker", () => {
+    const root = mkdtempSync(join(tmpdir(), "autoprove-python-testpaths-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "apps/a/tests"), { recursive: true });
+    mkdirSync(join(root, "apps/b/spec"), { recursive: true });
+    writeFileSync(join(root, "apps/a/pyproject.toml"), "[tool.pytest.ini_options]\ntestpaths = ['tests']\n");
+    writeFileSync(join(root, "apps/b/pyproject.toml"), "[tool.pytest.ini_options]\ntestpaths = ['spec']\n");
+    const selected = schedNode("sym:shared/selected.py#selected", "shared/selected.py");
+    const plain = schedNode("sym:shared/plain.py#plain", "shared/plain.py");
+    const graph = { workspace: { root }, nodes: [plain, selected], edges: [], candidate_edges: [] } as unknown as LocalGraph;
+    const nodeById = new Map(graph.nodes.map((node) => [node.external_id, node]));
+    const map = new Map<string, { test: string; hard: boolean }[]>([
+      [plain.external_id, [{ test: "apps/a/spec/test_plain.py", hard: false }]],
+      [selected.external_id, [{ test: "apps/b/spec/test_selected.py", hard: false }]]
+    ]);
+
+    const order = orderExistingAttempts(map, 3, { graph, nodeById, sourceRoot: root });
+    expect(order.map((item) => item.symId)).toEqual([selected.external_id, plain.external_id]);
+    expect(order.map((item) => item.projectRoot)).toEqual(["apps/b", "apps/a"]);
   });
 });
 
@@ -1171,8 +1245,92 @@ function fakeTestFor(fn: string): GeneratedTest {
   });
 }
 
-describe("autoProve — unified dynamic-proof budget (default 5)", () => {
-  it("default budget attempts at most 5 targets even with >5 eligible gaps", async () => {
+describe("autoProve — R7.1 proof-runner limits", () => {
+  it("keeps the released five-attempt default for non-Python generation", async () => {
+    const W = makeWorkspaceMulti(8);
+    const gen = fakeGenerate(MULTI_NAMES.map(fakeTestFor));
+    const res = await autoProve(W, {}, baseDeps(KEY_ENV, { generate: gen, dynamicProofRunner: proofRunner("proven") }));
+
+    expect(res.attempted).toBe(5);
+    expect(res.proven).toBe(5);
+  });
+
+  it("keeps generated baseline failures inside the explicit non-Python autoLimit", async () => {
+    const W = makeWorkspaceMulti(6);
+    let calls = 0;
+    const proveLoop = vi.fn(() => (++calls === 1 ? baselineRed("Cannot find module './fixture'") : provenLoop()));
+    const res = await autoProve(W, { autoLimit: 3, proof_gen_limit: 1 }, baseDeps(KEY_ENV, { generate: fakeGenerate(MULTI_NAMES.map(fakeTestFor)), proveLoop }));
+
+    expect(proveLoop).toHaveBeenCalledTimes(3);
+    expect(res.attempted).toBe(3);
+    expect(res.proven).toBe(2);
+  });
+
+  it("quarantines siblings only after a structured shared environment failure", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const unavailable = {
+      ledger_path: "x",
+      record: { closed: false, dynamic_proof: { proof_kind: "dynamic_targeted", baseline_green: false } },
+      oracle: { status: "unrunnable", proven: false, category: "environment_unavailable", reason: "environment_unavailable: pytest collection failed" }
+    } as unknown as ProveLoopResult;
+    const proveLoop = vi.fn(() => unavailable);
+    const res = await autoProve(W, { existingOnly: true, proof_existing_limit: 20 }, baseDeps(NO_ENV, { proveLoop }));
+
+    expect(proveLoop).toHaveBeenCalledTimes(1);
+    expect(res.needs_setup).toHaveLength(2);
+    expect(res.needs_setup[0].category).toBe("environment_unavailable");
+    expect(res.needs_setup[1]).toMatchObject({ category: "environment_unavailable", deduped: true });
+  });
+
+  it("records one Python environment failure per project root without materializing sibling pseudo-attempts", async () => {
+    const W = makePythonWorkspaceWithExistingTests();
+    const graph = loadGraph(workspacePaths(W).graphPath);
+    const nodeById = new Map(graph.nodes.map((node) => [node.external_id, node]));
+    expect(existingAssociatedTests(graph, nodeById).size).toBe(2);
+    const unavailable = {
+      ledger_path: "x",
+      record: { closed: false, dynamic_proof: { proof_kind: "dynamic_targeted", baseline_green: false } },
+      oracle: { status: "unrunnable", proven: false, category: "environment_unavailable", reason: "environment_unavailable: pytest collection failed" }
+    } as unknown as ProveLoopResult;
+    let selectedTestPath = "";
+    const proveLoop = vi.fn((_root: string, options: { test_path?: string }) => {
+      selectedTestPath = options.test_path ?? "";
+      return unavailable;
+    });
+
+    const res = await autoProve(W, { existingOnly: true, proof_existing_limit: 20 }, baseDeps(NO_ENV, { proveLoop }));
+
+    expect(proveLoop).toHaveBeenCalledTimes(1);
+    expect(selectedTestPath).toMatch(/\.py::test_[A-Za-z0-9_]+$/);
+    expect(res.attempted).toBe(1);
+    expect(res.attempts).toHaveLength(1);
+    expect(res.needs_setup).toHaveLength(1);
+    expect(res.attempts[0]).toMatchObject({ category: "environment_unavailable" });
+    expect(res.skipped).toEqual([expect.objectContaining({
+      language: "python",
+      category: "environment_unavailable",
+      reason: expect.stringContaining("1 remaining linked target was in a project root marked environment_unavailable")
+    })]);
+  });
+
+  it("runs Python preflight once per canonical test root and forwards reuse to later attempts", async () => {
+    const W = makePythonWorkspaceWithExistingTests();
+    const seen: Array<{ skip_preflight?: boolean; test_path?: string }> = [];
+    const proveLoop = vi.fn((_root: string, options: { skip_preflight?: boolean; test_path?: string }) => {
+      seen.push(options);
+      return provenLoop();
+    });
+
+    const res = await autoProve(W, { existingOnly: true, proof_existing_limit: 20 }, baseDeps(NO_ENV, { proveLoop }));
+
+    expect(res.proven).toBe(2);
+    expect(seen).toHaveLength(2);
+    expect(seen.map((options) => options.skip_preflight)).toEqual([false, true]);
+    expect(seen.every((options) => options.test_path?.startsWith("test_service.py::test_"))).toBe(true);
+    expect(res.attempts.every((attempt) => attempt.project_root === ".")).toBe(true);
+  });
+
+  it("default generated-proof budget reaches at most five baseline-green targets even with >5 eligible gaps", async () => {
     const W = makeWorkspaceMulti(8); // 8 eligible behaviors
     const gen = fakeGenerate(MULTI_NAMES.map(fakeTestFor));
     const res = await autoProve(W, {}, baseDeps(KEY_ENV, { generate: gen, dynamicProofRunner: proofRunner("proven") }));
@@ -1181,7 +1339,7 @@ describe("autoProve — unified dynamic-proof budget (default 5)", () => {
     expect(res.attempted).toBeLessThanOrEqual(5);
   });
 
-  it("--auto-limit 8 raises the unified budget to 8 attempts", async () => {
+  it("explicit autoLimit still overrides the non-Python default", async () => {
     const W = makeWorkspaceMulti(8);
     const gen = fakeGenerate(MULTI_NAMES.map(fakeTestFor));
     const res = await autoProve(W, { autoLimit: 8 }, baseDeps(KEY_ENV, { generate: gen, dynamicProofRunner: proofRunner("proven") }));
@@ -1189,16 +1347,16 @@ describe("autoProve — unified dynamic-proof budget (default 5)", () => {
     expect(res.attempted).toBe(8);
   });
 
-  it("existing + generation share ONE budget: existing consumes it, generation gets the remainder", async () => {
+  it("non-Python existing attempts still consume the explicit shared autoLimit before generation", async () => {
     const W = makeWorkspaceWithExistingTests(); // 2 hard-associated eligible symbols + a payment gap
     const genSpy = vi.fn(async (): Promise<GenerateResult> => ({ run: null, generated_tests: [fakePaymentTest()], missing_evidence: [], warnings: [] }));
-    // Budget of 1: the existing-tests lane spends the whole budget on its first target;
-    // generation must get 0 remaining budget and never be called → TOTAL attempts ≤ 1.
+    // R7.1 isolates the expanded retry behavior to Python. Non-Python preserves the
+    // released shared budget: the existing attempt consumes this one-call run.
     const res = await autoProve(W, { autoLimit: 1 }, baseDeps(KEY_ENV, { generate: genSpy, dynamicProofRunner: proofRunner("proven") }));
 
     expect(res.attempted).toBe(1);
     expect(res.proven).toBe(1);
-    expect(genSpy).not.toHaveBeenCalled(); // generation lane got no budget
+    expect(genSpy).not.toHaveBeenCalled();
   });
 });
 

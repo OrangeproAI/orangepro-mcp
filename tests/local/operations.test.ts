@@ -10,6 +10,7 @@ import {
   opDynamicProof,
   opExport,
   opInit,
+  opProveLoop,
   opRecordRun,
   opRtm,
   opScore,
@@ -735,6 +736,14 @@ describe("gap-fill ledger", () => {
       }
     });
     expect(result.oracle.mutant).toEqual({ exitCode: 1, timedOut: false, assertionFailure: true });
+    expect(result.record.dynamic_proof).toMatchObject({
+      command: expect.stringContaining("--runner vitest"),
+      cwd: W,
+      exit_code: 0,
+      duration_ms: expect.any(Number),
+      stdout_tail: [],
+      stderr_tail: []
+    });
     expect(JSON.stringify(result)).not.toContain("secret should not be persisted");
 
     const ledgerText = readFileSync(result.ledger_path, "utf8");
@@ -1208,6 +1217,164 @@ describe("gap-fill ledger", () => {
       generated_unverifiable: 0,
       quality_adjusted_kept_rate: 0
     });
+  });
+
+  it("passes the repo Python runner unless an explicit CLI runner wins, and persists bounded redacted oracle diagnostics", () => {
+    const W = makeTempDir();
+    mkdirSync(join(W, ".orangepro"), { recursive: true });
+    writeFileSync(
+      join(W, ".orangepro", "config.json"),
+      JSON.stringify({ proof: { python_runner: "uv run python -m pytest -p no:warnings" } }),
+      "utf8"
+    );
+    writeFileSync(join(W, "app.py"), "def answer() -> int:\n    return 42\n", "utf8");
+    mkdirSync(join(W, "tests"), { recursive: true });
+    writeFileSync(join(W, "tests", "test_app.py"), "from app import answer\n\ndef test_answer():\n    assert answer() == 42\n", "utf8");
+
+    opInit(W, deps);
+    opAnalyze(W, { source: W }, deps);
+
+    const receivedRunners: string[] = [];
+    const redactedStdout = Array.from({ length: 40 }, (_, i) => `stdout-${i}`);
+    const redactedStderr = Array.from({ length: 40 }, (_, i) => i === 39 ? "<redacted:credential>" : `stderr-${i}`);
+    const dynamicProofRunner = (args: string[]) => {
+      const flag = args.indexOf("--python-runner");
+      receivedRunners.push(args[flag + 1] ?? "missing");
+      return {
+        exitCode: 2,
+        stderr: "",
+        stdout: JSON.stringify({
+          status: "unrunnable",
+          proven: false,
+          reason: "environment unavailable",
+          runner: "pytest",
+          test: "tests/test_app.py::test_answer",
+          target: "app.py",
+          func: "answer",
+          baseline: { exitCode: null, timedOut: false },
+          mutant: { assertionFailure: false },
+          diagnostics: {
+            command: "uv run python -m pytest -p no:warnings -q --collect-only tests/test_app.py::test_answer --tb=short",
+            cwd: W,
+            exit_code: null,
+            duration_ms: 123,
+            failure_class: "env_unavailable",
+            stdout_tail: redactedStdout,
+            stderr_tail: redactedStderr
+          }
+        })
+      };
+    };
+    const prove = (run_id: string, runner?: "auto" | "pytest") => opDynamicProof(W, {
+      target_symbol: "sym:app.py#answer",
+      source: W,
+      test_path: "tests/test_app.py::test_answer",
+      replacement: "0",
+      ...(runner ? { runner } : {}),
+      run_id
+    }, { ...deps, dynamicProofRunner });
+
+    const configured = prove("run:python-configured");
+    prove("run:python-cli-pytest", "pytest");
+    prove("run:python-cli-auto", "auto");
+
+    // Repo config applies only when the CLI did not name a runner. The Python CLI
+    // contract maps `pytest` to the structured pytest argv and preserves `auto`.
+    expect(receivedRunners).toEqual([
+      "uv run python -m pytest -p no:warnings",
+      "python -m pytest",
+      "auto"
+    ]);
+    expect(configured.record.dynamic_proof).toMatchObject({
+      command: "uv run python -m pytest -p no:warnings -q --collect-only tests/test_app.py::test_answer --tb=short",
+      cwd: W,
+      exit_code: null,
+      duration_ms: 123,
+      failure_class: "env_unavailable",
+      stdout_tail: redactedStdout,
+      stderr_tail: redactedStderr
+    });
+    const persisted = JSON.parse(readFileSync(configured.ledger_path, "utf8"))
+      .records.find((record: { run_id: string }) => record.run_id === "run:python-configured");
+    expect(persisted.dynamic_proof).toMatchObject({
+      command: "uv run python -m pytest -p no:warnings -q --collect-only tests/test_app.py::test_answer --tb=short",
+      cwd: W,
+      exit_code: null,
+      duration_ms: 123,
+      failure_class: "env_unavailable"
+    });
+    expect(persisted.dynamic_proof.stdout_tail).toHaveLength(40);
+    expect(persisted.dynamic_proof.stderr_tail).toHaveLength(40);
+    expect(JSON.stringify(persisted.dynamic_proof)).toContain("<redacted:credential>");
+    expect(JSON.stringify(persisted.dynamic_proof)).not.toContain("api_key=super-secret-value");
+  });
+
+  it("forwards python_runner and skip_preflight through prove-loop, with explicit runner still winning", () => {
+    const W = makeTempDir();
+    writeFileSync(join(W, "pyproject.toml"), "[project]\nname='proof-loop'\nversion='0.0.0'\n", "utf8");
+    writeFileSync(join(W, "app.py"), "def answer() -> int:\n    return 42\n", "utf8");
+    mkdirSync(join(W, "tests"), { recursive: true });
+    writeFileSync(join(W, "tests/test_app.py"), "from app import answer\n\ndef test_answer():\n    assert answer() == 42\n", "utf8");
+    opInit(W, deps);
+    opAnalyze(W, { source: W }, deps);
+
+    const captured: string[][] = [];
+    const dynamicProofRunner = (args: string[]) => {
+      captured.push(args);
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          status: "associated_survived",
+          proven: false,
+          runner: "pytest",
+          test: "tests/test_app.py::test_answer",
+          target: "app.py",
+          func: "answer",
+          baseline: { exitCode: 0, timedOut: false },
+          mutant: { exitCode: 0, timedOut: false, assertionFailure: false }
+        })
+      };
+    };
+    const run = (run_id: string, runner?: "pytest") => opProveLoop(W, {
+      target_symbol: "sym:app.py#answer",
+      source: W,
+      test_path: "tests/test_app.py::test_answer",
+      replacement: "0",
+      python_runner: "uv run python -m pytest",
+      skip_preflight: true,
+      ...(runner ? { runner } : {}),
+      run_id
+    }, { ...deps, dynamicProofRunner });
+
+    run("run:prove-loop-custom");
+    run("run:prove-loop-explicit", "pytest");
+    const value = (args: string[], name: string) => args[args.indexOf(name) + 1];
+    expect(value(captured[0], "--python-runner")).toBe("uv run python -m pytest");
+    expect(value(captured[1], "--python-runner")).toBe("python -m pytest");
+    expect(captured.every((args) => args.includes("--skip-preflight"))).toBe(true);
+  });
+
+  it("refuses a Python Proven verdict if the runner exited nonzero after scratch cleanup", () => {
+    const W = makeTempDir();
+    writeFileSync(join(W, "pyproject.toml"), "[project]\nname='proof-exit'\nversion='0.0.0'\n", "utf8");
+    writeFileSync(join(W, "app.py"), "def answer() -> int:\n    return 42\n", "utf8");
+    mkdirSync(join(W, "tests"), { recursive: true });
+    writeFileSync(join(W, "tests/test_app.py"), "from app import answer\n\ndef test_answer():\n    assert answer() == 42\n", "utf8");
+    opInit(W, deps);
+    opAnalyze(W, { source: W }, deps);
+    const forged = () => ({
+      exitCode: 1,
+      stderr: "Python proof scratch cleanup failed; proof is not valid.",
+      stdout: JSON.stringify({ status: "proven", proven: true, runner: "pytest", baseline: { exitCode: 0 }, mutant: { exitCode: 1, assertionFailure: true } })
+    });
+    expect(() => opDynamicProof(W, {
+      target_symbol: "sym:app.py#answer",
+      source: W,
+      test_path: "tests/test_app.py::test_answer",
+      replacement: "0",
+      run_id: "run:python-bad-cleanup"
+    }, { ...deps, dynamicProofRunner: forged })).toThrow(/runner exited 1; no dynamic proof can be credited/);
   });
 
   it("rejects target symbols that are not present in the current graph", () => {

@@ -80,6 +80,37 @@ export interface TreeSitterPythonProofCall extends TreeSitterRawCall {
    * static association metadata; it never promotes a behavior to Proven.
    */
   instanceClass?: string;
+  /**
+   * Narrow structural receiver rule that made an instance/class association
+   * possible. It is copied to proof-edge metadata so downstream consumers can
+   * distinguish this static signal from dynamic proof.
+   */
+  associationRule?: PythonAssociationRule;
+}
+
+export type PythonAssociationRule =
+  | "assigned_instance"
+  | "module_assigned_instance"
+  | "fixture_return"
+  | "fixture_yield"
+  | "fixture_annotation"
+  | "parameter_annotation"
+  | "unittest_setup"
+  | "inline_constructor"
+  | "class_static_method"
+  /**
+   * Receiver is deliberately unresolved, while the invoked method name is later
+   * constrained to one imported, in-repo class owner. This is not an exact
+   * constructor/type association and must retain its own detector provenance.
+   */
+  | "unique_method_name_import";
+
+/** Direct in-repo bases as written on a Python class declaration. */
+export interface TreeSitterPythonClassInfo {
+  name: string;
+  bases: string[];
+  /** Methods explicitly decorated @classmethod or @staticmethod on this class. */
+  classStaticMethods: string[];
 }
 
 export interface TreeSitterPythonDependency {
@@ -87,6 +118,44 @@ export interface TreeSitterPythonDependency {
   handler: string;
   /** Statically named dependency passed to FastAPI Depends(...). */
   dependency: string;
+}
+
+/** Machine-readable priority-only exclusion; display text is stored separately. */
+export type RankingExclusionCode =
+  | "python_structural_container"
+  | "trivial_constructor"
+  | "enum_declaration"
+  | "thin_external_delegate"
+  | "python_class_with_methods";
+
+export type PythonRankingExclusionCode =
+  | "python_trivial_thread_local_initializer"
+  | "python_stdlib_enum_declaration"
+  | "python_thin_external_delegate";
+
+export interface TreeSitterPythonRankingExclusion {
+  symbol: string;
+  code: PythonRankingExclusionCode;
+  reason: string;
+}
+
+export interface TreeSitterPythonThinDelegate {
+  symbol: string;
+  /** Local import binding (possibly reached through one exact module-level alias). */
+  importLocal: string;
+}
+
+export interface TreeSitterPythonModuleAttribute {
+  local: string;
+  attribute: string;
+}
+
+export interface TreeSitterPythonConstructorChainCall {
+  caller: string;
+  /** Call function text without terminal arguments, e.g. `Store(db).table.delete`. */
+  callee: string;
+  /** Constructor binding as written at the head of the chain. */
+  constructorLocal: string;
 }
 
 export interface TreeSitterJavaClassInfo {
@@ -113,8 +182,23 @@ export interface TreeSitterStructure {
   javaProofCalls?: TreeSitterJavaProofCall[];
   goProofCalls?: TreeSitterGoProofCall[];
   pythonProofCalls?: TreeSitterPythonProofCall[];
+  /** Exact class-method references patched or replaced by a mock in a Python test file. */
+  pythonMockedMethods?: string[];
+  /** Exact patch targets effective for each test, including reachable same-file fixtures. */
+  pythonMocksByTest?: Record<string, string[]>;
+  /** Tests with fixture selection too dynamic to establish a safe patch scope. */
+  pythonUnknownMockScopeTests?: string[];
+  pythonClasses?: TreeSitterPythonClassInfo[];
   pythonBehaviorContracts?: BehaviorContract[];
   pythonDependencies?: TreeSitterPythonDependency[];
+  /** Exact AST-only declaration/initializer ranking exclusions. */
+  pythonRankingExclusions?: TreeSitterPythonRankingExclusion[];
+  /** Exact forwarding shapes; analyzer later proves the import is out-of-repo. */
+  pythonThinDelegates?: TreeSitterPythonThinDelegate[];
+  /** Non-call, direct module.attribute reads only; scorer consumes exact targets. */
+  pythonModuleAttributes?: TreeSitterPythonModuleAttribute[];
+  /** Exact direct constructor-chain call shapes; analyzer later binds the class. */
+  pythonConstructorChainCalls?: TreeSitterPythonConstructorChainCall[];
   /**
    * Go only: top-level function name → base name of its SINGLE declared result
    * type (`func New(...) *Parser` → "Parser"). Captured ONLY when the result is a
@@ -449,7 +533,18 @@ function localBindings(fn: Node, language: string): Set<string> {
   const out = new Set<string>();
   const params = fn.childForFieldName("parameters") ?? (language === "kotlin" ? namedChildren(fn).find((n) => n.type === "function_value_parameters") : null);
   if (params) {
-    if (language === "python") collectNames(params, out);
+    if (language === "python") {
+      // Parameter annotations are references, not local bindings. Collecting every
+      // identifier from `value: ImportedType` incorrectly shadowed the imported
+      // production class and made an otherwise exact structural association fail.
+      for (const parameter of namedChildren(params)) {
+        if (parameter.type === "identifier") out.add(parameter.text);
+        else {
+          const name = parameter.childForFieldName("name") ?? namedChildren(parameter)[0] ?? null;
+          if (name?.type === "identifier") out.add(name.text);
+        }
+      }
+    }
     else {
       for (const child of namedChildren(params)) {
         if (/parameter/.test(child.type)) collectNames(child.childForFieldName("name") ?? child, out);
@@ -1939,132 +2034,622 @@ function pythonBindingNames(node: Node): string[] {
   return [];
 }
 
-function pythonAssignedInstanceProofCalls(block: Node): Array<{
-  assertion: Node;
-  call: { callee: string; qualifier?: string; via: "free" | "qualified" };
-  instanceClass: string;
-}> {
-  const testFunction = block.parent;
-  const decorated = testFunction?.parent?.type === "decorated_definition" ? testFunction.parent : testFunction;
-  const parameterNames = testFunction?.childForFieldName("parameters")?.descendantsOfType("identifier").map((node) => node?.text).filter(Boolean) ?? [];
-  if (parameterNames.some((name) => name !== "self" && name !== "cls")) return [];
-  if (/\b(?:monkeypatch|mocker|patch|Mock|MagicMock|AsyncMock|create_autospec)\b/.test(decorated?.text ?? "")) return [];
+type PythonReceiverBinding = { classRef: string; rule: PythonAssociationRule; assignedAt: number };
 
-  const lexicalNodes = pythonLexicalNodes(block);
-  const assignments = lexicalNodes.filter((node) => node.type === "assignment" || node.type === "annotated_assignment");
-  const assertions = lexicalNodes.filter((node) => node.type === "assert_statement");
-  if (assertions.length !== 1) return [];
-  const mutationCounts = new Map<string, number>();
-  for (const node of lexicalNodes) {
-    for (const name of pythonBindingNames(node)) mutationCounts.set(name, (mutationCounts.get(name) ?? 0) + 1);
-  }
+function pythonClassRefFromConstructor(value: Node | null): string | null {
+  if (!value) return null;
+  const constructor = pythonExactCall(value);
+  if (!constructor) return null;
+  const ref = pythonDottedName(constructor.childForFieldName("function"));
+  // A result-producing method such as `subject.work()` is not a constructor and
+  // must never become a second tracked receiver. Accept only a bare imported
+  // class or one module-qualified class terminal.
+  return ref && /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(ref) && pythonLooksLikeClassRef(ref) ? ref : null;
+}
 
-  const instances = new Map<string, { className: string; assignedAt: number }>();
-  const orderedAssignments = assignments.map(pythonDirectAssignment).filter((assignment): assignment is { target: Node; value: Node } => Boolean(assignment));
-  for (const { target, value } of orderedAssignments) {
-    if (target.type !== "identifier" || mutationCounts.get(target.text) !== 1) continue;
-    const constructor = pythonSingleCall(value);
-    const parts = constructor ? callParts(constructor, "python") : null;
-    if (!parts || parts.qualifier || !/^[A-Za-z_]\w*$/.test(parts.callee)) continue;
-    if ((mutationCounts.get(parts.callee) ?? 0) > 0) continue;
-    instances.set(target.text, { className: parts.callee, assignedAt: target.startIndex });
-  }
+function pythonLooksLikeClassRef(ref: string): boolean {
+  const terminal = ref.split(".").pop() ?? "";
+  return /^_*[A-Z][A-Za-z0-9_]*$/.test(terminal);
+}
 
-  for (const { target, value } of orderedAssignments) {
-    if (target.type === "identifier" && value.type === "identifier" && instances.has(value.text)) return [];
-  }
+function pythonReceiverKey(node: Node | null): string | null {
+  if (!node) return null;
+  if (node.type === "identifier") return node.text;
+  if (node.type !== "attribute") return null;
+  const object = node.childForFieldName("object");
+  const attribute = node.childForFieldName("attribute")?.text;
+  return object?.type === "identifier" && object.text === "self" && attribute && /^[A-Za-z_]\w*$/.test(attribute)
+    ? `self.${attribute}`
+    : null;
+}
 
-  const trackedNames = new Set([
-    ...instances.keys(),
-    ...[...instances.values()].map((instance) => instance.className)
-  ]);
-  for (const callNode of lexicalNodes.filter((node) => node.type === "call")) {
-    const call = callParts(callNode, "python");
-    const receiver = call?.qualifier?.split(".")[0] ?? "";
-    if (instances.has(receiver)) continue;
-    const args = callNode.childForFieldName("arguments");
-    const argumentNames = args
-      ? [
-          ...(args.type === "identifier" ? [args] : []),
-          ...args.descendantsOfType("identifier").filter((identifier): identifier is Node => Boolean(identifier))
-        ].map((identifier) => identifier.text)
-      : [];
-    if (argumentNames.some((name) => trackedNames.has(name))) return [];
-  }
+function pythonMethodCall(node: Node): { call: { callee: string; qualifier?: string; via: "free" | "qualified" }; receiver: Node } | null {
+  if (node.type !== "call") return null;
+  const fn = node.childForFieldName("function");
+  if (fn?.type !== "attribute") return null;
+  const receiver = fn.childForFieldName("object");
+  const call = callParts(node, "python");
+  return receiver && call ? { call, receiver } : null;
+}
 
-  const results = new Map<string, { call: { callee: string; qualifier?: string; via: "free" | "qualified" }; instanceClass: string }>();
-  const instanceCalls = lexicalNodes.filter((node) => node.type === "call").filter((callNode) => {
-    const call = callParts(callNode, "python");
-    const receiver = call?.qualifier?.split(".")[0] ?? "";
-    return instances.has(receiver);
-  });
-  if (instanceCalls.length !== 1) return [];
-  for (const { target, value } of orderedAssignments) {
-    if (target.type !== "identifier" || mutationCounts.get(target.text) !== 1) continue;
-    const callNode = pythonExactCall(value);
-    const call = callNode ? callParts(callNode, "python") : null;
-    const receiver = call?.qualifier?.split(".")[0] ?? "";
-    const instance = instances.get(receiver);
-    if (call && instance && instance.assignedAt < value.startIndex) {
-      results.set(target.text, { call, instanceClass: instance.className });
+function directPythonAssertCallNode(assertion: Node): Node | null {
+  const subject = namedChildren(assertion)[0];
+  if (!subject) return null;
+  const actual = subject.type === "comparison_operator" ? singlePythonComparisonCall(subject) : subject;
+  return actual?.type === "call" ? actual : null;
+}
+
+function pythonFixtureDecorator(node: Node): boolean {
+  return /^@pytest\.fixture(?:\(|$)/.test(node.text.trim());
+}
+
+function pythonTypeRef(node: Node | null): string | null {
+  const text = node?.text ?? "";
+  return /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(text) ? text : null;
+}
+
+function pythonCanonicalImportedRef(ref: string | null | undefined, imports: TreeSitterImportBinding[]): string | undefined {
+  if (!ref) return undefined;
+  const parts = ref.split(".");
+  const binding = imports.find((candidate) => candidate.local === parts[0]);
+  if (!binding) return ref;
+  const importedBase = binding.kind === "module"
+    ? binding.module
+    : [binding.module, binding.imported].filter(Boolean).join(".");
+  return [importedBase, ...parts.slice(1)].filter(Boolean).join(".");
+}
+
+function pythonMockedMethodReference(value: string): string | null {
+  return /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value) ? value : null;
+}
+
+/**
+ * Exact patch/replacement targets only. This is intentionally syntax-only: the
+ * analyzer resolves these references to an in-repo method before suppressing a
+ * proof edge, so a dependency mock or unrelated class attribute remains inert.
+ */
+function pythonMockedMethods(root: Node, imports: TreeSitterImportBinding[]): string[] {
+  const out = new Set<string>();
+  const exactReceiverClass = (context: Node, receiver: string): string | null => {
+    if (!/^[A-Za-z_]\w*$/.test(receiver)) return null;
+    let fn: Node | null = context;
+    while (fn && fn.type !== "function_definition") fn = fn.parent;
+    const body = fn?.childForFieldName("body");
+    if (!body) return null;
+    const refs = pythonLexicalNodes(body)
+      .filter((node) => node.type === "assignment" || node.type === "annotated_assignment")
+      .map(pythonDirectAssignment)
+      .filter((assignment): assignment is { target: Node; value: Node } => Boolean(assignment?.target.type === "identifier" && assignment.target.text === receiver))
+      .map((assignment) => pythonClassRefFromConstructor(assignment.value))
+      .filter((ref): ref is string => Boolean(ref));
+    return refs.length === 1 ? refs[0]! : null;
+  };
+  const canonicalReceiver = (context: Node, receiver: string): string => exactReceiverClass(context, receiver) ?? receiver;
+  const addObjectMethod = (context: Node, object: Node | null, method: Node | null): void => {
+    const rawReceiver = pythonDottedName(object);
+    const receiver = rawReceiver ? canonicalReceiver(context, rawReceiver) : null;
+    const name = pythonStaticString(method);
+    const ref = receiver && name && /^[A-Za-z_]\w*$/.test(name) ? `${receiver}.${name}` : null;
+    if (ref) out.add(ref);
+  };
+  for (const call of root.descendantsOfType("call")) {
+    if (!call) continue;
+    const fn = pythonDottedName(call.childForFieldName("function"));
+    const canonicalFn = pythonCanonicalImportedRef(fn, imports);
+    const args = pythonPositionalArguments(call);
+    if (canonicalFn === "unittest.mock.patch.object" || fn === "mocker.patch.object") {
+      addObjectMethod(call, args[0] ?? null, args[1] ?? null);
+      continue;
+    }
+    if (fn === "setattr" || fn === "monkeypatch.setattr") {
+      // pytest's two-argument form accepts one fully qualified dotted target:
+      // `monkeypatch.setattr("package.module.Class.method", replacement)`.
+      const dotted = pythonStaticString(args[0] ?? null);
+      const exact = dotted ? pythonMockedMethodReference(dotted) : null;
+      if (exact) out.add(exact);
+      else addObjectMethod(call, args[0] ?? null, args[1] ?? null);
+      continue;
+    }
+    if (canonicalFn === "unittest.mock.patch" || fn === "mocker.patch") {
+      const ref = pythonStaticString(args[0] ?? null);
+      const exact = ref ? pythonMockedMethodReference(ref) : null;
+      if (exact) out.add(exact);
     }
   }
-
-  const out: Array<{
-    assertion: Node;
-    call: { callee: string; qualifier?: string; via: "free" | "qualified" };
-    instanceClass: string;
-  }> = [];
-  for (const stmt of assertions) {
-    const direct = directPythonAssertCall(stmt);
-    const directReceiver = direct?.qualifier?.split(".")[0] ?? "";
-    const directInstance = instances.get(directReceiver);
-    if (direct && directInstance && directInstance.assignedAt < stmt.startIndex) {
-      out.push({ assertion: stmt, call: direct, instanceClass: directInstance.className });
+  for (const assignment of root.descendantsOfType("assignment").filter((node): node is Node => Boolean(node))) {
+    const rawTarget = pythonDottedName(assignment.childForFieldName("left"));
+    const targetParts = rawTarget?.split(".") ?? [];
+    const target = targetParts.length > 1
+      ? [canonicalReceiver(assignment, targetParts[0]!), ...targetParts.slice(1)].join(".")
+      : rawTarget;
+    const value = pythonExactCall(assignment.childForFieldName("right"));
+    const mockFactory = value ? pythonCanonicalImportedRef(pythonDottedName(value.childForFieldName("function")), imports) : undefined;
+    if (target && /^(?:unittest\.mock|mocker)\.(?:Mock|MagicMock|AsyncMock)$/.test(mockFactory ?? "")) {
+      const exact = pythonMockedMethodReference(target);
+      if (exact) out.add(exact);
     }
-    const subject = namedChildren(stmt)[0];
-    const assertionCalls = subject
-      ? [...(subject.type === "call" ? [subject] : []), ...subject.descendantsOfType("call").filter((call): call is Node => Boolean(call))]
-      : [];
-    if (assertionCalls.length > 0) continue;
-    const observed = pythonDirectAssertedResult(stmt, results);
-    const result = observed ? results.get(observed) : undefined;
-    if (result) out.push({ assertion: stmt, ...result });
+  }
+  return [...out].sort();
+}
+
+/** Same-file pytest fixture dependencies are traversed by name, not by file membership. */
+function pythonScopedMockMethods(root: Node, imports: TreeSitterImportBinding[]): {
+  byTest: Record<string, string[]>; unknown: string[]
+} {
+  type Fixture = { owner: string | null; name: string; mocks: string[]; dependencies: string[]; autouse: boolean; unknown: boolean };
+  const fixtures = new Map<string, Fixture>();
+  const tests: Array<{ name: string; fn: Node; owner: string | null; decorators: Node[] }> = [];
+  const decoratorsOf = (node: Node): Node[] => node.parent?.type === "decorated_definition"
+    ? namedChildren(node.parent).filter((child) => child.type === "decorator") : [];
+  const params = (fn: Node): string[] => {
+    const node = fn.childForFieldName("parameters");
+    if (!node) return [];
+    return namedChildren(node).flatMap((param) => {
+      if (param.type === "identifier") return [param.text];
+      if (["typed_parameter", "default_parameter", "typed_default_parameter"].includes(param.type)) {
+        const name = param.childForFieldName("name") ?? namedChildren(param)[0];
+        return name?.type === "identifier" ? [name.text] : [];
+      }
+      return [];
+    }).filter((name) => name !== "self" && name !== "cls");
+  };
+  const finiteParametrizedNames = (decorators: Node[], parameter: string): string[] | null => {
+    const parametrizations = decorators.map((decorator) => decorator.text.trim())
+      .filter((text) => text.startsWith("@pytest.mark.parametrize("));
+    if (parametrizations.length !== 1) return null;
+    const match = /^@pytest\.mark\.parametrize\(\s*(['"])([A-Za-z_]\w*)\1\s*,\s*\[([\s\S]*?)\]\s*,?\s*\)$/s.exec(parametrizations[0]!);
+    if (!match || match[2] !== parameter) return null;
+    const values = match[3]!.split(",").map((part) => part.trim()).filter(Boolean);
+    if (values.length === 0) return null;
+    const names = values.map((part) => /^(['"])([A-Za-z_]\w*)\1$/.exec(part)?.[2] ?? null);
+    return names.every((name): name is string => Boolean(name)) ? names : null;
+  };
+  const dynamic = (fn: Node, decorators: Node[] = []): { names: string[]; unknown: boolean } => {
+    const names: string[] = [];
+    let unknown = false;
+    for (const call of fn.descendantsOfType("call")) {
+      if (!call || pythonDottedName(call.childForFieldName("function")) !== "request.getfixturevalue") continue;
+      const args = pythonPositionalArguments(call);
+      const name = args.length === 1 ? pythonStaticString(args[0] ?? null) : null;
+      if (name && /^[A-Za-z_]\w*$/.test(name)) names.push(name);
+      else {
+        const parameter = args.length === 1 && args[0]?.type === "identifier" ? args[0].text : null;
+        const selected = parameter && params(fn).includes("request") && params(fn).includes(parameter)
+          ? finiteParametrizedNames(decorators, parameter) : null;
+        if (selected) names.push(...selected);
+        else unknown = true;
+      }
+    }
+    return { names, unknown };
+  };
+  const usefixtures = (decorators: Node[]): { names: string[]; unknown: boolean } => {
+    const names: string[] = [];
+    let unknown = false;
+    for (const decorator of decorators) {
+      const text = decorator.text.trim();
+      if (!/^@pytest\.mark\.usefixtures\(/.test(text)) continue;
+      const match = text.match(/^@pytest\.mark\.usefixtures\((.*)\)$/s);
+      if (!match) { unknown = true; continue; }
+      names.push(...[...match[1]!.matchAll(/(['"])([A-Za-z_]\w*)\1/g)].map((value) => value[2]!));
+      unknown ||= Boolean(match[1]!.replace(/(['"])[A-Za-z_]\w*\1/g, "").replace(/[\s,]/g, ""));
+    }
+    return { names, unknown };
+  };
+  for (const fn of root.descendantsOfType("function_definition")) {
+    if (!fn || pythonNearestFunction(fn)) continue;
+    const name = fn.childForFieldName("name")?.text;
+    if (!name) continue;
+    const enclosing = fn.parent?.type === "decorated_definition" ? fn.parent : fn;
+    const classNode = enclosing.parent?.type === "block" && enclosing.parent.parent?.type === "class_definition" ? enclosing.parent.parent : null;
+    const owner = classNode?.childForFieldName("name")?.text ?? null;
+    const decorators = decoratorsOf(fn);
+    const fixtureDecorator = decorators.find((decorator) => /^@pytest\.fixture(?:\(|$)/.test(decorator.text.trim()) ||
+      (/^@fixture(?:\(|$)/.test(decorator.text.trim()) && imports.some((binding) =>
+        binding.local === "fixture" && binding.module === "pytest" && binding.imported === "fixture")));
+    if (fixtureDecorator) {
+      const text = fixtureDecorator.text.trim();
+      const alias = text.match(/\bname\s*=\s*(['"])([A-Za-z_]\w*)\1/);
+      const fixtureName = alias?.[2] ?? name;
+      const selected = dynamic(fn);
+      fixtures.set(`${owner ?? ""}::${fixtureName}`, {
+        owner, name: fixtureName, mocks: [...new Set([
+          ...pythonMockedMethods(fn, imports),
+          ...decorators.flatMap((decorator) => pythonMockedMethods(decorator, imports))
+        ])],
+        dependencies: [...params(fn), ...selected.names], autouse: /\bautouse\s*=\s*True\b/.test(text), unknown: selected.unknown
+      });
+    }
+    if (/^test_[A-Za-z0-9_]*$/.test(name)) tests.push({
+      name: owner ? `${owner}::${name}` : name, fn, owner,
+      decorators: [...decorators, ...(classNode ? decoratorsOf(classNode) : [])]
+    });
+  }
+  const moduleMocks = namedChildren(root)
+    .filter((node) => !["function_definition", "class_definition", "decorated_definition"].includes(node.type))
+    .flatMap((node) => pythonMockedMethods(node, imports));
+  const byTest: Record<string, string[]> = {};
+  const unknown: string[] = [];
+  for (const test of tests) {
+    const mocks = new Set([...moduleMocks, ...pythonMockedMethods(test.fn, imports)]);
+    for (const decorator of test.decorators) for (const ref of pythonMockedMethods(decorator, imports)) mocks.add(ref);
+    const selected = usefixtures(test.decorators);
+    const requested = dynamic(test.fn, test.decorators);
+    let uncertain = selected.unknown || requested.unknown;
+    for (const name of requested.names) {
+      if (!fixtures.has(`${test.owner ?? ""}::${name}`) && !fixtures.has(`::${name}`)) uncertain = true;
+    }
+    const seen = new Set<string>();
+    const visit = (name: string): void => {
+      const fixture = fixtures.get(`${test.owner ?? ""}::${name}`) ?? fixtures.get(`::${name}`);
+      if (!fixture) return;
+      const key = `${fixture.owner ?? ""}::${fixture.name}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      uncertain ||= fixture.unknown;
+      for (const ref of fixture.mocks) mocks.add(ref);
+      for (const dependency of fixture.dependencies) visit(dependency);
+    };
+    for (const name of [...params(test.fn), ...selected.names, ...requested.names]) visit(name);
+    for (const fixture of fixtures.values()) if (fixture.autouse && (!fixture.owner || fixture.owner === test.owner)) visit(fixture.name);
+    byTest[test.name] = [...mocks].sort();
+    if (uncertain) unknown.push(test.name);
+  }
+  return { byTest, unknown };
+}
+
+function pythonFixtureBindings(root: Node): Map<string, { classRef: string; rule: PythonAssociationRule }> {
+  const out = new Map<string, { classRef: string; rule: PythonAssociationRule }>();
+  for (const decorated of root.descendantsOfType("decorated_definition")) {
+    if (!decorated || decorated.parent?.type !== "module") continue;
+    if (!namedChildren(decorated).some((child) => child.type === "decorator" && pythonFixtureDecorator(child))) continue;
+    const fn = namedChildren(decorated).find((child) => child.type === "function_definition");
+    const name = fn?.childForFieldName("name")?.text;
+    const body = fn?.childForFieldName("body");
+    if (!name || !body) continue;
+    const values = blockStatements(body).flatMap((statement) => {
+      if (statement.type === "return_statement") return [statement.namedChild(0) ?? null];
+      if (statement.type === "expression_statement" && statement.namedChild(0)?.type === "yield") return [statement.namedChild(0)?.namedChild(0) ?? null];
+      return [];
+    });
+    const direct = values.length === 1 ? pythonClassRefFromConstructor(values[0] ?? null) : null;
+    const directRule: PythonAssociationRule | null = values.length === 1 && values[0]?.parent?.type === "return_statement"
+      ? "fixture_return"
+      : values.length === 1 ? "fixture_yield" : null;
+    const annotated = pythonTypeRef(fn.childForFieldName("return_type"));
+    if (direct && annotated && direct !== annotated) continue;
+    if (direct && directRule) out.set(name, { classRef: direct, rule: directRule });
+    else if (!direct && values.length === 0 && annotated) out.set(name, { classRef: annotated, rule: "fixture_annotation" });
   }
   return out;
 }
 
-function extractPythonProofCalls(root: Node): TreeSitterPythonProofCall[] {
+function pythonTestFixtureReceiver(
+  testFunction: Node | null,
+  fixtures: ReadonlyMap<string, { classRef: string; rule: PythonAssociationRule }>
+): Map<string, PythonReceiverBinding> | null {
+  const parameters = testFunction?.childForFieldName("parameters");
+  if (!parameters) return new Map();
+  const values = namedChildren(parameters).filter((node) => node.type === "identifier" || node.type === "typed_parameter");
+  const receivers = new Map<string, PythonReceiverBinding>();
+  for (const parameter of values) {
+    const name = parameter.type === "identifier" ? parameter.text : parameter.childForFieldName("name")?.text ?? parameter.namedChild(0)?.text;
+    if (!name || name === "self" || name === "cls") continue;
+    const fixture = fixtures.get(name);
+    const annotation = parameter.type === "typed_parameter" ? pythonTypeRef(parameter.childForFieldName("type")) : null;
+    // A pytest parameter annotated with one plain class reference is a structural
+    // fixture/type producer in its own right (the provider may live in conftest).
+    // If an in-file fixture exists it must agree exactly; disagreement is unsafe.
+    if (!fixture && !annotation) continue;
+    if (fixture && annotation && annotation !== fixture.classRef) return null;
+    if (receivers.size > 0) return null; // one unambiguous fixture receiver only
+    receivers.set(name, { classRef: annotation ?? fixture!.classRef, rule: annotation ? "parameter_annotation" : fixture!.rule, assignedAt: -1 });
+  }
+  return receivers;
+}
+
+function pythonSetupReceivers(classNode: Node | null): Map<string, PythonReceiverBinding> | null {
+  const out = new Map<string, PythonReceiverBinding>();
+  if (!classNode) return out;
+  const body = classNode.childForFieldName("body");
+  if (!body) return out;
+  for (const method of namedChildren(body).filter((node) => node.type === "function_definition")) {
+    const methodName = method.childForFieldName("name")?.text;
+    if (methodName !== "setUp" && methodName !== "setup_method") continue;
+    const methodBody = method.childForFieldName("body");
+    if (!methodBody) return null;
+    for (const statement of blockStatements(methodBody)) {
+      const assignment = pythonDirectAssignment(statement);
+      if (!assignment || assignment.target.type !== "attribute") continue;
+      const receiver = pythonReceiverKey(assignment.target);
+      const classRef = pythonClassRefFromConstructor(assignment.value);
+      // Setup frequently initializes unrelated module state (`settings.flag = ...`)
+      // or scalar test state (`self.started_at = ...`). Neither establishes a
+      // receiver, so it must not veto a separate exact local-instance binding.
+      // Once a receiver is established, however, an unsupported reassignment or
+      // nested attribute write still invalidates that receiver conservatively.
+      if (!receiver) {
+        const target = pythonDottedName(assignment.target);
+        if (target && [...out.keys()].some((known) => target.startsWith(`${known}.`))) return null;
+        continue;
+      }
+      if (!classRef) {
+        if (out.has(receiver)) return null;
+        continue;
+      }
+      if (out.has(receiver)) return null;
+      out.set(receiver, { classRef, rule: "unittest_setup", assignedAt: assignment.target.startIndex });
+    }
+  }
+  return out;
+}
+
+function pythonStructuralReceiver(callNode: Node, receivers: ReadonlyMap<string, PythonReceiverBinding>): PythonReceiverBinding | null {
+  const method = pythonMethodCall(callNode);
+  if (!method) return null;
+  const bound = receivers.get(pythonReceiverKey(method.receiver) ?? "");
+  if (bound) return bound;
+  const inline = pythonClassRefFromConstructor(method.receiver);
+  if (inline) return { classRef: inline, rule: "inline_constructor", assignedAt: method.receiver.startIndex };
+  const classRef = pythonDottedName(method.receiver);
+  // A lower-case receiver is an ordinary module/object call (`calc.add()`), not
+  // a structural class/static receiver. Retain the existing exact module-function
+  // lane for those calls rather than guessing that any attribute is a class method.
+  return classRef && pythonLooksLikeClassRef(classRef)
+    ? { classRef, rule: "class_static_method", assignedAt: method.receiver.startIndex }
+    : null;
+}
+
+/** True when an asserted call uses a receiver form owned by the structural lane. */
+function pythonStructuralReceiverSyntax(callNode: Node): boolean {
+  const method = pythonMethodCall(callNode);
+  if (!method) return false;
+  // A lower-case receiver may be an imported module (`calc.add()`), which is
+  // owned by the legacy exact module-import lane. Stored/local receivers still
+  // pass through that lane harmlessly (they cannot resolve as a module/class)
+  // when the structural association guards decline them.
+  const classRef = pythonDottedName(method.receiver);
+  return Boolean(classRef && pythonLooksLikeClassRef(classRef));
+}
+
+function pythonMentionsReceiverInArguments(callNode: Node, receiver: string): boolean {
+  const args = callNode.childForFieldName("arguments");
+  return args ? pythonMentionsReceiver(args, receiver) : false;
+}
+
+/** Exact receiver reference in an expression; strings/comments never constitute escape. */
+function pythonMentionsReceiver(node: Node, receiver: string): boolean {
+  const candidates = [node, ...node.descendantsOfType("identifier"), ...node.descendantsOfType("attribute")];
+  return candidates.some((candidate) => pythonReceiverKey(candidate) === receiver);
+}
+
+function pythonStructuralAssociationProofCalls(
+  block: Node,
+  testFunction: Node,
+  imports: TreeSitterImportBinding[],
+  fixtures: ReadonlyMap<string, { classRef: string; rule: PythonAssociationRule }>,
+  setup: ReadonlyMap<string, PythonReceiverBinding> | null
+): Array<{
+  assertion: Node;
+  call: { callee: string; qualifier?: string; via: "free" | "qualified" };
+  instanceClass?: string;
+  associationRule: PythonAssociationRule;
+}> {
+  const fixtureReceivers = pythonTestFixtureReceiver(testFunction, fixtures);
+  if (!fixtureReceivers || setup === null) return [];
+  const lexicalNodes = pythonLexicalNodes(block);
+  const assignments = lexicalNodes
+    .filter((node) => node.type === "assignment" || node.type === "annotated_assignment")
+    .map(pythonDirectAssignment)
+    .filter((v): v is { target: Node; value: Node } => Boolean(v));
+  const assertions = lexicalNodes.filter((node) => node.type === "assert_statement");
+
+  const receivers = new Map<string, PythonReceiverBinding>();
+  for (const [name, binding] of fixtureReceivers) receivers.set(name, binding);
+  for (const [name, binding] of setup) {
+    if (receivers.has(name)) return [];
+    receivers.set(name, binding);
+  }
+  const writes = new Map<string, number>();
+  for (const { target } of assignments) {
+    const key = pythonReceiverKey(target);
+    if (key) writes.set(key, (writes.get(key) ?? 0) + 1);
+  }
+  for (const { target, value } of assignments) {
+    if (target.type !== "identifier") continue;
+    const classRef = pythonClassRefFromConstructor(value);
+    if (!classRef || (writes.get(target.text) ?? 0) !== 1 || receivers.has(target.text)) continue;
+    receivers.set(target.text, { classRef, rule: classRef.includes(".") ? "module_assigned_instance" : "assigned_instance", assignedAt: target.startIndex });
+  }
+  for (const { target } of assignments) {
+    if (target.type !== "identifier") continue;
+    if ([...receivers.values()].some((receiver) => receiver.classRef === target.text)) return [];
+  }
+
+  // Any write/alias to a tracked receiver, or passing it to a helper/setter, is
+  // receiver escape. Attribute replacement is narrower: it invalidates only that
+  // exact receiver method, so mocking one dependency hook cannot erase an unrelated
+  // invocation on the same production object.
+  const replacedMethods = new Set<string>();
+  for (const { target, value } of assignments) {
+    const targetKey = pythonReceiverKey(target);
+    if (targetKey && receivers.has(targetKey) && !(target.type === "identifier" && receivers.get(targetKey)?.assignedAt === target.startIndex)) return [];
+    if (target.type === "attribute") {
+      const dotted = pythonDottedName(target);
+      if (dotted) {
+        for (const receiver of receivers.keys()) {
+          if (dotted.startsWith(`${receiver}.`)) replacedMethods.add(dotted);
+        }
+      }
+    }
+    if (target.type === "identifier" && (receivers.has(value.text) || receivers.has(pythonReceiverKey(value) ?? ""))) return [];
+    const exactReceiverMethodResult = (() => {
+      const call = pythonExactCall(value);
+      const method = call ? pythonMethodCall(call) : null;
+      const receiver = method ? pythonReceiverKey(method.receiver) : null;
+      return Boolean(receiver && receivers.has(receiver));
+    })();
+    if (
+      target.type === "identifier" &&
+      !exactReceiverMethodResult &&
+      [...receivers.keys()].some((receiver) => pythonMentionsReceiver(value, receiver))
+    ) return [];
+  }
+  for (const mutation of lexicalNodes.filter((node) => node.type === "augmented_assignment")) {
+    if ([...receivers.keys()].some((receiver) => new RegExp(`(^|[^A-Za-z0-9_])${receiver.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^A-Za-z0-9_])`).test(mutation.text))) return [];
+  }
+  for (const deleted of lexicalNodes.filter((node) => node.type === "delete_statement")) {
+    if ([...receivers.keys()].some((receiver) => new RegExp(`(^|[^A-Za-z0-9_])${receiver.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^A-Za-z0-9_])`).test(deleted.text))) return [];
+  }
+  for (const callNode of lexicalNodes.filter((node) => node.type === "call")) {
+    const method = pythonMethodCall(callNode);
+    if (method && pythonStructuralReceiver(callNode, receivers)) continue;
+    for (const receiver of receivers.keys()) if (pythonMentionsReceiverInArguments(callNode, receiver)) return [];
+  }
+
+  const relevant = lexicalNodes
+    .filter((node) => node.type === "call")
+    .map((node) => ({ node, method: pythonMethodCall(node), receiver: pythonStructuralReceiver(node, receivers) }))
+    .filter((v): v is { node: Node; method: { call: { callee: string; qualifier?: string; via: "free" | "qualified" }; receiver: Node }; receiver: PythonReceiverBinding } => {
+      if (!v.method || !v.receiver) return false;
+      const receiver = pythonReceiverKey(v.method.receiver);
+      return !receiver || !replacedMethods.has(`${receiver}.${v.method.call.callee}`);
+    });
+  if (relevant.length > 0) {
+    // Exact constructor/type/setup/class origins make every direct invocation an
+    // Association. Assertion count and result plumbing are proof concerns, not
+    // association concerns. Analyzer-side class/MRO resolution still fails closed.
+    return relevant.map((target) => ({
+      assertion: assertions[0] ?? target.node,
+      call: target.method.call,
+      instanceClass: target.receiver.classRef,
+      associationRule: target.receiver.rule
+    }));
+  }
+
+  // Preserve the deliberately narrow unresolved-receiver fallback. Unlike exact
+  // constructor/type receivers, it still requires one assertion and one call.
+  if (assertions.length !== 1) return [];
+  const testParameters = new Set<string>();
+  const parameters = testFunction.childForFieldName("parameters");
+  for (const parameter of parameters ? namedChildren(parameters) : []) {
+    const name = parameter.type === "identifier" ? parameter.text : parameter.childForFieldName("name")?.text ?? parameter.namedChild(0)?.text;
+    if (name) testParameters.add(name);
+  }
+
+  // The only deliberately unresolved lane: one lower-case local receiver, one
+  // direct method invocation, and the same one-assertion/result guards above.
+  // Capitalized class syntax, inline constructors, fixtures, setup properties,
+  // and any otherwise resolved receiver were handled by `relevant` above and
+  // therefore cannot reach this lane.
+  const unresolved = lexicalNodes
+    .filter((node) => node.type === "call")
+    .map((node) => ({ node, method: pythonMethodCall(node) }))
+    .filter((v): v is { node: Node; method: { call: { callee: string; qualifier?: string; via: "free" | "qualified" }; receiver: Node } } =>
+      Boolean(
+        v.method &&
+        v.method.receiver.type === "identifier" &&
+        /^[a-z_][A-Za-z0-9_]*$/.test(v.method.receiver.text) &&
+        v.method.receiver.text !== "self" &&
+        v.method.receiver.text !== "cls" &&
+        !testParameters.has(v.method.receiver.text) &&
+        // An imported lower-case name can be an exact module receiver
+        // (`calc.add()`); leave that to the legacy import-resolution lane.
+        !imports.some((binding) => binding.local === v.method?.receiver.text)
+      )
+    );
+  if (unresolved.length !== 1) return [];
+  const target = unresolved[0]!;
+  const results = new Map<string, typeof target>();
+  for (const { target: resultName, value } of assignments) {
+    if (resultName.type !== "identifier" || writes.get(resultName.text) !== 1) continue;
+    const call = pythonExactCall(value);
+    if (call?.id === target.node.id) results.set(resultName.text, target);
+  }
+  const direct = directPythonAssertCallNode(assertions[0]!);
+  if (direct?.id === target.node.id) {
+    return [{ assertion: assertions[0]!, call: target.method.call, associationRule: "unique_method_name_import" }];
+  }
+  const observed = pythonDirectAssertedResult(assertions[0]!, results);
+  const result = observed ? results.get(observed) : undefined;
+  return result
+    ? [{ assertion: assertions[0]!, call: result.method.call, associationRule: "unique_method_name_import" }]
+    : [];
+}
+
+function extractPythonProofCalls(root: Node, imports: TreeSitterImportBinding[]): TreeSitterPythonProofCall[] {
   const out: TreeSitterPythonProofCall[] = [];
   const seen = new Set<string>();
+  const fixtures = pythonFixtureBindings(root);
   const add = (
     testName: string,
     shadowed: Set<string>,
     call: { callee: string; qualifier?: string; via: "free" | "qualified" } | null,
-    instanceClass?: string
+    instanceClass?: string,
+    associationRule?: PythonAssociationRule
   ): void => {
     if (!call) return;
     const key = `${testName}|${instanceClass ?? ""}|${call.qualifier ?? ""}|${call.callee}`;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ caller: testName, testName, ...call, shadowed: [...shadowed], assertion: "pytest_assert", ...(instanceClass ? { instanceClass } : {}) });
+    out.push({
+      caller: testName,
+      testName,
+      ...call,
+      shadowed: [...shadowed],
+      assertion: "pytest_assert",
+      ...(instanceClass ? { instanceClass } : {}),
+      ...(associationRule ? { associationRule } : {})
+    });
   };
-  const processBlock = (block: Node, testName: string, shadowed: Set<string>): void => {
-    for (const associated of pythonAssignedInstanceProofCalls(block)) {
-      add(testName, shadowed, associated.call, associated.instanceClass);
+  const processBlock = (block: Node, testFunction: Node, testName: string, shadowed: Set<string>, setup: ReadonlyMap<string, PythonReceiverBinding> | null): void => {
+    // A direct `ImportedClass.method(...)` call is invocation-backed Association
+    // even when the test stores its result, has multiple assertions, or mocks an
+    // unrelated dependency. Analyzer-side resolution still requires an exact
+    // in-repo class import and a declared @classmethod/@staticmethod, and exact
+    // target mocks are suppressed before any hard edge is emitted.
+    for (const callNode of pythonLexicalNodes(block).filter((node) => node.type === "call")) {
+      const method = pythonMethodCall(callNode);
+      if (!method) continue;
+      const classRef = pythonDottedName(method.receiver);
+      if (classRef && pythonLooksLikeClassRef(classRef)) {
+        add(testName, shadowed, method.call, classRef, "class_static_method");
+      }
+    }
+    const associatedCalls = pythonStructuralAssociationProofCalls(block, testFunction, imports, fixtures, setup);
+    for (const associated of associatedCalls) {
+      add(testName, shadowed, associated.call, associated.instanceClass, associated.associationRule);
     }
     for (const stmt of blockStatements(block)) {
-      if (stmt.type === "assert_statement") add(testName, shadowed, directPythonAssertCall(stmt));
+      if (stmt.type === "assert_statement") {
+        const directNode = directPythonAssertCallNode(stmt);
+        const direct = directPythonAssertCall(stmt);
+        // Structural receiver syntax must be resolved only by the static-association
+        // lane above. The legacy direct-call lane does not know MRO/decorators and
+        // would otherwise turn `Cls.instance_method()` into a false confirmation.
+        const structurallyAssociated = Boolean(direct && associatedCalls.some((associated) =>
+          // Preserve the legacy same-package convention path for inline constructors
+          // with no explicit import. The structural class origin is exact, but the
+          // analyzer cannot resolve that class owner from this association alone.
+          associated.associationRule !== "inline_constructor" &&
+          associated.call.callee === direct.callee &&
+          associated.call.qualifier === direct.qualifier &&
+          associated.call.via === direct.via
+        ));
+        if ((!directNode || !pythonStructuralReceiverSyntax(directNode)) && !structurallyAssociated) add(testName, shadowed, direct);
+      }
       if (stmt.type === "function_definition" || stmt.type === "class_definition" || stmt.type === "lambda") continue;
       for (const child of namedChildren(stmt)) {
-        if (child.type === "block") processBlock(child, testName, shadowed);
+        if (child.type === "block") processBlock(child, testFunction, testName, shadowed, setup);
       }
     }
   };
-  const walk = (node: Node, insideFunction: boolean, testClass: string | null): void => {
+  const walk = (node: Node, insideFunction: boolean, testClass: { name: string; node: Node } | null): void => {
     if (!insideFunction && node.type === "class_definition") {
       const name = node.childForFieldName("name")?.text;
-      const nextTestClass = name && /^Test[A-Za-z0-9_]*$/.test(name) ? name : null;
+      const superclasses = node.childForFieldName("superclasses");
+      const bases = superclasses ? namedChildren(superclasses).map((base) => base.text) : [];
+      const isTestClass = Boolean(name && (/^Test[A-Za-z0-9_]*$/.test(name) || bases.some((base) => /(?:^|\.)TestCase$/.test(base))));
+      const nextTestClass = name && isTestClass ? { name, node } : null;
       for (const child of namedChildren(node)) walk(child, false, nextTestClass);
       return;
     }
@@ -2072,13 +2657,378 @@ function extractPythonProofCalls(root: Node): TreeSitterPythonProofCall[] {
       const name = functionName(node, "python");
       const body = node.childForFieldName("body");
       if (name && /^test_[A-Za-z0-9_]*$/.test(name) && body) {
-        processBlock(body, testClass ? `${testClass}::${name}` : name, localBindings(node, "python"));
+        processBlock(body, node, testClass ? `${testClass.name}::${name}` : name, localBindings(node, "python"), pythonSetupReceivers(testClass?.node ?? null));
       }
       if (insideFunction) return;
     }
     for (const child of namedChildren(node)) walk(child, insideFunction || node.type === "function_definition", testClass);
   };
   walk(root, false, null);
+  return out;
+}
+
+function pythonClassInfos(root: Node): TreeSitterPythonClassInfo[] {
+  const out: TreeSitterPythonClassInfo[] = [];
+  for (const node of root.descendantsOfType("class_definition")) {
+    if (!node || hasPythonFunctionAncestor(node)) continue;
+    const name = node.childForFieldName("name")?.text;
+    const superclasses = node.childForFieldName("superclasses");
+    const bases = superclasses
+      ? namedChildren(superclasses).map(pythonDottedName).filter((base): base is string => Boolean(base))
+      : [];
+    const body = node.childForFieldName("body");
+    const classStaticMethods = body
+      ? namedChildren(body)
+          .filter((member) => member.type === "decorated_definition")
+          .filter((member) => namedChildren(member).some((child) => child.type === "decorator" && /^@(?:class|static)method$/.test(child.text.trim())))
+          .map((member) => namedChildren(member).find((child) => child.type === "function_definition"))
+          .map((method) => method?.childForFieldName("name")?.text)
+          .filter((method): method is string => Boolean(method))
+      : [];
+    if (name) out.push({ name, bases, classStaticMethods: [...new Set(classStaticMethods)].sort() });
+  }
+  return out;
+}
+
+const PYTHON_ENUM_TYPES = new Set(["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"]);
+
+type PythonImportOrigin = { module: string; imported?: string; kind: "module" | "named" };
+
+/** Import bindings that are still exact immediately before one direct module statement. */
+function pythonImportsBefore(root: Node, stopAt: number): Map<string, PythonImportOrigin> {
+  const bindings = new Map<string, PythonImportOrigin>();
+  const invalidate = (name: string): void => { if (name) bindings.delete(name); };
+  for (const statement of namedChildren(root)) {
+    if (statement.startIndex >= stopAt) break;
+    if (statement.type === "import_statement" || statement.type === "import_from_statement") {
+      for (const binding of extractImports(statement, "python")) {
+        bindings.set(binding.local, { module: binding.module, imported: binding.imported, kind: binding.kind });
+      }
+      continue;
+    }
+    if (statement.type === "function_definition" || statement.type === "class_definition") {
+      invalidate(statement.childForFieldName("name")?.text ?? "");
+      continue;
+    }
+    if (statement.type === "decorated_definition") {
+      const declaration = namedChildren(statement).find((child) => child.type === "function_definition" || child.type === "class_definition");
+      invalidate(declaration?.childForFieldName("name")?.text ?? "");
+      continue;
+    }
+    if (statement.type === "assignment" || statement.type === "annotated_assignment" || statement.type === "augmented_assignment") {
+      for (const name of pythonBindingTargetNames(statement.childForFieldName("left"))) invalidate(name);
+      continue;
+    }
+    if (statement.type === "delete_statement") {
+      for (const child of namedChildren(statement)) for (const name of pythonBindingTargetNames(child)) invalidate(name);
+    }
+  }
+  return bindings;
+}
+
+function pythonBaseIsStdlib(
+  base: Node,
+  bindings: Map<string, PythonImportOrigin>,
+  module: "enum" | "threading",
+  allowed: Set<string>
+): boolean {
+  const dotted = pythonDottedName(base);
+  if (!dotted) return false;
+  const parts = dotted.split(".");
+  if (parts.length === 1) {
+    const binding = bindings.get(parts[0]!);
+    return Boolean(binding?.kind === "named" && binding.module === module && binding.imported && allowed.has(binding.imported));
+  }
+  if (parts.length === 2 && allowed.has(parts[1]!)) {
+    const binding = bindings.get(parts[0]!);
+    return Boolean(binding?.kind === "module" && binding.module === module);
+  }
+  return false;
+}
+
+function pythonClassHasMethod(node: Node): boolean {
+  const body = node.childForFieldName("body");
+  if (!body) return false;
+  const visit = (current: Node): boolean => {
+    if (current !== body && current.type === "class_definition") return false;
+    if (current.type === "function_definition") return true;
+    return namedChildren(current).some(visit);
+  };
+  return namedChildren(body).some(visit);
+}
+
+function pythonParameterNames(fn: Node): string[] | null {
+  const params = fn.childForFieldName("parameters");
+  if (!params) return null;
+  const out: string[] = [];
+  for (const parameter of namedChildren(params)) {
+    if (parameter.type === "identifier") {
+      out.push(parameter.text);
+      continue;
+    }
+    if (parameter.type === "default_parameter" || parameter.type === "typed_parameter" || parameter.type === "typed_default_parameter") {
+      const name = parameter.childForFieldName("name") ?? namedChildren(parameter)[0] ?? null;
+      if (name?.type !== "identifier") return null;
+      out.push(name.text);
+      continue;
+    }
+    // Splat/pattern/separator shapes are not bare forwarding parameters.
+    return null;
+  }
+  return out;
+}
+
+function pythonLiteralOrParameter(node: Node | null, params: Set<string>): boolean {
+  if (!node) return false;
+  if (node.type === "identifier") return params.has(node.text);
+  return new Set(["none", "true", "false", "integer", "float", "string", "concatenated_string"]).has(node.type);
+}
+
+function pythonDocstringStatement(statement: Node): boolean {
+  if (statement.type !== "expression_statement") return false;
+  const expression = namedChildren(statement)[0];
+  return expression?.type === "string" || expression?.type === "concatenated_string";
+}
+
+function pythonSuperInitStatement(statement: Node): boolean {
+  if (statement.type !== "expression_statement") return false;
+  const call = namedChildren(statement)[0];
+  if (call?.type !== "call" || pythonCallArguments(call).length !== 0) return false;
+  const fn = call.childForFieldName("function");
+  if (fn?.type !== "attribute" || fn.childForFieldName("attribute")?.text !== "__init__") return false;
+  const receiver = fn.childForFieldName("object");
+  if (receiver?.type !== "call" || pythonCallArguments(receiver).length !== 0) return false;
+  return receiver.childForFieldName("function")?.type === "identifier" && receiver.childForFieldName("function")?.text === "super";
+}
+
+function pythonTrivialSelfAssignment(statement: Node, params: Set<string>): boolean {
+  if (statement.type !== "expression_statement") return false;
+  const assignment = namedChildren(statement)[0];
+  if (assignment?.type !== "assignment") return false;
+  const left = assignment.childForFieldName("left");
+  if (left?.type !== "attribute" || left.childForFieldName("object")?.type !== "identifier" || left.childForFieldName("object")?.text !== "self") return false;
+  return pythonLiteralOrParameter(assignment.childForFieldName("right"), params);
+}
+
+function pythonTrivialThreadLocalInitializer(classNode: Node): string | null {
+  const body = classNode.childForFieldName("body");
+  if (!body) return null;
+  const methods = namedChildren(body).flatMap((statement) => {
+    if (statement.type === "function_definition") return [statement];
+    if (statement.type === "decorated_definition") {
+      const fn = namedChildren(statement).find((child) => child.type === "function_definition");
+      return fn ? [fn] : [];
+    }
+    return [];
+  }).filter((fn) => fn.childForFieldName("name")?.text === "__init__");
+  if (methods.length !== 1) return null;
+  const fn = methods[0]!;
+  const paramsList = pythonParameterNames(fn);
+  const fnBody = fn.childForFieldName("body");
+  if (!paramsList || !fnBody) return null;
+  const params = new Set(paramsList);
+  const statements = blockStatements(fnBody);
+  for (let i = 0; i < statements.length; i++) {
+    const statement = statements[i]!;
+    if (i === 0 && pythonDocstringStatement(statement)) continue;
+    if (statement.type === "pass_statement" || pythonSuperInitStatement(statement) || pythonTrivialSelfAssignment(statement, params)) continue;
+    return null;
+  }
+  return pythonQualifiedFunctionName(fn) ?? null;
+}
+
+function extractPythonDeclarationRankingExclusions(root: Node): TreeSitterPythonRankingExclusion[] {
+  const out: TreeSitterPythonRankingExclusion[] = [];
+  for (const classNode of root.descendantsOfType("class_definition")) {
+    if (!classNode || hasPythonFunctionAncestor(classNode) || classNode.parent?.type !== "module") continue;
+    const name = classNode.childForFieldName("name")?.text;
+    const bases = classNode.childForFieldName("superclasses");
+    if (!name || !bases) continue;
+    const bindings = pythonImportsBefore(root, classNode.startIndex);
+    const baseNodes = namedChildren(bases);
+    if (baseNodes.some((base) => pythonBaseIsStdlib(base, bindings, "enum", PYTHON_ENUM_TYPES)) && !pythonClassHasMethod(classNode)) {
+      out.push({
+        symbol: name,
+        code: "python_stdlib_enum_declaration",
+        reason: "Standard-library enum declaration without methods — retained in the graph but excluded from priority ranking."
+      });
+    }
+    if (baseNodes.some((base) => pythonBaseIsStdlib(base, bindings, "threading", new Set(["local"])))) {
+      const initializer = pythonTrivialThreadLocalInitializer(classNode);
+      if (initializer) {
+        out.push({
+          symbol: initializer,
+          code: "python_trivial_thread_local_initializer",
+          reason: "Trivial threading.local initializer — retained in the graph but excluded from priority ranking."
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function pythonModuleImportAliases(root: Node): Map<string, string> {
+  const importCounts = new Map<string, number>();
+  const importLocals = new Set<string>();
+  for (const statement of namedChildren(root)) {
+    if (statement.type !== "import_statement" && statement.type !== "import_from_statement") continue;
+    for (const binding of extractImports(statement, "python")) {
+      importCounts.set(binding.local, (importCounts.get(binding.local) ?? 0) + 1);
+      importLocals.add(binding.local);
+    }
+  }
+  const writeCounts = new Map<string, number>();
+  const directAliases = new Map<string, string>();
+  for (const type of ["assignment", "annotated_assignment", "augmented_assignment", "delete_statement"]) {
+    for (const mutation of root.descendantsOfType(type)) {
+      if (!mutation) continue;
+      let parent = mutation.parent;
+      let moduleScoped = false;
+      while (parent) {
+        if (parent.type === "function_definition" || parent.type === "class_definition" || parent.type === "lambda") break;
+        if (parent.type === "module") { moduleScoped = true; break; }
+        parent = parent.parent;
+      }
+      if (!moduleScoped) continue;
+      const targets = mutation.type === "delete_statement"
+        ? namedChildren(mutation).flatMap((child) => pythonBindingTargetNames(child))
+        : pythonBindingTargetNames(mutation.childForFieldName("left"));
+      for (const target of targets) writeCounts.set(target, (writeCounts.get(target) ?? 0) + 1);
+      if (!pythonDirectModuleExecution(mutation) || mutation.type !== "assignment") continue;
+      const left = mutation.childForFieldName("left");
+      const right = mutation.childForFieldName("right");
+      if (left?.type === "identifier" && right?.type === "identifier") directAliases.set(left.text, right.text);
+    }
+  }
+  const out = new Map<string, string>();
+  for (const local of importLocals) {
+    if (importCounts.get(local) === 1 && (writeCounts.get(local) ?? 0) === 0) out.set(local, local);
+  }
+  for (const [alias, importedLocal] of directAliases) {
+    if ((writeCounts.get(alias) ?? 0) === 1 && out.get(importedLocal) === importedLocal) out.set(alias, importedLocal);
+  }
+  return out;
+}
+
+function extractPythonThinDelegates(root: Node): TreeSitterPythonThinDelegate[] {
+  const out: TreeSitterPythonThinDelegate[] = [];
+  const imports = pythonModuleImportAliases(root);
+  for (const fn of root.descendantsOfType("function_definition")) {
+    if (!fn || hasPythonFunctionAncestor(fn)) continue;
+    const symbol = pythonQualifiedFunctionName(fn);
+    const params = pythonParameterNames(fn);
+    const body = fn.childForFieldName("body");
+    if (!symbol || !params || !body) continue;
+    const statements = blockStatements(body);
+    if (statements.length > 0 && pythonDocstringStatement(statements[0]!)) statements.shift();
+    if (statements.length !== 1 || statements[0]!.type !== "return_statement") continue;
+    const expression = namedChildren(statements[0]!)[0];
+    if (expression?.type !== "call") continue;
+    const fnNode = expression.childForFieldName("function");
+    if (fnNode?.type !== "attribute") continue;
+    const receiver = fnNode.childForFieldName("object");
+    if (receiver?.type !== "identifier" || localBindings(fn, "python").has(receiver.text)) continue;
+    const importLocal = imports.get(receiver.text);
+    if (!importLocal) continue;
+    const args = pythonCallArguments(expression);
+    if (args.length !== params.length || args.some((arg, index) => arg.type !== "identifier" || arg.text !== params[index])) continue;
+    out.push({ symbol, importLocal });
+  }
+  return out;
+}
+
+function pythonNearestFunction(node: Node): Node | null {
+  let parent = node.parent;
+  while (parent) {
+    if (parent.type === "function_definition") return parent;
+    parent = parent.parent;
+  }
+  return null;
+}
+
+function pythonDirectFunctionStatement(call: Node, owner: Node): boolean {
+  // A direct call may be awaited and assigned before it becomes a function-body
+  // statement. Unwrap only the exact RHS, never a call nested in an argument,
+  // condition, comprehension, or another callable's result.
+  let expression: Node = call;
+  if (expression.parent?.type === "await") expression = expression.parent;
+  if (expression.parent?.type === "assignment") {
+    const assignment = expression.parent;
+    const right = assignment.childForFieldName("right");
+    const left = assignment.childForFieldName("left");
+    if (left?.type !== "identifier" || right?.startIndex !== expression.startIndex || right?.endIndex !== expression.endIndex) return false;
+    expression = assignment;
+  }
+  const statement = expression.parent;
+  if (!statement || (statement.type !== "expression_statement" && statement.type !== "return_statement")) return false;
+  const body = statement.parent;
+  const parent = body?.parent;
+  // web-tree-sitter may return distinct JS wrappers for the same native node, so
+  // object identity is not a valid ancestry test. Compare the exact AST span.
+  return body?.type === "block"
+    && parent?.type === owner.type
+    && parent.startIndex === owner.startIndex
+    && parent.endIndex === owner.endIndex;
+}
+
+function pythonConstructorChain(call: Node): { constructorLocal: string; callee: string } | null {
+  const fn = call.childForFieldName("function");
+  if (fn?.type !== "attribute") return null;
+  let receiver = fn.childForFieldName("object");
+  let attributes = 0;
+  while (receiver?.type === "attribute") {
+    attributes++;
+    receiver = receiver.childForFieldName("object");
+  }
+  // At least one persistence/object field between constructor and terminal.
+  if (attributes < 1 || receiver?.type !== "call") return null;
+  const constructorFn = receiver.childForFieldName("function");
+  if (constructorFn?.type !== "identifier") return null;
+  const terminalArgs = call.childForFieldName("arguments");
+  const constructorArgs = receiver.childForFieldName("arguments");
+  if (terminalArgs?.descendantsOfType("call").some(Boolean) || constructorArgs?.descendantsOfType("call").some(Boolean)) return null;
+  return { constructorLocal: constructorFn.text, callee: fn.text };
+}
+
+function extractPythonConstructorChainCalls(root: Node): TreeSitterPythonConstructorChainCall[] {
+  const out: TreeSitterPythonConstructorChainCall[] = [];
+  for (const call of root.descendantsOfType("call")) {
+    if (!call) continue;
+    const owner = pythonNearestFunction(call);
+    if (!owner || hasPythonFunctionAncestor(owner) || !pythonDirectFunctionStatement(call, owner)) continue;
+    const shape = pythonConstructorChain(call);
+    const caller = pythonQualifiedFunctionName(owner);
+    if (shape && caller) out.push({ caller, ...shape });
+  }
+  return out;
+}
+
+function extractPythonModuleAttributes(root: Node, imports: TreeSitterImportBinding[]): TreeSitterPythonModuleAttribute[] {
+  const counts = new Map<string, number>();
+  for (const binding of imports) counts.set(binding.local, (counts.get(binding.local) ?? 0) + 1);
+  const modules = new Set(imports.filter((binding) => binding.kind === "module" && counts.get(binding.local) === 1).map((binding) => binding.local));
+  const globalWrites = new Set(root.descendantsOfType("assignment")
+    .filter((assignment) => assignment?.parent?.type === "module")
+    .map((assignment) => assignment!.childForFieldName("left")?.text).filter((name): name is string => Boolean(name)));
+  const boundLocals = new Map<number, Set<string>>();
+  const out: TreeSitterPythonModuleAttribute[] = [];
+  for (const attr of root.descendantsOfType("attribute")) {
+    if (!attr || attr.parent?.type === "call" && attr.parent.childForFieldName("function")?.startIndex === attr.startIndex && attr.parent.childForFieldName("function")?.endIndex === attr.endIndex) continue;
+    if (attr.parent?.type === "attribute" && attr.parent.childForFieldName("object") === attr) continue;
+    const object = attr.childForFieldName("object");
+    const name = attr.childForFieldName("attribute");
+    if (object?.type !== "identifier" || !name || !modules.has(object.text)) continue;
+    const fn = pythonNearestFunction(attr);
+    if (fn) {
+      let bindings = boundLocals.get(fn.startIndex);
+      if (!bindings) boundLocals.set(fn.startIndex, (bindings = localBindings(fn, "python")));
+      if (bindings.has(object.text)) continue;
+    }
+    // Never count a reassigned global alias or a module-level class/function with
+    // the same binding. Ambiguity fails closed rather than guessing an origin.
+    if (globalWrites.has(object.text)) continue;
+    out.push({ local: object.text, attribute: name.text });
+  }
   return out;
 }
 
@@ -2141,6 +3091,7 @@ export function extractTreeSitterStructure(content: string, language: string, re
   const pythonDependencies = language === "python"
     ? extractPythonDependencies(root, imports, new Set((pythonBehaviorContracts ?? []).map((contract) => contract.handler).filter((handler): handler is string => Boolean(handler))))
     : undefined;
+  const pythonMockScopes = language === "python" ? pythonScopedMockMethods(root, imports) : undefined;
   const result = {
     ...(language === "java" ? { packageName: javaPackage(root), javaClasses: javaClassInfos(root), javaProofCalls: extractJavaProofCalls(root, imports) } : {}),
     ...(language === "go" ? { packageName: goPackage(root), goCtorResults: extractGoCtorResults(root) } : {}),
@@ -2150,7 +3101,19 @@ export function extractTreeSitterStructure(content: string, language: string, re
     imports,
     calls,
     ...(language === "go" ? { goProofCalls: extractGoProofCalls(root, imports) } : {}),
-    ...(language === "python" ? { pythonProofCalls: extractPythonProofCalls(root), pythonBehaviorContracts, pythonDependencies } : {})
+    ...(language === "python" ? {
+      pythonProofCalls: extractPythonProofCalls(root, imports),
+      pythonMockedMethods: pythonMockedMethods(root, imports),
+      pythonMocksByTest: pythonMockScopes!.byTest,
+      pythonUnknownMockScopeTests: pythonMockScopes!.unknown,
+      pythonClasses: pythonClassInfos(root),
+      pythonBehaviorContracts,
+      pythonDependencies,
+      pythonRankingExclusions: extractPythonDeclarationRankingExclusions(root),
+      pythonThinDelegates: extractPythonThinDelegates(root),
+      pythonModuleAttributes: extractPythonModuleAttributes(root, imports),
+      pythonConstructorChainCalls: extractPythonConstructorChainCalls(root)
+    } : {})
   };
   tree.delete();
   return result;

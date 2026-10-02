@@ -1,5 +1,9 @@
 import { loadRiskConfig, globToRegExp, type RiskOverride } from "./riskConfig.js";
 import { execFileSync } from "node:child_process";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { LocalGraph, GraphNode } from "../graph/ontology.js";
 import { hashString } from "../util/hash.js";
 import { builtInRankExclusion } from "./rankEligibility.js";
@@ -16,6 +20,12 @@ export interface RiskGap {
   git_churn: number;
   /** False means Git history was unavailable/incomplete; zero is not a measured value. */
   churn_available?: boolean;
+  /** Acquisition truth for this row's Git-derived inputs. Partial values are retained. */
+  churn_state?: "complete" | "partial" | "unavailable";
+  /** Why a partial/unavailable acquisition is provisional. */
+  churn_reason?: string;
+  /** Non-merge commits parsed before completion or a bounded stop. */
+  commits_scanned?: number;
   entry_point: boolean;
   reasons: string[];
   /** OrangePro Risk Score decomposition (P × I × D). */
@@ -46,6 +56,8 @@ export interface RiskInputHealth {
   commitDate: string | null;
   history: "full" | "shallow" | "partial" | "unavailable";
   churnWindow: string;
+  /** Preflight state; a shallow/partial clone is usable but cannot be complete. */
+  churnState: "complete" | "partial" | "unavailable";
   churnAvailable: boolean;
   reason?: string;
 }
@@ -143,13 +155,161 @@ function confirmedBehaviorIds(graph: LocalGraph, provenIds?: Set<string>): Set<s
   return ids;
 }
 
-const GIT_CHURN_BATCH = 200;
+/** Bounded repository-wide history acquisition. Deliberately constants, not hidden timeouts. */
+export const GIT_CHURN_MAX_COMMITS = 5_000;
+export const GIT_CHURN_TIMEOUT_MS = 60_000;
+const GIT_FIRST_COMMIT_BATCH = 200;
+
+export interface RiskChurnMetadata {
+  state: "complete" | "partial" | "unavailable";
+  reason?: string;
+  commitsScanned: number;
+}
+
+interface GitChurnResult extends RiskChurnMetadata {
+  values: Map<string, number>;
+}
+
+/**
+ * This worker intentionally uses spawn, not execFileSync: stdout is parsed as it
+ * arrives, so a 60s bound returns the values already observed instead of erasing
+ * completed chunks. It retains only requested paths, bounding the worker map and
+ * handoff payload by ranking input rather than repository history. The scoring API
+ * is synchronous, therefore the worker signals only after writing its result file.
+ */
+const GIT_CHURN_WORKER_SOURCE = String.raw`
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const { workerData } = require("node:worker_threads");
+const state = new Int32Array(workerData.signal);
+const values = new Map();
+const trackedFiles = new Set(workerData.files);
+let commitsScanned = 0;
+let commitLimitReached = false;
+let expectingTimestamp = false;
+let renameRecord = null;
+let renameOldPath = null;
+let remainder = "";
+let stderr = "";
+let done = false;
+let timedOut = false;
+let timer;
+let child;
+let childClosed = false;
+const firstLine = (text) => String(text || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
+const add = (path, adds, dels) => {
+  if (!path || commitLimitReached || !trackedFiles.has(path)) return;
+  values.set(path, (values.get(path) || 0) + adds + dels);
+};
+const consume = (token) => {
+  if (renameRecord) {
+    // Git numstat -z represents a rename as an empty-path record followed by
+    // the old path and then the new path. Attribute churn to the current path.
+    if (renameOldPath === null) {
+      renameOldPath = token;
+      return;
+    }
+    add(token, renameRecord.adds, renameRecord.dels);
+    renameRecord = null;
+    renameOldPath = null;
+    return;
+  }
+  if (/^[0-9a-f]{40}$/i.test(token)) { expectingTimestamp = true; return; }
+  if (expectingTimestamp && /^\d+$/.test(token)) {
+    expectingTimestamp = false;
+    if (commitsScanned >= workerData.maxCommits) {
+      commitLimitReached = true;
+      if (child) child.kill("SIGTERM");
+      return;
+    }
+    commitsScanned++;
+    return;
+  }
+  const match = token.replace(/^\n/, "").match(/^(-|\d+)\t(-|\d+)\t([\s\S]*)$/);
+  if (!match) return;
+  const adds = match[1] === "-" ? 0 : Number(match[1]);
+  const dels = match[2] === "-" ? 0 : Number(match[2]);
+  if (match[3] === "") { renameRecord = { adds, dels }; renameOldPath = null; return; }
+  add(match[3], adds, dels);
+};
+const finish = (stateName, reason) => {
+  if (done) return;
+  done = true;
+  if (timer) clearTimeout(timer);
+  try {
+    writeFileSync(workerData.resultPath, JSON.stringify({ state: stateName, reason, commitsScanned, values: [...values].sort(([a], [b]) => a.localeCompare(b)) }));
+  } finally {
+    Atomics.store(state, 0, 1);
+    Atomics.notify(state, 0);
+  }
+};
+const stopChild = (signal) => {
+  if (!child || childClosed) return;
+  try { child.kill(signal); } catch {}
+};
+// The parent terminates this worker after consuming the bounded handoff. Make
+// sure an unresponsive git child cannot survive that termination.
+process.on("exit", () => stopChild("SIGKILL"));
+try {
+  child = spawn("git", ["log", "--no-merges", "--numstat", "--format=%H%x00%ct", "-z", "--since=" + workerData.window, "--max-count=" + (workerData.maxCommits + 1)], {
+    cwd: workerData.root,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+} catch (error) {
+  finish("unavailable", error && error.code === "ENOENT" ? "git_missing" : "error:" + firstLine(error && error.message));
+}
+timer = setTimeout(() => {
+  timedOut = true;
+  stopChild("SIGTERM");
+  setTimeout(() => finish("partial", "timeout"), 100).unref();
+}, workerData.timeoutMs);
+if (child) {
+  child.stdout.on("data", (chunk) => {
+    remainder += chunk.toString("utf8");
+    let nul;
+    while ((nul = remainder.indexOf("\0")) >= 0) {
+      consume(remainder.slice(0, nul));
+      remainder = remainder.slice(nul + 1);
+    }
+  });
+  child.stderr.on("data", (chunk) => { if (stderr.length < 4096) stderr += chunk.toString("utf8"); });
+  child.on("error", (error) => finish("unavailable", error && error.code === "ENOENT" ? "git_missing" : "error:" + firstLine(error && error.message)));
+  child.on("close", (code) => {
+    childClosed = true;
+    if (remainder) consume(remainder);
+    if (timedOut) return finish("partial", "timeout");
+    if (commitLimitReached) return finish("partial", "commit_limit");
+    if (code === 0) return finish(workerData.cloneState === "full" ? "complete" : "partial", workerData.cloneState === "shallow" ? "shallow clone: churn based on " + commitsScanned + " commits" : workerData.cloneState === "partial" ? "partial clone: churn based on " + commitsScanned + " commits" : undefined);
+    finish(commitsScanned > 0 ? "partial" : "unavailable", "error:" + (firstLine(stderr) || "git log exited " + code));
+  });
+}
+`;
+
+const historyCache = new Map<string, GitChurnResult>();
+
+function firstErrorLine(error: unknown): string {
+  const e = error as NodeJS.ErrnoException & { stderr?: Buffer | string };
+  const raw = e.stderr ? String(e.stderr) : e.message;
+  return raw.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "unknown Git error";
+}
+
+function unavailableHealth(root: string | undefined, churnWindow: string, error: unknown): RiskInputHealth {
+  const e = error as NodeJS.ErrnoException & { stderr?: Buffer | string };
+  const line = firstErrorLine(error);
+  const reason = e.code === "ENOENT"
+    ? "git_missing"
+    : /not a git repository/i.test(line)
+      ? "not_a_git_repo"
+      : `error:${line}`;
+  return { sourceRoot: root ?? null, gitRoot: null, commit: null, commitDate: null, history: "unavailable", churnWindow, churnState: "unavailable", churnAvailable: false, reason };
+}
 
 export function inspectRiskInputHealth(root: string | undefined, churnWindow?: string): RiskInputHealth {
-  const unavailableWindow = churnWindow ?? "180 days before HEAD";
-  if (!root) return { sourceRoot: null, gitRoot: null, commit: null, commitDate: null, history: "unavailable", churnWindow: unavailableWindow, churnAvailable: false, reason: "source root unavailable" };
+  const configuredDays = loadRiskConfig(root ?? "").config.tuning.churn_window_days;
+  const unavailableWindow = churnWindow ?? `${configuredDays} days before HEAD`;
+  if (!root) return { sourceRoot: null, gitRoot: null, commit: null, commitDate: null, history: "unavailable", churnWindow: unavailableWindow, churnState: "unavailable", churnAvailable: false, reason: "not_a_git_repo" };
   try {
-    const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
+    const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 4000 }).trim();
     const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
     const commitDate = execFileSync("git", ["show", "-s", "--format=%cI", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
     const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim() === "true";
@@ -162,7 +322,7 @@ export function inspectRiskInputHealth(root: string | undefined, churnWindow?: s
       // A normal full clone has no promisor-remote configuration.
     }
     const commitMs = Date.parse(commitDate);
-    const resolvedWindow = churnWindow ?? (Number.isFinite(commitMs) ? new Date(commitMs - 180 * 24 * 60 * 60 * 1000).toISOString() : unavailableWindow);
+    const resolvedWindow = churnWindow ?? (Number.isFinite(commitMs) ? new Date(commitMs - configuredDays * 24 * 60 * 60 * 1000).toISOString() : unavailableWindow);
     return {
       sourceRoot: root,
       gitRoot,
@@ -170,50 +330,74 @@ export function inspectRiskInputHealth(root: string | undefined, churnWindow?: s
       commitDate,
       history: shallow ? "shallow" : partial ? "partial" : "full",
       churnWindow: resolvedWindow,
+      churnState: shallow || partial ? "partial" : "complete",
       churnAvailable: !shallow && !partial,
       reason: shallow
-        ? "shallow Git history cannot support a complete churn window"
+        ? "shallow clone: churn based on available history"
         : partial
-          ? "partial-clone Git objects cannot guarantee a complete offline churn window"
+          ? "partial clone: churn based on available history"
           : undefined
     };
-  } catch {
-    return { sourceRoot: root, gitRoot: null, commit: null, commitDate: null, history: "unavailable", churnWindow: unavailableWindow, churnAvailable: false, reason: "Git history could not be read from the analyzed source root" };
+  } catch (error) {
+    return unavailableHealth(root, unavailableWindow, error);
   }
 }
 
-function gitChurn(root: string | undefined, files: string[], window: string): { values: Map<string, number>; complete: boolean } {
-  const out = new Map<string, number>();
-  if (!root || files.length === 0) return { values: out, complete: Boolean(root) };
-  for (let i = 0; i < files.length; i += GIT_CHURN_BATCH) {
-    const batch = files.slice(i, i + GIT_CHURN_BATCH);
-    try {
-      const stdout = execFileSync("git", ["log", `--since=${window}`, "--numstat", "--", ...batch], {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 4000,
-        maxBuffer: 2_000_000
-      });
-      for (const line of stdout.split("\n")) {
-        const m = line.match(/^(\d+|-)\s+(\d+|-)\s+(.+)$/);
-        if (!m) continue;
-        const adds = m[1] === "-" ? 0 : Number(m[1]);
-        const dels = m[2] === "-" ? 0 : Number(m[2]);
-        out.set(m[3], (out.get(m[3]) ?? 0) + adds + dels);
+function gitChurn(root: string | undefined, files: string[], window: string, health = inspectRiskInputHealth(root, window)): GitChurnResult {
+  const empty: GitChurnResult = { values: new Map(), state: "unavailable", commitsScanned: 0, reason: health.reason };
+  if (!root || health.churnState === "unavailable") return empty;
+  // Values are retained only for the requested paths, so that set and clone
+  // state are part of cache identity. A checkout can be marked partial at an
+  // unchanged HEAD and must then remain truthfully provisional.
+  const requestedFiles = [...new Set(files)].sort();
+  const requested = new Set(requestedFiles);
+  const key = `${health.gitRoot ?? root}\0${health.commit ?? ""}\0${health.history}\0${window}\0${hashString(JSON.stringify(requestedFiles))}`;
+  const cached = historyCache.get(key);
+  if (cached) return { ...cached, values: new Map(cached.values) };
+  const dir = mkdtempSync(join(tmpdir(), "orangepro-churn-"));
+  const resultPath = join(dir, "result.json");
+  const signal = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const state = new Int32Array(signal);
+  let parsed: { state: GitChurnResult["state"]; reason?: string; commitsScanned: number; values: Array<[string, number]> } | undefined;
+  try {
+    const worker = new Worker(GIT_CHURN_WORKER_SOURCE, {
+      eval: true,
+      workerData: {
+        root,
+        window,
+        files: requestedFiles,
+        maxCommits: GIT_CHURN_MAX_COMMITS,
+        timeoutMs: GIT_CHURN_TIMEOUT_MS,
+        cloneState: health.history,
+        resultPath,
+        signal
       }
-    } catch {
-      return { values: new Map(), complete: false };
-    }
+    });
+    // The worker publishes a partial result 100ms after its child timeout; leave
+    // explicit scheduling room before the synchronous API forces it down.
+    Atomics.wait(state, 0, 0, GIT_CHURN_TIMEOUT_MS + 2_000);
+    if (Atomics.load(state, 0) === 1) parsed = JSON.parse(readFileSync(resultPath, "utf8")) as typeof parsed;
+    void worker.terminate().catch(() => undefined);
+  } catch (error) {
+    parsed = { state: "unavailable", reason: `error:${firstErrorLine(error)}`, commitsScanned: 0, values: [] };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  return { values: out, complete: true };
+  const full: GitChurnResult = parsed
+    ? { state: parsed.state, reason: parsed.reason, commitsScanned: parsed.commitsScanned, values: new Map(parsed.values) }
+    : { state: "partial", reason: "timeout", commitsScanned: 0, values: new Map() };
+  historyCache.set(key, full);
+  // Defense in depth: a malformed worker payload may never score an unrequested path.
+  return { ...full, values: new Map([...full.values].filter(([file]) => requested.has(file))) };
 }
 
+/** Preserve the released ORS `is_new_code` input. This is separate from the
+ * recent-churn window because a file's first add may predate that window. */
 function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<string, number> {
   const out = new Map<string, number>();
   if (!root || files.length === 0) return out;
-  for (let i = 0; i < files.length; i += GIT_CHURN_BATCH) {
-    const batch = files.slice(i, i + GIT_CHURN_BATCH);
+  for (let i = 0; i < files.length; i += GIT_FIRST_COMMIT_BATCH) {
+    const batch = files.slice(i, i + GIT_FIRST_COMMIT_BATCH);
     try {
       const stdout = execFileSync(
         "git",
@@ -222,7 +406,7 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
           cwd: root,
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
-          timeout: 4000,
+          timeout: 4_000,
           maxBuffer: 2_000_000
         }
       );
@@ -238,30 +422,33 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
           currentTs = ts;
           continue;
         }
-        if (currentTs > 0 && !out.has(trimmed)) {
-          out.set(trimmed, currentTs);
-        }
+        if (currentTs > 0 && !out.has(trimmed)) out.set(trimmed, currentTs);
       }
     } catch {
-      continue;
+      // Preserve the released fail-closed behavior for this optional ORS signal.
     }
   }
   return out;
+}
+
+/** Repository-level acquisition metadata for report/provenance callers. */
+export function inspectRiskChurn(root: string | undefined, files: string[], churnWindow?: string): RiskChurnMetadata {
+  const health = inspectRiskInputHealth(root, churnWindow);
+  const result = gitChurn(root, files, health.churnWindow, health);
+  return { state: result.state, reason: result.reason, commitsScanned: result.commitsScanned };
 }
 
 /** Exact deterministic identity of the Git-derived inputs consumed by ORS. */
 export function riskHistoryFingerprint(root: string | undefined, files: string[], churnWindow?: string): string {
   const health = inspectRiskInputHealth(root, churnWindow);
   const sortedFiles = [...new Set(files)].sort();
-  if (!health.churnAvailable) {
-    return hashString(JSON.stringify({ state: health.history, window: health.churnWindow, available: false }));
-  }
-  const churn = gitChurn(root, sortedFiles, health.churnWindow);
-  const first = churn.complete ? gitFirstCommitBatch(root, sortedFiles) : new Map<string, number>();
+  const churn = gitChurn(root, sortedFiles, health.churnWindow, health);
+  const first = churn.state === "complete" ? gitFirstCommitBatch(root, sortedFiles) : new Map<string, number>();
   return hashString(JSON.stringify({
-    state: health.history,
+    state: churn.state,
     window: health.churnWindow,
-    available: churn.complete,
+    reason: churn.reason,
+    commits_scanned: churn.commitsScanned,
     churn: sortedFiles.map((file) => [file, churn.values.get(file) ?? 0]),
     first_commit: sortedFiles.map((file) => [file, first.get(file) ?? 0])
   }));
@@ -550,8 +737,8 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // worklist but do not rescale an unchanged peer.
   const normalizationSymbols = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true && !n.stale && rankEligible(n) && !isSuppressed(n.external_id));
   const symbols = normalizationSymbols.filter((n) => !confirmed.has(n.external_id));
-  const worklistSymbols = symbols.filter((n) => n.properties.ranking_exclusion_reason !== "python_structural_container");
   const symbolIds = new Set(normalizationSymbols.map((s) => s.external_id));
+  const fileBySymbolId = new Map(normalizationSymbols.map((s) => [s.external_id, symbolFile(s)]));
   const symbolsByFile = new Map<string, GraphNode[]>();
   for (const s of normalizationSymbols) {
     const file = symbolFile(s);
@@ -569,33 +756,38 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const sensitivityIgnore = cfg.classification.sensitivity_ignore.map(globToRegExp);
   const inputHealth = inspectRiskInputHealth(repoRoot, opts.churnWindow);
   const churnWindow = inputHealth.churnWindow;
-  const churnResult = inputHealth.churnAvailable ? gitChurn(repoRoot, files, churnWindow) : { values: new Map<string, number>(), complete: false };
+  const churnResult = gitChurn(repoRoot, files, churnWindow, inputHealth);
   const churn = churnResult.values;
-  const churnAvailable = inputHealth.churnAvailable && churnResult.complete;
+  const churnAvailable = churnResult.state === "complete";
   const firstCommitTs = churnAvailable ? gitFirstCommitBatch(repoRoot, files) : new Map<string, number>();
   const commitMs = Date.parse(inputHealth.commitDate ?? "");
   const graphMs = Date.parse(graph.updated_at || graph.created_at || "");
   const nowSec = Math.floor((Number.isFinite(commitMs) ? commitMs : Number.isFinite(graphMs) ? graphMs : 0) / 1000);
 
-  // Method-level attribution. CALLS edges are already symbol-granular and count
-  // at full weight. IMPORTS edges are file-granular: previously every symbol in
-  // an imported file inherited the file's full import count, which made all 17
-  // methods of a hot service tie at the same "incoming refs" and saturated the
-  // ranking. Split the file's import count across its eligible symbols instead.
+  // A file-level IMPORTS edge does not reference any particular symbol. Only its
+  // AST-resolved named imports and non-call module.attribute references may be
+  // attributed; CALLS already has an exact symbol target. Older graphs without
+  // these metadata facts fail closed instead of redistributing imports.
   const incoming = new Map<string, number>();
-  const fileImports = new Map<string, number>();
   for (const e of graph.edges) {
     if (e.relationship_type === "CALLS" && symbolIds.has(e.to_external_id)) {
       incoming.set(e.to_external_id, (incoming.get(e.to_external_id) ?? 0) + 1);
-    } else if (e.relationship_type === "IMPORTS" && symbolsByFile.has(e.to_external_id)) {
-      fileImports.set(e.to_external_id, (fileImports.get(e.to_external_id) ?? 0) + 1);
+    } else if (e.relationship_type === "IMPORTS") {
+      const named = e.properties?.symbol_imports;
+      if (Array.isArray(named)) for (const id of new Set(named)) {
+        if (typeof id === "string" && symbolIds.has(id) && fileBySymbolId.get(id) === e.to_external_id) {
+          incoming.set(id, (incoming.get(id) ?? 0) + 1);
+        }
+      }
+      const refs = e.properties?.symbol_references;
+      if (refs && typeof refs === "object" && !Array.isArray(refs)) {
+        for (const [id, count] of Object.entries(refs)) {
+          if (symbolIds.has(id) && typeof count === "number" && Number.isSafeInteger(count) && count > 0 && fileBySymbolId.get(id) === e.to_external_id) {
+            incoming.set(id, (incoming.get(id) ?? 0) + count);
+          }
+        }
+      }
     }
-  }
-  for (const [file, count] of fileImports) {
-    const syms = symbolsByFile.get(file) ?? [];
-    if (syms.length === 0) continue;
-    const share = count / syms.length;
-    for (const s of syms) incoming.set(s.external_id, (incoming.get(s.external_id) ?? 0) + share);
   }
   // Per-symbol churn share: file churn weighted by the symbol's line span so one
   // hot file no longer awards its full churn to every method it contains.
@@ -625,6 +817,8 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // whose own name, or a retained external callee, is a destructive call.
   const nodeById = new Map(graph.nodes.map((n) => [n.external_id, n]));
   const lastSeg = (name: string): string => name.split(".").pop() ?? name;
+  const isDestructiveTerminal = (name: string): boolean =>
+    DESTRUCTIVE_CALL_RE.test(name) && !/^(?:deleted|purged|dropped|destroyed)[A-Za-z0-9_]*$/i.test(name);
   // A sink is a destructive call on an EXTERNAL surface — a persistence store, an
   // admin/service client, a database handle. In-repo methods named `delete` are
   // not sinks by name alone (CHASM's `Node.delete` is a tree op, not a data loss).
@@ -637,22 +831,30 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     if (!n) return undefined;
     const ext = (n.properties as { external_callees?: string[] } | undefined)?.external_callees ?? [];
     const importedStatic = (n.properties as { imported_static_callees?: string[] } | undefined)?.imported_static_callees ?? [];
+    const constructorChains = (n.properties as { constructor_chain_sinks?: unknown } | undefined)?.constructor_chain_sinks;
+    if (Array.isArray(constructorChains)) {
+      const retained = constructorChains.find((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const fact = entry as { callee?: unknown; constructor_symbol?: unknown };
+        return typeof fact.callee === "string" && typeof fact.constructor_symbol === "string" && nodeById.has(fact.constructor_symbol);
+      }) as { callee: string; constructor_symbol: string } | undefined;
+      if (retained) return retained.callee;
+    }
     // A receiver FIELD path is `x.field.Method` — no call parentheses before the last
     // segment. `q.Clock().Now().Truncate` is a chain of return values, not a surface.
     const viaField = (c: string): boolean => !c.slice(0, c.lastIndexOf(".")).includes("(");
     const fieldOf = (c: string): string => c.slice(0, c.lastIndexOf("."));
     const destructive = ext.find((c) => viaField(c) && (
-      DESTRUCTIVE_CALL_RE.test(lastSeg(c)) ||
+      isDestructiveTerminal(lastSeg(c)) ||
       (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
       extraSinks.some((re) => re.test(lastSeg(c)))));
     if (destructive) return destructive;
     return importedStatic.find((c) => viaField(c) && (
-      DESTRUCTIVE_CALL_RE.test(lastSeg(c)) ||
+      isDestructiveTerminal(lastSeg(c)) ||
       IMPORTED_REPLACEMENT_CALL_RE.test(lastSeg(c)) ||
       (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
       extraSinks.some((re) => re.test(lastSeg(c)))));
   };
-  const isSink = (id: string): boolean => sinkCallee(id) !== undefined;
   const reachedSinkFrom = (id: string, depth: number, seen: Set<string>): string | undefined => {
     const own = sinkCallee(id);
     if (own) return own;
@@ -672,35 +874,26 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const candidateLinked = candidateSignalIds(graph, symbolIds);
   const detectionFor = (id: string): "associated" | "candidate" | "none" =>
     staticLinked.has(id) ? "associated" : candidateLinked.has(id) ? "candidate" : "none";
+  // R7 ranking-only hygiene happens AFTER the stable ORS normalization population is
+  // chosen. These declaration/delegate exclusions therefore remove only worklist
+  // slots: they never change graph facts, denominator membership, evidence, or a
+  // peer's P/I normalization.
+  const postNormalizationExcluded = (node: GraphNode): boolean => {
+    if (node.properties.ranking_exclusion_code === "python_class_with_methods" || node.properties.ranking_exclusion_code === "python_structural_container" || node.properties.ranking_exclusion_reason === "python_structural_container") return true;
+    const code = node.properties.ranking_exclusion_reason_code;
+    if (node.properties.ranking_exclusion_code === "trivial_constructor" || node.properties.ranking_exclusion_code === "enum_declaration" || code === "python_trivial_thread_local_initializer" || code === "python_stdlib_enum_declaration") return true;
+    return (node.properties.ranking_exclusion_code === "thin_external_delegate" || code === "python_thin_external_delegate")
+      && deriveDataSensitivity(node) <= 1
+      && sinkCallee(node.external_id) === undefined;
+  };
+  const worklistSymbols = symbols.filter((node) => !postNormalizationExcluded(node));
 
   if (opts.legacy) {
-    // Preserve the legacy option's historical evidence-filtered attribution.
-    const legacyIds = new Set(symbols.map((s) => s.external_id));
-    const legacyByFile = new Map<string, GraphNode[]>();
-    for (const s of symbols) {
-      const file = symbolFile(s);
-      const list = legacyByFile.get(file);
-      if (list) list.push(s);
-      else legacyByFile.set(file, [s]);
-    }
-    const legacyIncoming = new Map<string, number>();
-    const legacyFileImports = new Map<string, number>();
-    for (const e of graph.edges) {
-      if (e.relationship_type === "CALLS" && legacyIds.has(e.to_external_id)) {
-        legacyIncoming.set(e.to_external_id, (legacyIncoming.get(e.to_external_id) ?? 0) + 1);
-      } else if (e.relationship_type === "IMPORTS" && legacyByFile.has(e.to_external_id)) {
-        legacyFileImports.set(e.to_external_id, (legacyFileImports.get(e.to_external_id) ?? 0) + 1);
-      }
-    }
-    for (const [file, count] of legacyFileImports) {
-      const syms = legacyByFile.get(file) ?? [];
-      const share = syms.length > 0 ? count / syms.length : 0;
-      for (const s of syms) legacyIncoming.set(s.external_id, (legacyIncoming.get(s.external_id) ?? 0) + share);
-    }
+    // The formula remains available; neither lane may invent sibling references.
     return worklistSymbols
       .map((s) => {
         const file = symbolFile(s);
-        const incoming_refs = legacyIncoming.get(s.external_id) ?? 0;
+        const incoming_refs = incoming.get(s.external_id) ?? 0;
         const git_churn = churn.get(file) ?? 0;
         const isEntry = entryPoint.get(s.external_id) ?? false;
         const churnForScore = Math.min(git_churn, 500);
@@ -708,11 +901,13 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
         const reasons = [
           `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"}`,
           churnAvailable
-            ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in 180 days${git_churn > 500 ? " (score capped at 500)" : ""}`
-            : "Git churn unavailable — provisional static-only ranking"
+            ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} in recent history${git_churn > 500 ? " (score capped at 500)" : ""}`
+            : churnResult.state === "partial"
+              ? `${git_churn} partial git churn line${git_churn === 1 ? "" : "s"} retained from ${churnResult.commitsScanned} commit${churnResult.commitsScanned === 1 ? "" : "s"} — ${churnResult.reason ?? "bounded acquisition incomplete"}`
+              : "Git churn unavailable — provisional static-only ranking"
         ];
         if (isEntry) reasons.push("near an API/route/handler entry point");
-        return { id: s.external_id, title: s.title || s.external_id, file, risk_score: score, incoming_refs, git_churn, churn_available: churnAvailable, entry_point: isEntry, reasons };
+        return { id: s.external_id, title: s.title || s.external_id, file, risk_score: score, incoming_refs, git_churn, churn_available: churnAvailable, churn_state: churnResult.state, ...(churnResult.reason ? { churn_reason: churnResult.reason } : {}), commits_scanned: churnResult.commitsScanned, entry_point: isEntry, reasons };
       })
       .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
       .slice(0, limit);
@@ -773,10 +968,12 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       if (disconnected) score = Math.round(score * 0.25 * 10) / 10;
       const reasons = [
         `ORS ${score} ≈ P${p} × I${i} × D${d}`,
-        `${incoming_refs} incoming structural reference${incoming_refs === 1 ? "" : "s"} (method-attributed)`,
+        `${incoming_refs} incoming symbol-specific structural reference${incoming_refs === 1 ? "" : "s"}`,
         churnAvailable
-          ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} attributed to this symbol in 180 days`
-          : "Git churn unavailable — provisional static-only ranking",
+          ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} attributed to this symbol in recent history`
+          : churnResult.state === "partial"
+            ? `${git_churn} partial git churn line${git_churn === 1 ? "" : "s"} retained from ${churnResult.commitsScanned} commit${churnResult.commitsScanned === 1 ? "" : "s"} — ${churnResult.reason ?? "bounded acquisition incomplete"}`
+            : "Git churn unavailable — provisional static-only ranking",
         `route weight ${route_weight}, data sensitivity ${data_sensitivity}, flow position ${flow_position}, complexity ${complexity_proxy}, fan-out ${fan_out}`
       ];
       if (isEntry) reasons.push("near an API/route/handler entry point");
@@ -801,6 +998,9 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
         incoming_refs,
         git_churn,
         churn_available: churnAvailable,
+        churn_state: churnResult.state,
+        ...(churnResult.reason ? { churn_reason: churnResult.reason } : {}),
+        commits_scanned: churnResult.commitsScanned,
         entry_point: isEntry,
         reasons,
         probability: p,
@@ -891,6 +1091,8 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
   rankExcludePaths: string[];
   floor: boolean;
   silence: boolean;
+  tuning: { churn_window_days: number };
+  proof: { python_runner: string; attempt_limit: number; baseline_green_target: number };
   /** Every other ranking-changing classification setting, listed when set. */
   classification: { test_support_paths: string[]; scheduled_entry_paths: string[]; destructive_sinks: string[]; sensitivity_ignore: string[] };
   /** Symbols whose sensitivity was zeroed by a sensitivity_ignore glob (score changed — say so). */
@@ -917,6 +1119,8 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
     rankExcludePaths: cfg.classification.rank_exclude_paths,
     floor: cfg.tuning.irreversibility_floor,
     silence: cfg.tuning.silence_multiplier,
+    tuning: { churn_window_days: cfg.tuning.churn_window_days },
+    proof: cfg.proof,
     classification: {
       test_support_paths: cfg.classification.test_support_paths,
       scheduled_entry_paths: cfg.classification.scheduled_entry_paths,

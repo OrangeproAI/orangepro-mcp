@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildBehaviorReportData, dominantBlockReason, type DynamicProofReportInput } from "../../src/local/viz/behaviorReportData.js";
+import { buildBehaviorReportData, dominantBlockReason, riskContext, type DynamicProofReportInput } from "../../src/local/viz/behaviorReportData.js";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, type LocalGraph } from "../../src/local/graph/ontology.js";
 import { LEDGER_SCHEMA_VERSION, targetFingerprint, type Ledger } from "../../src/local/ledger.js";
+import type { RiskGap } from "../../src/local/score/risk.js";
 
 const EMPTY_LEDGER: Ledger = { schema_version: LEDGER_SCHEMA_VERSION, records: [] };
 const provenance = { source_scope_id: "repo", source_ref: "src/orders.controller.ts", detector: "test" };
@@ -364,6 +365,22 @@ describe("buildBehaviorReportData", () => {
     });
   });
 
+  it("uses the exact environment-start failure wording when every attempt is unavailable", () => {
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, {
+      repoRoot: "/tmp/medusa",
+      dynamicProof: {
+        attempted: 2,
+        proven: 0,
+        needsSetup: [
+          { category: "environment_unavailable" },
+          { category: "collection_error" }
+        ]
+      }
+    });
+    expect(data.proofGuidance.title).toBe("Proof not run: test environment could not be started (see ledger)");
+    expect(data.proofGuidance.body).toBe("Proof not run: test environment could not be started (see ledger)");
+  });
+
   it("passes flow tiering and hop evidence through without minting proof", () => {
     const data = buildBehaviorReportData(graph(), dynamicLedger());
 
@@ -431,7 +448,7 @@ describe("buildBehaviorReportData — 0-Dynamically-Proven guidance names the do
     expect(data.proofGuidance.body).not.toMatch(/static tests? failed|report is broken/i);
   });
 
-  it("all attempts setup-blocked → 'all were blocked by …' copy", () => {
+  it("all attempts setup-blocked → names the most common cause without misattributing every failure", () => {
     const dyn: DynamicProofReportInput = {
       attempted: 3,
       proven: 0,
@@ -440,11 +457,32 @@ describe("buildBehaviorReportData — 0-Dynamically-Proven guidance names the do
     const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api", dynamicProof: dyn });
 
     expect(data.proofGuidance.title).toContain("all setup-blocked");
-    expect(data.proofGuidance.body).toContain("all were blocked by a database or external service the sandbox lacks (3/3)");
+    expect(data.proofGuidance.body).toContain("Most common block: a database or external service the sandbox lacks (3/3 actual attempts)");
     expect(data.proofGuidance.body).toContain("not a static-test failure");
     // G1: the action names the dominant category's smallest next step, not just the generic handoff.
     expect(data.proofGuidance.action).toContain("Next:");
     expect(data.proofGuidance.action).toContain("orangepro_prove_loop");
+  });
+
+  it("mixed environment blocks report actual attempts, not a synthetic dominant cause", () => {
+    const dyn: DynamicProofReportInput = {
+      attempted: 8,
+      proven: 0,
+      needsSetup: [
+        { category: "go_package_build_failure" },
+        { category: "environment_unavailable" },
+        { category: "environment_unavailable" },
+        { category: "environment_unavailable" },
+        { category: "runner_missing" },
+        { category: "runner_missing" },
+        { category: "runner_missing" },
+        { category: "runner_missing" }
+      ]
+    };
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api", dynamicProof: dyn });
+    expect(data.proofGuidance.title).toContain("top 8 attempted");
+    expect(data.proofGuidance.body).toContain("4/8 actual attempts");
+    expect(data.proofGuidance.body).not.toContain("all were blocked by");
   });
 
   it("G1: tsconfig-dominant block → action carries the monorepo-root next step", () => {
@@ -561,5 +599,37 @@ describe("report-level worklists (builder, not the ranking function)", () => {
     // and the disclosure block is always present, even with no config
     expect(data.configDisclosure.overridesActive).toBe(0);
     expect(data.configDisclosure.suppressed).toEqual([]);
+  });
+});
+
+describe("risk context churn disclosure (R8.5)", () => {
+  const risk: RiskGap = {
+    id: "sym:src/worker.py#run", title: "run", file: "src/worker.py",
+    risk_score: 100, incoming_refs: 0, git_churn: 1958,
+    churn_available: false, entry_point: false, reasons: []
+  };
+  it("names partial history and attributes the observed churn to the file", () => {
+    const text = riskContext(risk, 180, { state: "partial", commitsScanned: 5000 });
+    expect(text).toContain("1958 churn lines in file over partial change history (5000 commits)");
+    expect(text).not.toContain("change history unavailable");
+  });
+  it("does not mistake unavailable history for measured zero churn", () => {
+    expect(riskContext(risk, 180, { state: "unavailable", commitsScanned: 0 })).toContain("change history unavailable");
+    expect(riskContext({ ...risk, churn_available: true, git_churn: 0 }, 180, { state: "complete", commitsScanned: 12 }))
+      .toContain("0 churn lines in file over 180 days");
+  });
+});
+
+describe("ranking-only exclusion disclosure (R8.6)", () => {
+  it("groups by code without changing denominator or evidence tiers", () => {
+    const g = graph();
+    for (const node of g.nodes.filter((item) => item.kind === "CodeSymbol" && item.denominator_eligible === true)) {
+      node.properties.ranking_exclusion_code = "python_class_with_methods";
+      node.properties.ranking_exclusion_reason = "A class whose methods are mapped separately.";
+    }
+    const baseline = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
+    const current = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
+    expect(current.scan.rankingExclusions).toEqual([{ code: "python_class_with_methods", count: 2 }]);
+    expect(current.summary).toEqual(baseline.summary);
   });
 });

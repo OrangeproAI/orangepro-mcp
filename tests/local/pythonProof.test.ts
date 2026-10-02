@@ -40,6 +40,16 @@ function hardCoverEdgeDetails(root: string): Array<{ from: string; to: string; t
     .sort((a, b) => `${a.from}${a.to}`.localeCompare(`${b.from}${b.to}`));
 }
 
+function staticAssociationDetails(root: string): Array<{ to: string; detector?: unknown; rule?: unknown; reason?: unknown }> {
+  return analyzeRepo(root, { readContent: true })
+    .edges.filter((e) => e.relationship_type === "COVERS" && e.evidence_strength === "hard" && e.properties?.static_association)
+    .map((e) => {
+      const association = e.properties?.static_association as Record<string, unknown>;
+      return { to: e.to_external_id, detector: e.provenance.detector, rule: association.detector ? association.rule : undefined, reason: association.reason };
+    })
+    .sort((a, b) => a.to.localeCompare(b.to));
+}
+
 describe("Python hard proof", () => {
   it("confirms a pytest assert that directly calls a same-package function", () => {
     const root = repo({
@@ -192,7 +202,7 @@ describe("Python hard proof", () => {
     ]);
   });
 
-  it("does not associate assigned instances when the invocation result is unrelated to the assertion", () => {
+  it("associates an exact assigned-instance invocation even when a later assertion is unrelated", () => {
     const root = repo({
       "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
       "tests/test_calc.py": [
@@ -204,7 +214,7 @@ describe("Python hard proof", () => {
         "    assert 1 == 1"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual([]);
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([["sym:app/calc.py#Calculator.total", "assigned_instance"]]);
   });
 
   it("fails closed on reassigned or patched Python instance receivers", () => {
@@ -225,7 +235,102 @@ describe("Python hard proof", () => {
     expect(hardCoverEdges(root)).toEqual([]);
   });
 
-  it("does not associate fixture-provided receivers or tests with multiple receiver calls", () => {
+  it("retains test_a's direct asserted invocation when unrelated test_b patches its target", () => {
+    const root = repo({
+      "app/service.py": "class Service:\n    def work(self):\n        return 3\n",
+      "tests/test_service.py": [
+        "from unittest.mock import patch", "from app.service import Service", "",
+        "def test_a():", "    subject = Service()", "    assert subject.work() == 3", "",
+        "def test_b():", "    with patch.object(Service, 'work', return_value=4):", "        assert Service().work() == 4"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(root)).toEqual([
+      { from: "test:tests/test_service.py", to: "sym:app/service.py#Service.work", testName: "test_a" }
+    ]);
+  });
+
+  it("suppresses reachable named fixtures recursively but ignores unused and different-target fixtures", () => {
+    const source = [
+      "import pytest", "from unittest.mock import patch", "from app.service import Service", "",
+      "@pytest.fixture", "def target_patch():", "    with patch.object(Service, 'work'):", "        yield", "",
+      "@pytest.fixture", "def nested(target_patch):", "    yield", "",
+      "@pytest.fixture", "def unrelated_patch():", "    with patch.object(Service, 'other'):", "        yield", "",
+      "def test_a(unrelated_patch):", "    assert Service().work() == 3", "",
+      "def test_b(nested):", "    assert Service().work() == 3"
+    ].join("\n");
+    const root = repo({
+      "app/service.py": "class Service:\n    def work(self):\n        return 3\n    def other(self):\n        return 4\n",
+      "tests/test_service.py": source
+    });
+    expect(hardCoverEdgeDetails(root)).toEqual([
+      { from: "test:tests/test_service.py", to: "sym:app/service.py#Service.work", testName: "test_a" }
+    ]);
+  });
+
+  it("resolves explicit usefixtures and literal getfixturevalue without treating an unused fixture as active", () => {
+    const root = repo({
+      "app/service.py": "class Service:\n    def work(self):\n        return 3\n",
+      "tests/test_service.py": [
+        "import pytest", "from unittest.mock import patch", "from app.service import Service", "",
+        "@pytest.fixture", "def target_patch():", "    with patch.object(Service, 'work'):", "        yield", "",
+        "def test_a():", "    assert Service().work() == 3", "",
+        "@pytest.mark.usefixtures('target_patch')", "def test_b():", "    assert Service().work() == 3", "",
+        "def test_c(request):", "    request.getfixturevalue('target_patch')", "    assert Service().work() == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(root)).toEqual([
+      { from: "test:tests/test_service.py", to: "sym:app/service.py#Service.work", testName: "test_a" }
+    ]);
+  });
+
+  it("suppresses decorator, class patch and module autouse fixture scope, not sibling classes", () => {
+    const service = "class Service:\n    def work(self):\n        return 3\n";
+    const decorated = repo({
+      "app/service.py": service,
+      "tests/test_service.py": [
+        "from unittest.mock import patch", "from app.service import Service", "",
+        "@patch.object(Service, 'work')", "class TestPatched:", "    def test_work(self):", "        assert Service().work() == 3", "",
+        "class TestUnpatched:", "    def test_work(self):", "        assert Service().work() == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(decorated)).toEqual([
+      { from: "test:tests/test_service.py", to: "sym:app/service.py#Service.work", testName: "TestUnpatched::test_work" }
+    ]);
+    const methodDecorated = repo({
+      "app/service.py": service,
+      "tests/test_service.py": [
+        "from unittest.mock import patch", "from app.service import Service", "",
+        "class TestService:", "    @patch.object(Service, 'work')", "    def test_patched(self):", "        assert Service().work() == 3", "",
+        "    def test_direct(self):", "        assert Service().work() == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(methodDecorated)).toEqual([
+      { from: "test:tests/test_service.py", to: "sym:app/service.py#Service.work", testName: "TestService::test_direct" }
+    ]);
+    const autouse = repo({
+      "app/service.py": service,
+      "tests/test_service.py": [
+        "import pytest", "from unittest.mock import patch", "from app.service import Service", "",
+        "@pytest.fixture(autouse=True)", "def patched():", "    with patch.object(Service, 'work'):", "        yield", "",
+        "def test_a():", "    assert Service().work() == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(autouse)).toEqual([]);
+  });
+
+  it("fails closed for dynamic fixture names that cannot be statically resolved", () => {
+    const root = repo({
+      "app/service.py": "class Service:\n    def work(self):\n        return 3\n",
+      "tests/test_service.py": [
+        "import pytest", "from unittest.mock import patch", "from app.service import Service", "",
+        "@pytest.fixture", "def target_patch():", "    with patch.object(Service, 'work'):", "        yield", "",
+        "def test_a(request, fixture_name):", "    request.getfixturevalue(fixture_name)", "    assert Service().work() == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("does not infer an untyped fixture receiver but keeps repeated exact instance invocations associated", () => {
     const fixtureRoot = repo({
       "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
       "tests/test_calc.py": [
@@ -249,10 +354,12 @@ describe("Python hard proof", () => {
         "    assert result == 3"
       ].join("\n")
     });
-    expect(hardCoverEdges(repeatedRoot)).toEqual([]);
+    expect(staticAssociationDetails(repeatedRoot).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/calc.py#Calculator.total", "assigned_instance"]
+    ]);
   });
 
-  it("does not associate an instance method when the test contains more than one assertion", () => {
+  it("associates an exact instance invocation when the test contains more than one assertion", () => {
     const root = repo({
       "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
       "tests/test_calc.py": [
@@ -265,10 +372,12 @@ describe("Python hard proof", () => {
         "    assert calculator is not None"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual([]);
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/calc.py#Calculator.total", "assigned_instance"]
+    ]);
   });
 
-  it("does not associate stored results consumed through an assertion helper call", () => {
+  it("associates an exact instance invocation when its stored result is consumed through a helper", () => {
     const root = repo({
       "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
       "tests/test_calc.py": [
@@ -280,7 +389,9 @@ describe("Python hard proof", () => {
         "    assert normalize(result) == 3"
       ].join("\n")
     });
-    expect(hardCoverEdges(root)).toEqual([]);
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/calc.py#Calculator.total", "assigned_instance"]
+    ]);
   });
 
   it("requires an explicit production class import for assigned-instance Association", () => {
@@ -315,7 +426,7 @@ describe("Python hard proof", () => {
     expect(hardCoverEdges(root)).toEqual([]);
   });
 
-  it("rejects method replacement and more than one assigned-instance call across the test", () => {
+  it("rejects exact method replacement but retains another exact assigned-instance invocation", () => {
     const replacedRoot = repo({
       "app/calc.py": ["class Calculator:", "    def total(self):", "        return 3"].join("\n"),
       "tests/test_calc.py": [
@@ -343,7 +454,9 @@ describe("Python hard proof", () => {
         "    assert first_result == 3"
       ].join("\n")
     });
-    expect(hardCoverEdges(twoInstancesRoot)).toEqual([]);
+    expect(staticAssociationDetails(twoInstancesRoot).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/calc.py#Calculator.total", "assigned_instance"]
+    ]);
   });
 
   it("rejects tracked receiver escape to setters or arbitrary helpers", () => {
@@ -391,7 +504,7 @@ describe("Python hard proof", () => {
     }
   });
 
-  it("rejects duplicated, chained, container, and vacuous stored-result assertions", () => {
+  it("keeps exact invocations associated regardless of proof-oriented assertion shape", () => {
     for (const assertion of [
       "assert (result, result) == (3, 3)",
       "assert 2 < result < 4",
@@ -408,7 +521,9 @@ describe("Python hard proof", () => {
           `    ${assertion}`
         ].join("\n")
       });
-      expect(hardCoverEdges(root)).toEqual([]);
+      expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([
+        ["sym:app/calc.py#Calculator.total", "assigned_instance"]
+      ]);
     }
   });
 
@@ -495,5 +610,277 @@ describe("Python hard proof", () => {
       "src/app/test_calc.py": ["def test_add():", "    add(1, 2)"].join("\n")
     });
     expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("associates module-qualified constructor assignment and records an Association-only rule", () => {
+    const root = repo({
+      "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "import app.service as service",
+        "",
+        "def test_work():",
+        "    subject = service.Service()",
+        "    result = subject.work()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root)).toEqual([
+      {
+        to: "sym:app/service.py#Service.work",
+        detector: "python_static_association",
+        rule: "module_assigned_instance",
+        reason: "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
+      }
+    ]);
+  });
+
+  it("associates one exact pytest fixture return, yield, and typed fixture receiver", () => {
+    const returnRoot = repo({
+      "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "import pytest",
+        "from app.service import Service",
+        "",
+        "@pytest.fixture",
+        "def subject():",
+        "    return Service()",
+        "",
+        "def test_work(subject):",
+        "    assert subject.work() == 3"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(returnRoot).map((e) => [e.to, e.rule])).toEqual([["sym:app/service.py#Service.work", "fixture_return"]]);
+
+    const yieldRoot = repo({
+      "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "import pytest",
+        "from app.service import Service",
+        "",
+        "@pytest.fixture",
+        "def subject():",
+        "    yield Service()",
+        "",
+        "def test_work(subject):",
+        "    assert subject.work() == 3"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(yieldRoot).map((e) => [e.to, e.rule])).toEqual([["sym:app/service.py#Service.work", "fixture_yield"]]);
+
+    const annotationRoot = repo({
+      "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "from app.service import Service",
+        "",
+        "def test_work(subject: Service):",
+        "    assert subject.work() == 3"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(annotationRoot).map((e) => [e.to, e.rule])).toEqual([["sym:app/service.py#Service.work", "parameter_annotation"]]);
+  });
+
+  it("resolves unittest setup receivers through one exact in-repo base-class MRO", () => {
+    const root = repo({
+      "app/service.py": [
+        "class BaseService:", "    def work(self):", "        return 3",
+        "class Service(BaseService):", "    pass"
+      ].join("\n"),
+      "tests/test_service.py": [
+        "import unittest",
+        "from app.service import Service",
+        "",
+        "class ServiceTests(unittest.TestCase):",
+        "    def setUp(self):",
+        "        self.subject = Service()",
+        "    def test_work(self):",
+        "        result = self.subject.work()",
+        "        assert result == 3"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([["sym:app/service.py#BaseService.work", "unittest_setup"]]);
+  });
+
+  it("keeps one local instance association when test-class setup writes unrelated state", () => {
+    const root = repo({
+      "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "from app.service import Service",
+        "",
+        "class TestService:",
+        "    def setup_method(self):",
+        "        self.started_at = 0",
+        "",
+        "    def test_work(self):",
+        "        settings.enabled = True",
+        "        subject = Service()",
+        "        result = subject.work()",
+        "        assert result == 3",
+        "        assert subject is not None"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/service.py#Service.work", "assigned_instance"]
+    ]);
+  });
+
+  it("keeps an assigned receiver exact with nested unrelated constructor arguments", () => {
+    const root = repo({
+      "app/service.py": ["class Service:", "    def inspect(self, value):", "        return True"].join("\n"),
+      "tests/test_service.py": [
+        "from app.service import Service",
+        "",
+        "def test_inspect():",
+        "    subject = Service()",
+        "    response = Response(items=[Item(content=[Text(value='ok')])])",
+        "    assert subject.inspect(response) is True"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/service.py#Service.inspect", "assigned_instance"]
+    ]);
+  });
+
+  it("still fails closed on aliases, receiver escape, and target mocks after unrelated setup state", () => {
+    const source = (mutation: string) => [
+      "from unittest.mock import patch",
+      "from app.service import Service",
+      "",
+      "class TestService:",
+      "    def setup_method(self):",
+      "        self.started_at = 0",
+      "",
+      "    def test_work(self):",
+      "        subject = Service()",
+      ...mutation.split("\n").map((line) => `        ${line}`)
+    ].join("\n");
+    for (const mutation of [
+      "alias = subject\nalias.work = lambda: 4\nresult = subject.work()\nassert result == 4",
+      "publish(subject)\nresult = subject.work()\nassert result == 3",
+      "with patch.object(Service, 'work', return_value=4):\n    result = subject.work()\n    assert result == 4"
+    ]) {
+      const root = repo({
+        "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+        "tests/test_service.py": source(mutation)
+      });
+      expect(hardCoverEdges(root)).toEqual([]);
+    }
+  });
+
+  it("associates exact inline constructors and declared class/static methods", () => {
+    const inlineRoot = repo({
+      "app/service.py": ["class Service:", "    def work(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": ["from app.service import Service", "", "def test_work():", "    assert Service().work() == 3"].join("\n")
+    });
+    expect(staticAssociationDetails(inlineRoot).map((e) => [e.to, e.rule])).toEqual([["sym:app/service.py#Service.work", "inline_constructor"]]);
+
+    const staticRoot = repo({
+      "app/service.py": ["class Service:", "    @staticmethod", "    def make():", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "from app.service import Service",
+        "",
+        "def test_make(monkeypatch):",
+        "    monkeypatch.setenv('FEATURE', '1')",
+        "    result = Service.make()",
+        "    assert result == 3",
+        "    assert isinstance(result, int)"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(staticRoot).map((e) => [e.to, e.rule])).toEqual([["sym:app/service.py#Service.make", "class_static_method"]]);
+  });
+
+  it("keeps exact receiver shapes invocation-backed without requiring one direct assertion", () => {
+    const root = repo({
+      "app/service.py": [
+        "class _PrivateService:",
+        "    def inspect(self):",
+        "        return 3",
+        "class Service:",
+        "    def work(self):",
+        "        return 4",
+        "    def dependency(self):",
+        "        return 5"
+      ].join("\n"),
+      "tests/test_service.py": [
+        "from unittest.mock import AsyncMock as AM",
+        "from app.service import _PrivateService, Service",
+        "",
+        "def test_private_receiver():",
+        "    subject = _PrivateService()",
+        "    subject.inspect()",
+        "",
+        "def test_multiple_observations():",
+        "    subject = Service()",
+        "    result = subject.work()",
+        "    assert result == 4",
+        "    assert isinstance(result, int)",
+        "",
+        "def test_unrelated_dependency_replacement():",
+        "    subject = Service()",
+        "    subject.dependency = AM()",
+        "    assert subject.work() == 4"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([
+      ["sym:app/service.py#_PrivateService.inspect", "assigned_instance"],
+      ["sym:app/service.py#Service.work", "assigned_instance"]
+    ]);
+  });
+
+  it("uses a unique eligible method-name fallback only for a genuinely unresolved receiver with an imported owner", () => {
+    const root = repo({
+      "app/service.py": ["class Worker:", "    def calculate(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "from app.service import Worker",
+        "",
+        "def test_calculate():",
+        "    subject = make_subject()",
+        "    result = subject.calculate()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root)).toEqual([{
+      to: "sym:app/service.py#Worker.calculate",
+      detector: "unique_method_name_import",
+      rule: "unique_method_name_import",
+      reason: "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never dynamic Proven."
+    }]);
+  });
+
+  it("does not fall back from an exactly resolved class whose MRO lacks the invoked method", () => {
+    const root = repo({
+      "app/service.py": ["class Gateway:", "    pass", "class Worker:", "    def calculate(self):", "        return 3"].join("\n"),
+      "tests/test_service.py": [
+        "from app.service import Gateway",
+        "",
+        "def test_calculate():",
+        "    result = Gateway().calculate()",
+        "    assert result == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("fails closed on patching, dynamic getattr, receiver mutation/escape, non-static class calls, and fallback ambiguity", () => {
+    const base = ["class Service:", "    def work(self):", "        return 3"].join("\n");
+    for (const testBody of [
+      ["from unittest.mock import patch", "from app.service import Service", "", "def test_work():", "    subject = Service()", "    with patch.object(Service, 'work', return_value=3):", "        assert subject.work() == 3"],
+      ["from app.service import Service", "", "def test_work():", "    subject = Service()", "    assert getattr(subject, 'work')() == 3"],
+      ["from app.service import Service", "", "def test_work():", "    subject = Service()", "    items = [subject]", "    assert subject.work() == 3"],
+      ["from app.service import Service", "", "def test_work():", "    subject = Service()", "    subject.count += 1", "    assert subject.work() == 3"],
+      ["from app.service import Service", "", "def test_work():", "    assert Service.work() == 3"]
+    ]) {
+      const root = repo({ "app/service.py": base, "tests/test_service.py": testBody.join("\n") });
+      expect(hardCoverEdges(root)).toEqual([]);
+    }
+
+    const ambiguousFallback = repo({
+      "app/service.py": [
+        "class Gateway:", "    pass",
+        "class First:", "    def calculate(self):", "        return 3",
+        "class Second:", "    def calculate(self):", "        return 4"
+      ].join("\n"),
+      "tests/test_service.py": ["from app.service import Gateway", "", "def test_calculate():", "    assert Gateway().calculate() == 3"].join("\n")
+    });
+    expect(hardCoverEdges(ambiguousFallback)).toEqual([]);
   });
 });

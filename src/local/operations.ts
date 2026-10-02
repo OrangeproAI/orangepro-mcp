@@ -239,6 +239,10 @@ export interface DynamicProofOptions {
   replacement?: string;
   replacement_mode?: DynamicProofReplacementMode;
   runner?: DynamicProofTestRunner;
+  /** Python-only custom no-shell command; explicit runner wins when provided. */
+  python_runner?: string;
+  /** Python-only run-scoped optimization after this project root already preflighted green. */
+  skip_preflight?: boolean;
   timeout_ms?: number;
   link_node_modules?: boolean;
   vitest_config?: string;
@@ -251,6 +255,8 @@ export interface DynamicProofOracleSummary {
   status: string;
   proven: boolean;
   reason?: string;
+  /** Optional language-runner refusal class; absent for legacy TS/Go/Java spikes. */
+  category?: "environment_unavailable" | "collection_error" | "project_boundary" | "mutation_unsupported";
   runner?: string;
   replacementMode?: string;
   test?: string;
@@ -259,6 +265,18 @@ export interface DynamicProofOracleSummary {
   baseline?: { exitCode?: number; timedOut?: boolean; failureSummary?: string | null };
   mutant?: { exitCode?: number; timedOut?: boolean; assertionFailure?: boolean };
   medianProofMs?: number | null;
+  /** Redacted runner diagnostics (command/cwd/exit/duration/tail), informational only. */
+  diagnostics?: {
+    command: string;
+    cwd: string;
+    exit_code: number | null;
+    duration_ms: number;
+    failure_class?: "env_unavailable" | "collection_error" | "test_failed" | "timeout";
+    stdout_tail: string[];
+    stderr_tail: string[];
+    runner_fallback?: string[];
+  };
+  mutation?: { sentinel?: string; source?: string };
 }
 
 export interface DynamicProofResult {
@@ -534,6 +552,27 @@ function defaultDynamicProofRunner(args: string[], opts: { cwd?: string; scriptP
     stdout: child.stdout ?? "",
     stderr: child.stderr ?? "",
     exitCode: child.status ?? 1
+  };
+}
+
+/** Metadata only. A runner process exiting zero is not a mutation proof. */
+function runnerProcessDiagnostics(
+  run: ReturnType<DynamicProofRunner>,
+  args: string[],
+  cwd: string,
+  scriptPath: string,
+  startedAt: number,
+  oracle: DynamicProofOracleSummary
+): NonNullable<DynamicProofOracleSummary["diagnostics"]> {
+  const tail = (text: string): string[] => redactSecrets(text).split(/\r?\n/).filter(Boolean).slice(-20).map((line) => line.slice(0, 500));
+  return {
+    command: redactSecrets([process.execPath, scriptPath, ...args].join(" ")).slice(0, 4096),
+    cwd: redactSecrets(cwd),
+    exit_code: Number.isInteger(run.exitCode) ? run.exitCode : null,
+    duration_ms: Math.max(0, Date.now() - startedAt),
+    ...((oracle.baseline?.timedOut || oracle.mutant?.timedOut) ? { failure_class: "timeout" as const } : {}),
+    stdout_tail: run.exitCode === 0 ? [] : tail(run.stdout),
+    stderr_tail: tail(run.stderr)
   };
 }
 
@@ -1600,11 +1639,14 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     // Receiver-qualified method target (`sym:file.go#Recv.M`) → the mutator must
     // match the exact receiver, never a same-named decl on another type.
     if (symbolTarget.memberQualifier) args.push("--recv", symbolTarget.memberQualifier);
+    const scriptPath = dynamicProofSpikePathFor("go");
+    const startedAt = Date.now();
     const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, {
       cwd: goRoot,
-      scriptPath: dynamicProofSpikePathFor("go")
+      scriptPath
     });
     oracle = mapGoOracle(parseDynamicProofJson(run.stdout, run.stderr) as unknown as GoDynamicProofJson);
+    oracle.diagnostics = runnerProcessDiagnostics(run, args, goRoot, scriptPath, startedAt, oracle);
     testRel = opts.test_run;
     replacementMode = GO_SENTINEL_LABEL;
     runner = "go";
@@ -1640,11 +1682,14 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
       "--json"
     ];
     if (opts.timeout_ms !== undefined) args.push("--timeout-ms", String(opts.timeout_ms));
+    const scriptPath = dynamicProofSpikePathFor("java");
+    const startedAt = Date.now();
     const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, {
       cwd: javaRoot,
-      scriptPath: dynamicProofSpikePathFor("java")
+      scriptPath
     });
     oracle = mapJavaOracle(parseDynamicProofJson(run.stdout, run.stderr) as unknown as JavaDynamicProofJson);
+    oracle.diagnostics = runnerProcessDiagnostics(run, args, javaRoot, scriptPath, startedAt, oracle);
     testRel = opts.test_run;
     replacementMode = JAVA_SENTINEL_LABEL;
     runner = "junit";
@@ -1654,6 +1699,10 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     testRel = toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.test_path));
     replacementMode = opts.replacement_mode ?? "return-json";
     runner = opts.runner ?? "auto";
+    const configuredPythonRunner = loadRiskConfig(sourceRoot).config.proof.python_runner;
+    const pythonRunner = opts.runner !== undefined
+      ? (opts.runner === "pytest" ? "python -m pytest" : "auto")
+      : (opts.python_runner?.trim() || configuredPythonRunner);
     if (replacementMode !== "return-json") {
       throw new Error("prove --replacement-mode promise-json is not supported for Python targets.");
     }
@@ -1663,32 +1712,36 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     if ((opts.test_env?.length ?? 0) > 0) {
       throw new Error("prove --test-env is not supported for Python targets yet.");
     }
-    // G2: narrow the copied sandbox to the owning Python project when both the
-    // target and the test live inside it (bounded copy — no full-repo OOM).
-    const pyRoot = pythonModuleRoot(sourceRoot, targetRel, testRel);
-    if (pyRoot !== resolve(sourceRoot)) {
-      proofModuleRoot = pyRoot;
-      reportProgress(`proof scope: Python project root ${pyRoot} (narrowed from the analyzed path)`);
-    }
+    // R7.1: pass the bounded analyzed root to the Python spike. The spike derives
+    // the nearest project from the TEST (not the target), then refuses a target
+    // outside that explicit project boundary. Narrowing here from the target would
+    // silently erase that boundary evidence in monorepos.
+    const pyRoot = resolve(sourceRoot);
     const args = [
       "--root",
       pyRoot,
       "--test",
-      relative(pyRoot, resolve(sourceRoot, testRel)).split(sep).join("/"),
+      testRel,
       "--target",
-      relative(pyRoot, resolve(sourceRoot, targetRel)).split(sep).join("/"),
+      targetRel,
       "--func",
       method,
       "--mode",
       "sentinel",
+      "--python-runner",
+      pythonRunner,
       "--json"
     ];
+    if (opts.skip_preflight) args.push("--skip-preflight");
     if (opts.timeout_ms !== undefined) args.push("--timeout-ms", String(opts.timeout_ms));
     const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, {
       cwd: pyRoot,
       scriptPath: dynamicProofSpikePathFor("python")
     });
     oracle = parseDynamicProofJson(run.stdout, run.stderr);
+    if (run.exitCode !== 0 && (oracle.status === "proven" || oracle.proven === true)) {
+      throw new Error(`Python proof runner exited ${run.exitCode}; no dynamic proof can be credited. ${redactSecrets(run.stderr).slice(0, 300)}`);
+    }
   } else {
     if (!opts.test_path) throw new Error("prove requires --test <path>.");
     if (opts.replacement === undefined) throw new Error("prove requires --replacement <sentinel>.");
@@ -1727,13 +1780,17 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     if (opts.jest_config) args.push("--jest-config", toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.jest_config)));
     for (const entry of opts.test_env ?? []) args.push("--test-env", entry);
 
+    const scriptPath = dynamicProofSpikePath();
+    const startedAt = Date.now();
     const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, { cwd: sourceRoot });
     oracle = parseDynamicProofJson(run.stdout, run.stderr);
+    oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
   }
   const closed = dynamicProofSucceeded(oracle);
   const baselineGreen = oracle.baseline?.exitCode === 0 && oracle.baseline?.timedOut !== true;
   const mutantFailedAssertion = oracle.mutant?.assertionFailure === true && oracle.mutant?.timedOut !== true;
   const artifactIdentity = artifactIdentityFor(graph, sourceRoot);
+  const proofDiagnostics = oracle.diagnostics;
   const dynamicProof: DynamicProofCertificate = {
     proof_kind: "dynamic_targeted",
     baseline_green: baselineGreen,
@@ -1741,12 +1798,14 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     // Derived from the targeted mutation kill: if the credited subject is mocked/replaced,
     // mutating its real body cannot cause the same test to fail at an assertion.
     target_not_mocked: closed,
-    sentinel: oracle.replacementMode ?? replacementMode,
+    sentinel: oracle.mutation?.sentinel ?? oracle.replacementMode ?? replacementMode,
+    ...(oracle.mutation?.source ? { sentinel_source: oracle.mutation.source } : {}),
     runner: oracle.runner ?? runner,
     test_path: oracle.test ?? testRel,
     mutant_status: oracle.status,
     oracle_version: PROOF_ORACLE_VERSION,
-    run_fingerprint: artifactIdentity.run_fingerprint
+    run_fingerprint: artifactIdentity.run_fingerprint,
+    ...(proofDiagnostics ? proofDiagnostics : {})
   };
   const result = appendLedgerRecord(root, {
     run_id: opts.run_id,
@@ -1776,6 +1835,9 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
       test: oracle.test,
       target: oracle.target,
       method: oracle.method,
+      category: oracle.category,
+      diagnostics: oracle.diagnostics,
+      mutation: oracle.mutation,
       baseline: oracle.baseline
         ? {
           exitCode: oracle.baseline.exitCode,
@@ -1903,6 +1965,8 @@ export function opProveLoop(root: string, opts: ProveLoopOptions, deps: Operatio
       replacement: opts.replacement,
       replacement_mode: opts.replacement_mode,
       runner: opts.runner,
+      python_runner: opts.python_runner,
+      skip_preflight: opts.skip_preflight,
       timeout_ms: opts.timeout_ms,
       link_node_modules: opts.link_node_modules,
       vitest_config: opts.vitest_config,
@@ -2132,7 +2196,8 @@ export async function opStart(
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
   // A per-repo/user risk config that fails to parse must announce itself here, not
   // silently revert to defaults (round-three review finding #1).
-  for (const w of loadRiskConfig(scanRoot).warnings) warnings.push(w);
+  const loadedRiskConfig = loadRiskConfig(scanRoot);
+  for (const w of loadedRiskConfig.warnings) warnings.push(w);
   const staticSnapshot = writeStartStaticSnapshot(root, opts.baseRef, warnings);
 
   const aiProviderConfigured = deps.aiProvider !== undefined || resolveProviderConfig(providerEnv, providerOpts) !== null;
@@ -2205,6 +2270,8 @@ export async function opStart(
       root,
       {
         autoLimit: opts.proofLimit ?? opts.autoLimit,
+        proof_existing_limit: opts.proofLimit ?? opts.autoLimit ?? loadedRiskConfig.config.proof.attempt_limit,
+        proof_gen_limit: loadedRiskConfig.config.proof.baseline_green_target,
         noAuto: opts.noAuto,
         provider: providerOpts.provider,
         model: providerOpts.model,
@@ -2464,7 +2531,9 @@ export async function opStart(
     const dynForReport: DynamicProofReportInput = {
       attempted: autoProveResult.attempted,
       proven: autoProveResult.proven,
-      needsSetup: autoProveResult.needs_setup.map((a) => ({ category: a.category, reason: a.reason }))
+      needsSetup: autoProveResult.needs_setup
+        .filter((a) => !a.deduped)
+        .map((a) => ({ category: a.category, reason: a.reason }))
     };
     coverageHtml = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, dynForReport).behavior_coverage_path;
   } catch (error) {
@@ -2516,6 +2585,11 @@ export async function opStart(
   } else if (autoProveResult.ran) {
     nextActions.push(`Dynamic proof: attempted the top ${autoProveResult.attempted} target(s); ${autoProveResult.proven} dynamically proven. Static breadth (behaviors, flows, Associated signals) is mapped regardless.`);
     if (autoProveResult.proven === 0) {
+      const allEnvironmentUnavailable = autoProveResult.attempts.length > 0
+        && autoProveResult.attempts.every((attempt) => attempt.category === "environment_unavailable" || attempt.category === "collection_error");
+      if (allEnvironmentUnavailable) {
+        nextActions.push("Proof not run: test environment could not be started (see ledger)");
+      }
       const dom = dominantBlockReason(autoProveResult.needs_setup);
       if (dom) nextActions.push(`Dynamic proof closed 0: blocked because ${dom.label} (${dom.count}/${dom.total}). This is a sandbox setup gap, not a static-test failure; Static Associated signals are still shown.`);
     }
@@ -2940,7 +3014,7 @@ function sidecarDynamicProof(root: string, graph: LocalGraph): DynamicProofRepor
       attempted: attempts.attempted,
       proven: attempts.proven,
       needsSetup: attempts.attempts
-        .filter((a) => a.classification === "needs_setup")
+        .filter((a) => a.classification === "needs_setup" && !a.deduped)
         .map((a) => ({ category: a.category, reason: a.reason }))
     };
   } catch {

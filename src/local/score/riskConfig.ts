@@ -38,13 +38,23 @@ export interface RiskConfig {
     irreversibility_floor: boolean;
     /** Unproven scheduled entries get detection ×1.25. */
     silence_multiplier: boolean;
+    /** Recent-history window used by bounded repository-level churn acquisition. */
+    churn_window_days: number;
+  };
+  /** Shared proof defaults. Consumers decide how to apply them. */
+  proof: {
+    /** `auto` or a no-shell executable/argument command string such as `uv run python -m pytest`. */
+    python_runner: string;
+    attempt_limit: number;
+    baseline_green_target: number;
   };
   overrides: RiskOverride[];
 }
 
 export const DEFAULT_RISK_CONFIG: RiskConfig = {
   classification: { test_support_paths: [], scheduled_entry_paths: [], destructive_sinks: [], sensitivity_ignore: [], rank_exclude_paths: [] },
-  tuning: { irreversibility_floor: true, silence_multiplier: true },
+  tuning: { irreversibility_floor: true, silence_multiplier: true, churn_window_days: 180 },
+  proof: { python_runner: "auto", attempt_limit: 20, baseline_green_target: 5 },
   overrides: []
 };
 
@@ -57,6 +67,11 @@ export interface LoadedRiskConfig {
 
 function asStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function boundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
 /** Glob → RegExp: `*` matches within a path segment, `**` matches across segments. */
@@ -83,6 +98,13 @@ function applyFile(cfg: RiskConfig, file: string, warnings: string[], label: str
     const tun = (raw.tuning ?? {}) as Record<string, unknown>;
     if (typeof tun.irreversibility_floor === "boolean") cfg.tuning.irreversibility_floor = tun.irreversibility_floor;
     if (typeof tun.silence_multiplier === "boolean") cfg.tuning.silence_multiplier = tun.silence_multiplier;
+    if (tun.churn_window_days !== undefined) cfg.tuning.churn_window_days = boundedInt(tun.churn_window_days, cfg.tuning.churn_window_days, 1, 3_650);
+    const proof = (raw.proof ?? {}) as Record<string, unknown>;
+    if (typeof proof.python_runner === "string" && proof.python_runner.trim() !== "") {
+      cfg.proof.python_runner = proof.python_runner.trim();
+    }
+    if (proof.attempt_limit !== undefined) cfg.proof.attempt_limit = boundedInt(proof.attempt_limit, cfg.proof.attempt_limit, 1, 100);
+    if (proof.baseline_green_target !== undefined) cfg.proof.baseline_green_target = boundedInt(proof.baseline_green_target, cfg.proof.baseline_green_target, 1, 100);
     for (const o of Array.isArray(raw.overrides) ? raw.overrides : []) {
       const ov = o as Partial<RiskOverride>;
       if (typeof ov.symbol !== "string" || !["suppress", "pin", "reclassify"].includes(ov.action ?? "")) {

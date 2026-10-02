@@ -48,6 +48,14 @@ export interface ProofAttemptRecord {
   language: string;
   project_root?: string;
   blocked_by?: string;
+  command?: string;
+  cwd?: string;
+  exit_code?: number | null;
+  duration_ms?: number;
+  failure_class?: "env_unavailable" | "collection_error" | "test_failed" | "timeout";
+  stdout_tail?: string[];
+  stderr_tail?: string[];
+  runner_fallback?: string[];
 }
 
 export interface ProofAttemptsFile {
@@ -66,6 +74,7 @@ export interface ProofAttemptsFile {
     target_symbol?: string;
     title: string;
     reason: string;
+    category?: string;
     language?: string;
     project_root?: string;
     blocked_by?: string;
@@ -201,11 +210,20 @@ interface AutoProveLike {
     deduped?: boolean;
     project_root?: string;
     blocked_by?: string;
+    command?: string;
+    cwd?: string;
+    exit_code?: number | null;
+    duration_ms?: number;
+    failure_class?: "env_unavailable" | "collection_error" | "test_failed" | "timeout";
+    stdout_tail?: string[];
+    stderr_tail?: string[];
+    runner_fallback?: string[];
   }>;
   skipped: Array<{
     target_symbol?: string;
     title: string;
     reason: string;
+    category?: string;
     language?: string;
     project_root?: string;
     blocked_by?: string;
@@ -232,7 +250,7 @@ export function distillProofAttempts(
     artifact_identity: meta.graph.artifact_identity,
     attempted: auto.attempted,
     proven: auto.proven,
-    attempts: auto.attempts.map((a) => ({
+    attempts: auto.attempts.filter((a) => !a.deduped).map((a) => ({
       target_symbol: a.target_symbol,
       test_path: a.test_path || undefined,
       classification: a.classification,
@@ -242,12 +260,29 @@ export function distillProofAttempts(
       deduped: a.deduped,
       language: targetLanguage(a.target_symbol),
       project_root: a.project_root,
-      blocked_by: a.blocked_by
+      blocked_by: a.blocked_by,
+      command: a.command,
+      cwd: a.cwd,
+      exit_code: a.exit_code,
+      duration_ms: a.duration_ms,
+      failure_class: a.failure_class,
+      stdout_tail: a.stdout_tail?.slice(-40).map((line) => redactSecrets(line)),
+      stderr_tail: a.stderr_tail?.slice(-40).map((line) => redactSecrets(line)),
+      runner_fallback: a.runner_fallback?.map((line) => redactSecrets(line))
     })),
-    skipped: auto.skipped.map((s) => ({
+    skipped: [...auto.skipped, ...auto.attempts.filter((a) => a.deduped).map((a) => ({
+      target_symbol: a.target_symbol,
+      title: a.target_symbol,
+      reason: a.reason ?? "Skipped after a classified project-wide proof failure.",
+      language: targetLanguage(a.target_symbol),
+      project_root: a.project_root,
+      blocked_by: a.blocked_by,
+      category: a.category
+    }))].map((s) => ({
       target_symbol: s.target_symbol,
       title: s.title,
       reason: redactSecrets(s.reason),
+      category: s.category,
       language: s.language,
       project_root: s.project_root,
       blocked_by: s.blocked_by

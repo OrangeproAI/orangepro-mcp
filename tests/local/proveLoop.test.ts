@@ -249,12 +249,17 @@ describe("opProveLoop", () => {
       )
     );
 
-    // The certificate is byte-identical.
-    expect(loopRes.record.dynamic_proof).toEqual(directRes.record.dynamic_proof);
-    // The whole ledger record is structurally identical (ignore only run_id/timestamps).
+    // Evidence fields are identical. Process diagnostics legitimately differ because
+    // the two isolated checkouts have different absolute paths and elapsed times.
+    const semanticCertificate = (cert: NonNullable<LedgerRecord["dynamic_proof"]>) => {
+      const { command, cwd, duration_ms, ...evidence } = cert;
+      return evidence;
+    };
+    expect(semanticCertificate(loopRes.record.dynamic_proof!)).toEqual(semanticCertificate(directRes.record.dynamic_proof!));
+    // The ledger record is structurally identical apart from run metadata and runner paths.
     const strip = (r: LedgerRecord) => {
-      const { run_id, ts, ...rest } = r;
-      return rest;
+      const { run_id, ts, dynamic_proof, ...rest } = r;
+      return { ...rest, dynamic_proof: dynamic_proof ? semanticCertificate(dynamic_proof) : undefined };
     };
     expect(strip(loopRes.record)).toEqual(strip(directRes.record));
   });

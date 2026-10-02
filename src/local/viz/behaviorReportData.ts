@@ -1,10 +1,9 @@
-import { loadRiskConfig } from "../score/riskConfig.js";
 import { configDisclosureFor } from "../score/risk.js";
 import path from "node:path";
 import type { ArtifactIdentity, BehaviorFlow, GraphNode, LocalGraph } from "../graph/ontology.js";
 import type { Ledger } from "../ledger.js";
 import { buildRtm, type RtmRow } from "../rtm.js";
-import { inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint, type RiskGap } from "../score/risk.js";
+import { inspectRiskChurn, inspectRiskInputHealth, isEntryPoint, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint, type RiskGap } from "../score/risk.js";
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "../generate/draftGuidance.js";
 import { buildArtifactIdentity, comparisonCompatibility, type ComparisonCompatibilityState } from "../provenance.js";
@@ -19,7 +18,10 @@ export interface BehaviorReportData {
     gitRoot: string | null;
     commit: string | null;
     history: "full" | "shallow" | "partial" | "unavailable";
-    churn: "available" | "unavailable";
+    churn: "available" | "partial" | "unavailable";
+    /** Bounded recent-history acquisition truth; partial values remain visible/scored. */
+    churnState?: "complete" | "partial" | "unavailable";
+    commitsScanned?: number;
     churnWindow: string;
     toolVersion: string;
     /** sha256 prefix of the per-repo risk config; part of the determinism claim. */
@@ -69,6 +71,8 @@ export interface BehaviorReportData {
     };
     excluded: { count: string; text: string };
     excludedCliCommands: Array<{ path: string; file: string; reason: string }>;
+    /** Ranking-only hygiene; these nodes remain in the graph and denominator. */
+    rankingExclusions: Array<{ code: string; count: number }>;
   };
   behaviorGroups: Array<{ key: string; count: number }>;
   behaviors: Array<{ sig: string; group: string; file: string; tier: "proven" | "assoc" | "candidate" | "none"; reachable: boolean; desc: string }>;
@@ -89,6 +93,8 @@ export interface BehaviorReportData {
     hash: string; warnings: string[]; overridesActive: number;
     suppressed: Array<{ symbol: string; reason: string }>;
     rankExcludePaths: string[]; floor: boolean; silence: boolean;
+    tuning: { churn_window_days: number };
+    proof: { python_runner: string; attempt_limit: number; baseline_green_target: number };
     classification: { test_support_paths: string[]; scheduled_entry_paths: string[]; destructive_sinks: string[]; sensitivity_ignore: string[] };
     sensitivityIgnored: string[];
   };
@@ -188,6 +194,10 @@ export interface BehaviorReportDataOptions {
 
 /** Short human phrase per R-1 needs_setup category, for the "blocked because: …" panel copy. */
 const BLOCK_CATEGORY_LABEL: Record<string, string> = {
+  environment_unavailable: "a Python test environment that could not start",
+  collection_error: "a Python test collection or import error",
+  go_package_build_failure: "a Go package that could not build for proof",
+  runner_missing: "a missing test runner in the selected package",
   module_not_found: "a missing module or dependency in the sandbox",
   tsconfig_missing: "a monorepo tsconfig the sandbox can't resolve (a parent config the package extends)",
   experimental_builtin: "an experimental Node builtin that needs a runtime flag",
@@ -325,7 +335,7 @@ const ZERO_PROOF_EXPLAINER = {
   body: [
     "OrangePro mapped behaviors, flows, and static test links without running your app. Dynamic proof requires executing tests in a sandbox and checking whether a test fails when the target behavior is mutated.",
     "The statically linked behaviors have test evidence, but they are not verified yet. Treat them as likely covered, not proven.",
-    "OrangePro tries to dynamically prove the top 5 highest-risk behaviors by default. If setup is missing, the report shows the reason, such as missing dependencies, database setup, environment variables, or unsupported test runner configuration."
+    "OrangePro uses a bounded proof pass. For Python, it can examine up to the configured attempt limit to find the configured number of green baselines; environment or collection failures are recorded without being mistaken for failed product tests."
   ]
 } as const;
 
@@ -381,13 +391,25 @@ function proofGuidance(
       };
     }
     const dom = dominantBlockReason(dyn.needsSetup);
+    const environmentClasses = new Set(["environment_unavailable", "collection_error"]);
+    const allEnvironmentUnavailable = dyn.attempted > 0
+      && dyn.needsSetup.length >= dyn.attempted
+      && dyn.needsSetup.every((attempt) => environmentClasses.has(attempt.category ?? ""));
+    if (allEnvironmentUnavailable) {
+      return {
+        state: "attempted",
+        title: "Proof not run: test environment could not be started (see ledger)",
+        body: "Proof not run: test environment could not be started (see ledger)",
+        action: HANDOFF_ACTION
+      };
+    }
     const allBlocked = dyn.needsSetup.length > 0 && dyn.needsSetup.length >= dyn.attempted;
     const plural = dyn.attempted === 1 ? "" : "s";
     if (allBlocked && dom) {
       return {
         state: "attempted",
         title: `0 Dynamically Proven — top ${dyn.attempted} attempted, all setup-blocked`,
-        body: `Dynamic proof attempted ${dyn.attempted} target${plural}; all were blocked by ${dom.label} (${dom.count}/${dom.total}). This is a sandbox setup gap, not a static-test failure — the Statically Linked signals are still shown.`,
+        body: `Dynamic proof attempted ${dyn.attempted} target${plural}; none reached a green baseline. Most common block: ${dom.label} (${dom.count}/${dom.total} actual attempts). This is a test-environment/setup gap, not a static-test failure — the Statically Linked signals are still shown.`,
         action: nextStepFor(dom) ?? HANDOFF_ACTION
       };
     }
@@ -403,6 +425,15 @@ function proofGuidance(
   // Standalone report regen (no THIS-RUN data) → derive from the ledger only.
   const dynamicAttempts = ledger.records.filter((r) => r.dynamic_proof?.proof_kind === "dynamic_targeted");
   if (dynamicAttempts.length > 0) {
+    const unavailableClasses = new Set(["env_unavailable", "collection_error"]);
+    if (dynamicAttempts.every((attempt) => unavailableClasses.has(attempt.dynamic_proof?.failure_class ?? ""))) {
+      return {
+        state: "attempted",
+        title: "Proof not run: test environment could not be started (see ledger)",
+        body: "Proof not run: test environment could not be started (see ledger)",
+        action: HANDOFF_ACTION
+      };
+    }
     return {
       state: "attempted",
       title: "0 Dynamically Proven — dynamic proof ran, none closed yet",
@@ -442,6 +473,11 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
   const unit = tests.filter((n) => n.properties.test_layer === "unit" || n.properties.test_layer === "component").length;
   const denominator = graph.analysis?.denominator;
   const runtime = graph.analysis?.runtime_coverage;
+  const rankingExclusions = new Map<string, number>();
+  for (const node of graph.nodes) {
+    const code = node.kind === "CodeSymbol" && node.denominator_eligible === true ? node.properties.ranking_exclusion_code : undefined;
+    if (typeof code === "string" && code) rankingExclusions.set(code, (rankingExclusions.get(code) ?? 0) + 1);
+  }
   const excludedCount =
     (denominator?.excluded_boilerplate ?? 0) +
     (denominator?.excluded_infra ?? 0) +
@@ -470,7 +506,8 @@ function scanBlock(graph: LocalGraph, rows: RtmRow[]): BehaviorReportData["scan"
       count: excludedCount > 0 ? String(excludedCount) : "0",
       text: "non-behavior symbols were excluded from the behavior count — generated code, framework internals, test-inferred flows, and infrastructure plumbing."
     },
-    excludedCliCommands: excludedCliCommands(graph)
+    excludedCliCommands: excludedCliCommands(graph),
+    rankingExclusions: [...rankingExclusions.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([code, count]) => ({ code, count }))
   };
 }
 
@@ -659,7 +696,7 @@ function displayTitle(title: string, file: string): string {
 
 /** Deterministic 1–2 line behavior context from graph facts only — no LLM.
  *  Sensitivity label mirrors deriveDataSensitivity's tiers. */
-function riskContext(risk: RiskGap): string {
+export function riskContext(risk: RiskGap, churnWindowDays: number, churnMeta: Pick<ReturnType<typeof inspectRiskChurn>, "state" | "commitsScanned">): string {
   const sens =
     (risk.data_sensitivity ?? 1) >= 10 ? "payment/billing-sensitive"
       : (risk.data_sensitivity ?? 1) >= 9 ? "auth/session-sensitive"
@@ -674,10 +711,11 @@ function riskContext(risk: RiskGap): string {
       : "deep in the call graph";
   const sink = risk.sink_callee;
   const scheduled = risk.scheduled_entry === true;
-  const churnKnown = risk.churn_available !== false;
-  const churn = churnKnown
-    ? (risk.git_churn > 0 ? `${risk.git_churn} line${risk.git_churn === 1 ? "" : "s"} changed in 180 days` : "unchanged in 180 days")
-    : "change history unavailable";
+  const churn = churnMeta.state === "partial"
+    ? `${risk.git_churn} churn line${risk.git_churn === 1 ? "" : "s"} in file over partial change history (${churnMeta.commitsScanned} commits)`
+    : churnMeta.state === "complete" && risk.churn_available !== false
+      ? `${risk.git_churn} churn line${risk.git_churn === 1 ? "" : "s"} in file over ${churnWindowDays} days`
+      : "change history unavailable";
   const tier = risk.detection_tier ?? "";
   const evidence = tier === "candidate"
     ? "no test links here (a similarly-named test exists but never calls it)"
@@ -1153,7 +1191,7 @@ function riskTodo(
   return `No test signal exists. Start with one integration test that ${call} and asserts the observable outcome.${sens}`;
 }
 
-function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risks"] {
+function riskRows(risks: RiskGap[], graph: LocalGraph, churnWindowDays: number, churnMeta: Pick<ReturnType<typeof inspectRiskChurn>, "state" | "commitsScanned">): BehaviorReportData["risks"] {
   const maxRiskScore = risks.reduce((m, r) => Math.max(m, r.risk_score), 0);
   const riskIds = new Set(risks.map((r) => r.id));
   const firstRowForFile = new Map<string, string>();
@@ -1202,7 +1240,7 @@ function riskRows(risks: RiskGap[], graph: LocalGraph): BehaviorReportData["risk
           todo: riskTodo(risk, verb, path, generatedTests)
         };
       })(),
-      context: riskContext(risk),
+      context: riskContext(risk, churnWindowDays, churnMeta),
       desc: risk.reasons.join(" · "),
       tags
     };
@@ -1257,9 +1295,11 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   }).filter((r) => r.sink_callee).slice(0, 20)
     .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, sink: r.sink_callee ?? "" }));
   const riskHealth = inspectRiskInputHealth(repoRoot);
-  const churnAvailable = riskHealth.churnAvailable && riskGaps.every((risk) => risk.churn_available !== false);
-  const configHash = loadRiskConfig(repoRoot).hash;
   const codeFiles = Object.entries(graph.manifest.files).filter(([, file]) => file.kind === "code").map(([file]) => file);
+  const churnMeta = inspectRiskChurn(repoRoot, codeFiles, riskHealth.churnWindow);
+  const churnAvailable = churnMeta.state === "complete" && riskGaps.every((risk) => risk.churn_available !== false);
+  const configDisclosure = configDisclosureFor(graph, repoRoot);
+  const configHash = configDisclosure.hash;
   const identity = buildArtifactIdentity(graph, {
     configHash,
     history: {
@@ -1275,16 +1315,18 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     gitRoot: riskHealth.gitRoot ? path.basename(riskHealth.gitRoot) : null,
     commit: riskHealth.commit,
     history: riskHealth.history,
-    churn: churnAvailable ? "available" : "unavailable",
+    churn: churnMeta.state === "complete" ? "available" : churnMeta.state,
+    churnState: churnMeta.state,
+    commitsScanned: churnMeta.commitsScanned,
     churnWindow: riskHealth.churnWindow,
     toolVersion: identity.tool_version,
     configHash,
     identity,
     inputFingerprint: identity.run_fingerprint.replace(/^sha256:/, "").slice(0, 16),
-    reason: churnAvailable ? undefined : (riskHealth.reason ?? "Git churn scan did not complete")
+    reason: churnMeta.state === "complete" ? undefined : (churnMeta.reason ?? riskHealth.reason ?? "error: churn acquisition returned no reason")
   };
   const lists = behaviorLists(rows, flowIds);
-  const risks = riskRows(riskGaps, graph);
+  const risks = riskRows(riskGaps, graph, configDisclosure.tuning.churn_window_days, churnMeta);
   const sortedBehaviors = [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b));
   const flowRows = flows(graph, rows, riskGaps);
   return {
@@ -1304,7 +1346,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     candidateFlows: candidateFlows(graph),
     risks,
     worklists: { changeFrontier, irreversible },
-    configDisclosure: configDisclosureFor(graph, repoRoot),
+    configDisclosure,
     zeroProofExplainer: summary.proven === 0 ? { title: ZERO_PROOF_EXPLAINER.title, body: [...ZERO_PROOF_EXPLAINER.body] } : null,
     mapModel: buildSystemMapModel({ flows: flowRows, risks, behaviors: sortedBehaviors }),
     delta: firstRunDelta(),

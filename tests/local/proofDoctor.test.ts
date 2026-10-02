@@ -95,6 +95,24 @@ describe("distillProofAttempts — sidecar is redacted metadata only", () => {
             category: "go_package_build_failure",
             project_root: "terraform/provider",
             blocked_by: "sym:terraform/provider/litellm/client.go#Run",
+            deduped: false,
+            command: "python -m pytest -q tests/test_pay.py::test_charge",
+            cwd: "/workspace",
+            exit_code: 2,
+            duration_ms: 123,
+            failure_class: "collection_error" as const,
+            stdout_tail: [...Array.from({ length: 41 }, (_, i) => `line-${i}`), "api_key=tailsecret123"],
+            stderr_tail: ["password=stderrsecret123"],
+            runner_fallback: ["api_key=runnersecret123"]
+          },
+          {
+            target_symbol: "sym:src/other.go#Charge",
+            test_path: "tests/other_test.go",
+            classification: "needs_setup",
+            reason: "Blocked by the first project-level failure.",
+            category: "go_package_build_failure",
+            project_root: "terraform/provider",
+            blocked_by: "sym:src/pay.go#Charge",
             deduped: true
           }
         ],
@@ -110,21 +128,34 @@ describe("distillProofAttempts — sidecar is redacted metadata only", () => {
       { generatedAt: "2026-07-06T01:00:00Z", graph }
     );
     expect(file.schema_version).toBe(PROOF_ATTEMPTS_SCHEMA_VERSION);
+    expect(file.attempted).toBe(1);
+    expect(file.attempts).toHaveLength(1);
     expect(file.graph_generated_at).toBe("2026-07-06T00:00:00Z");
     expect(file.git_commit).toBe("abc123");
     expect(file.attempts[0]).toMatchObject({
       language: "go",
       project_root: "terraform/provider",
       blocked_by: "sym:terraform/provider/litellm/client.go#Run",
-      deduped: true
+      deduped: false,
+      command: "python -m pytest -q tests/test_pay.py::test_charge",
+      cwd: "/workspace",
+      exit_code: 2,
+      duration_ms: 123,
+      failure_class: "collection_error"
     });
+    expect(file.attempts[0]?.stdout_tail).toHaveLength(40);
+    expect(file.attempts[0]?.stderr_tail).toEqual(["<redacted:credential>"]);
     expect(file.skipped[0]).toMatchObject({
       language: "go",
       project_root: "terraform/provider",
       blocked_by: "sym:terraform/provider/litellm/client.go#Run"
     });
+    expect(file.skipped[1]).toMatchObject({ target_symbol: "sym:src/other.go#Charge", blocked_by: "sym:src/pay.go#Charge" });
     expect(JSON.stringify(file)).not.toContain("supersecretvalue123");
     expect(JSON.stringify(file)).not.toContain("alsosecret9");
+    expect(JSON.stringify(file)).not.toContain("tailsecret123");
+    expect(JSON.stringify(file)).not.toContain("stderrsecret123");
+    expect(JSON.stringify(file)).not.toContain("runnersecret123");
   });
 });
 

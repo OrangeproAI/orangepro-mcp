@@ -345,6 +345,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
 </header>
 <div class="provenance" id="provenance"></div>
 <div class="scope-note" id="cli-exclusions" hidden></div>
+<div class="scope-note" id="ranking-exclusions" hidden></div>
 
 <section class="kpis" id="kpis"></section>
 <p class="metric-scope" id="metric-scope"></p>
@@ -693,6 +694,12 @@ if(excludedCli.length){
   const note=$("#cli-exclusions");
   note.hidden=false;
   note.textContent="CLI command entries excluded from the behavior count: "+excludedCli.map(x=>x.path+" ("+x.reason+")").join(" · ");
+}
+const rankExclusions=D.scan.rankingExclusions||[];
+if(rankExclusions.length){
+  const note=$("#ranking-exclusions");
+  note.hidden=false;
+  note.textContent="Excluded from ranking only (still counted as behaviors): "+rankExclusions.map(x=>x.code+" "+x.count).join(" · ");
 }
 $("#fw-pill").textContent=D.framework;
 
@@ -1050,13 +1057,17 @@ renderRisks();
   if(!C||!host)return;
   const warn=(C.warnings||[]).length>0;
   const K=C.classification||{};
+  const P=C.proof||{};
+  const T=C.tuning||{};
   const clsSet=["test_support_paths","scheduled_entry_paths","destructive_sinks","sensitivity_ignore"].filter(k=>(K[k]||[]).length>0);
-  const tuned=C.overridesActive>0||(C.rankExcludePaths||[]).length>0||!C.floor||!C.silence||clsSet.length>0;
+  const tuned=C.overridesActive>0||(C.rankExcludePaths||[]).length>0||!C.floor||!C.silence||clsSet.length>0||(T.churn_window_days??180)!==180||P.python_runner!=="auto"||P.attempt_limit!==20||P.baseline_green_target!==5;
   const bits=["config <b>"+esc(C.hash)+"</b>","overrides active <b>"+C.overridesActive+"</b>","suppressed <b>"+(C.suppressed||[]).length+"</b>"];
   if((C.rankExcludePaths||[]).length)bits.push("ranking excludes <b>"+esc(C.rankExcludePaths.join(", "))+"</b>");
   if(!C.floor)bits.push("<b>irreversibility floor OFF</b>");
   if(!C.silence)bits.push("<b>silence multiplier OFF</b>");
   let html="<div>"+bits.join(" · ")+"</div>";
+  html+='<span class="cfg-row">Churn window: <b>'+esc(String(T.churn_window_days??180))+' days</b></span>';
+  html+='<span class="cfg-row">Python proof: runner <b>'+esc(P.python_runner||"auto")+'</b> · attempt limit <b>'+esc(String(P.attempt_limit??20))+'</b> · green baseline target <b>'+esc(String(P.baseline_green_target??5))+'</b></span>';
   clsSet.forEach(k=>{html+='<span class="cfg-row">'+esc(k)+': <b>'+esc(K[k].join(", "))+'</b></span>';});
   if((C.sensitivityIgnored||[]).length)html+='<span class="cfg-row">sensitivity ignored by config (score changed): <b>'+esc(C.sensitivityIgnored.join(", "))+'</b></span>';
   (C.suppressed||[]).forEach(s=>{html+='<span class="cfg-row">suppressed by config: <b>'+esc(s.symbol)+'</b> — '+esc(s.reason)+'</span>';});

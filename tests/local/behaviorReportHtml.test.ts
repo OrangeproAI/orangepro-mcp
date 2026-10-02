@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -349,6 +349,49 @@ describe("renderBehaviorReport", () => {
     expect(html).toContain("attempted the top 5");
     expect(html).toContain("Blocked because: a missing module or dependency in the sandbox (2/3)");
     expect(html).toContain("Static test signals stay Statically Linked");
+  });
+
+  it("renders the exact all-environment-unavailable proof wording without a 0-Dynamically-Proven title", () => {
+    const dyn: DynamicProofReportInput = {
+      attempted: 2,
+      proven: 0,
+      needsSetup: [{ category: "environment_unavailable" }, { category: "collection_error" }]
+    };
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api", dynamicProof: dyn });
+    const html = renderBehaviorReport(data);
+
+    expect(data.proofGuidance).toEqual(expect.objectContaining({
+      state: "attempted",
+      title: "Proof not run: test environment could not be started (see ledger)",
+      body: "Proof not run: test environment could not be started (see ledger)"
+    }));
+    expect(html).toContain("Proof not run: test environment could not be started (see ledger)");
+    expect(html).not.toContain("0 Dynamically Proven");
+  });
+
+  it("visibly renders configured Python runner, attempt limit, and green baseline target", () => {
+    const root = mkdtempSync(join(tmpdir(), "opro-report-proof-config-"));
+    try {
+      mkdirSync(join(root, ".orangepro"));
+      writeFileSync(
+        join(root, ".orangepro", "config.json"),
+        JSON.stringify({ tuning: { churn_window_days: 90 }, proof: { python_runner: "uv run python -m pytest -p no:warnings", attempt_limit: 17, baseline_green_target: 4 } }),
+        "utf8"
+      );
+      const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: root });
+      const html = renderBehaviorReport(data);
+
+      expect(data.configDisclosure.proof).toEqual({ python_runner: "uv run python -m pytest -p no:warnings", attempt_limit: 17, baseline_green_target: 4 });
+      expect(data.configDisclosure.tuning).toEqual({ churn_window_days: 90 });
+      expect(html).toContain("Churn window:");
+      expect(html).toContain("90 days");
+      expect(html).toContain("Python proof: runner");
+      expect(html).toContain("uv run python -m pytest -p no:warnings");
+      expect(html).toContain("attempt limit");
+      expect(html).toContain("green baseline target");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("renders the KPI definitions verbatim", () => {

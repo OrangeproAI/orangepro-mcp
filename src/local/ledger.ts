@@ -9,18 +9,42 @@ export const LEDGER_FILE = "ledger.json";
 
 export type LedgerStatus = "reproven" | "unproven" | "already_proven" | "generated_unverifiable";
 
+export type PythonProofFailureClass = "env_unavailable" | "collection_error" | "test_failed" | "timeout";
+
+export interface PythonProofDiagnostics {
+  command: string;
+  cwd: string;
+  exit_code: number | null;
+  duration_ms: number;
+  failure_class?: PythonProofFailureClass;
+  stdout_tail: string[];
+  stderr_tail: string[];
+  runner_fallback?: string[];
+}
+
 export interface DynamicProofCertificate {
   proof_kind: "dynamic_targeted";
   baseline_green: boolean;
   mutant_failed_assertion: boolean;
   target_not_mocked: boolean;
   sentinel: "return-json" | "promise-json" | string;
+  /** Exact Python mutation expression and its derivation, when the Python mutator ran. */
+  sentinel_source?: string;
   runner?: string;
   test_path?: string;
   mutant_status?: string;
   /** Proof implementation identity; metadata only, never a substitute for a killed mutation. */
   oracle_version?: string;
   run_fingerprint?: string;
+  /** Phase-relevant Python runner diagnostics; informational and never a proof gate. */
+  command?: string;
+  cwd?: string;
+  exit_code?: number | null;
+  duration_ms?: number;
+  failure_class?: PythonProofFailureClass;
+  stdout_tail?: string[];
+  stderr_tail?: string[];
+  runner_fallback?: string[];
 }
 
 export interface LedgerRecordInput {

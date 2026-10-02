@@ -175,7 +175,10 @@ describe("Python structural credibility", () => {
       denominator_eligible: false,
       properties: expect.objectContaining({ denominator_witness: { seed: "sym:src/api/routes.py#items", edge_kinds: ["CALLS"], hop_count: 1 } })
     });
-    expect(container).toMatchObject({ denominator_eligible: true, properties: expect.objectContaining({ ranking_exclusion_reason: "python_structural_container" }) });
+    expect(container).toMatchObject({ denominator_eligible: true, properties: expect.objectContaining({
+      ranking_exclusion_code: "python_class_with_methods",
+      ranking_exclusion_reason: expect.stringContaining("methods own its priority ranking")
+    }) });
     const rankedIds = rankRiskGaps(toGraph(fragment, root), { repoRoot: root, limit: 100 }).map((r) => r.id);
     expect(rankedIds).toContain(hydrate?.external_id);
     expect(rankedIds).not.toContain(container?.external_id);
