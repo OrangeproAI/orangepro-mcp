@@ -50,7 +50,7 @@ const MAX_RELATED_FILES = 4;
 const SYMBOL_EXCERPT_CONTEXT_LINES = 3;
 const MAX_EXCERPT_CHARS = 8000;
 const MAX_TARGET_TYPE_EXCERPT_CHARS = 5000;
-const STATIC_CHECK_TIMEOUT_MS = 3000;
+const STATIC_CHECK_TIMEOUT_MS = 10000;
 // Large Go monorepos can spend tens of seconds populating a cold module cache
 // before the target package is compiled. Keep the check authoritative instead
 // of downgrading valid generated tests while dependencies are still downloading.
