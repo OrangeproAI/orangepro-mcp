@@ -36,6 +36,8 @@ export interface RiskGap {
   override?: { action: RiskOverride["action"]; reason: string };
   /** The destructive callee this path reaches (≤2 calls), when it does — shown by name on the row. */
   sink_callee?: string;
+  /** Symbol that makes the destructive call (itself, or the callee it reaches). Display grouping only. */
+  sink_owner?: string;
   scheduled_entry?: boolean;
   /** Evidence tier behind D: associated | candidate | none. */
   detection_tier?: "associated" | "candidate" | "none";
@@ -155,9 +157,12 @@ function confirmedBehaviorIds(graph: LocalGraph, provenIds?: Set<string>): Set<s
   return ids;
 }
 
-/** Bounded repository-wide history acquisition. Deliberately constants, not hidden timeouts. */
-export const GIT_CHURN_MAX_COMMITS = 5_000;
-export const GIT_CHURN_TIMEOUT_MS = 60_000;
+/** Default bounds for repository-wide history acquisition (overridable via
+ *  tuning.churn_max_commits / tuning.churn_timeout_seconds, always disclosed).
+ *  Sized so an active monorepo's full 180-day window completes (a 5,000-commit /
+ *  60 s bound truncated windows that 0.2.44 scanned completely). */
+export const GIT_CHURN_MAX_COMMITS = 20_000;
+export const GIT_CHURN_TIMEOUT_MS = 300_000;
 const GIT_FIRST_COMMIT_BATCH = 200;
 
 export interface RiskChurnMetadata {
@@ -172,9 +177,9 @@ interface GitChurnResult extends RiskChurnMetadata {
 
 /**
  * This worker intentionally uses spawn, not execFileSync: stdout is parsed as it
- * arrives, so a 60s bound returns the values already observed instead of erasing
- * completed chunks. It retains only requested paths, bounding the worker map and
- * handoff payload by ranking input rather than repository history. The scoring API
+ * arrives, so a time bound returns the values already observed instead of erasing
+ * completed chunks. It keeps one counter per path the window touched (bounded by
+ * the window, not by total history) so a single scan serves every caller. The scoring API
  * is synchronous, therefore the worker signals only after writing its result file.
  */
 const GIT_CHURN_WORKER_SOURCE = String.raw`
@@ -183,7 +188,7 @@ const { writeFileSync } = require("node:fs");
 const { workerData } = require("node:worker_threads");
 const state = new Int32Array(workerData.signal);
 const values = new Map();
-const trackedFiles = new Set(workerData.files);
+const trackedFiles = Array.isArray(workerData.files) ? new Set(workerData.files) : null;
 let commitsScanned = 0;
 let commitLimitReached = false;
 let expectingTimestamp = false;
@@ -198,7 +203,7 @@ let child;
 let childClosed = false;
 const firstLine = (text) => String(text || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
 const add = (path, adds, dels) => {
-  if (!path || commitLimitReached || !trackedFiles.has(path)) return;
+  if (!path || commitLimitReached || (trackedFiles && !trackedFiles.has(path))) return;
   values.set(path, (values.get(path) || 0) + adds + dels);
 };
 const consume = (token) => {
@@ -349,11 +354,16 @@ function gitChurn(root: string | undefined, files: string[], window: string, hea
   // Values are retained only for the requested paths, so that set and clone
   // state are part of cache identity. A checkout can be marked partial at an
   // unchanged HEAD and must then remain truthfully provisional.
-  const requestedFiles = [...new Set(files)].sort();
-  const requested = new Set(requestedFiles);
-  const key = `${health.gitRoot ?? root}\0${health.commit ?? ""}\0${health.history}\0${window}\0${hashString(JSON.stringify(requestedFiles))}`;
+  const requested = new Set(files);
+  const tuning = loadRiskConfig(root).config.tuning;
+  const maxCommits = tuning.churn_max_commits ?? GIT_CHURN_MAX_COMMITS;
+  const timeoutMs = (tuning.churn_timeout_seconds ?? GIT_CHURN_TIMEOUT_MS / 1000) * 1000;
+  // ONE bounded scan per repository state: values are kept for every path the
+  // window touched and filtered per caller, so the ranking, the report header and
+  // the static snapshot never each pay for (and each time out on) the same scan.
+  const key = `${health.gitRoot ?? root}\0${health.commit ?? ""}\0${health.history}\0${window}\0${maxCommits}\0${timeoutMs}`;
   const cached = historyCache.get(key);
-  if (cached) return { ...cached, values: new Map(cached.values) };
+  if (cached) return { ...cached, values: new Map([...cached.values].filter(([file]) => requested.has(file))) };
   const dir = mkdtempSync(join(tmpdir(), "orangepro-churn-"));
   const resultPath = join(dir, "result.json");
   const signal = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
@@ -365,9 +375,9 @@ function gitChurn(root: string | undefined, files: string[], window: string, hea
       workerData: {
         root,
         window,
-        files: requestedFiles,
-        maxCommits: GIT_CHURN_MAX_COMMITS,
-        timeoutMs: GIT_CHURN_TIMEOUT_MS,
+        files: null,
+        maxCommits,
+        timeoutMs,
         cloneState: health.history,
         resultPath,
         signal
@@ -375,7 +385,7 @@ function gitChurn(root: string | undefined, files: string[], window: string, hea
     });
     // The worker publishes a partial result 100ms after its child timeout; leave
     // explicit scheduling room before the synchronous API forces it down.
-    Atomics.wait(state, 0, 0, GIT_CHURN_TIMEOUT_MS + 2_000);
+    Atomics.wait(state, 0, 0, timeoutMs + 2_000);
     if (Atomics.load(state, 0) === 1) parsed = JSON.parse(readFileSync(resultPath, "utf8")) as typeof parsed;
     void worker.terminate().catch(() => undefined);
   } catch (error) {
@@ -630,6 +640,10 @@ const IMPORTED_REPLACEMENT_CALL_RE = /^replace[A-Za-z0-9_]*$/i;
 // removals (`pollers.Remove`, `RemoveSpeculativeWorkflowTaskTimeout`) are not.
 const REMOVE_CALL_RE = /^remove(?![A-Za-z0-9_]*(?:listener|handler|observer|callback|attribute|attr|class|child|style|hook|timeout|timer)$)[A-Za-z0-9_]*$/i;
 const PERSISTENCE_FIELD_RE = /(store|client|db|repo|repository|persistence|manager|queue|bucket|index|table|storage|dao)/i;
+// The browser Web Storage API (`sessionStorage` / `localStorage`, optionally via
+// `window.`) is a per-tab/per-device client cache, not a durable data store. Its
+// `removeItem` matches the persistence vocabulary ("storage") by name only.
+const BROWSER_WEB_STORAGE_FIELD_RE = /(^|\.)(sessionStorage|localStorage)$/;
 const SCHEDULED_ENTRY_NAME_RE = /(^|\.)(run|execute|handle|process|tick|scan)$/i;
 const SCHEDULED_ENTRY_PATH_RE = /(^|\/)(jobs?|workers?|scanners?|scavengers?|cron|schedulers?|processors?|consumers?|reconcil\w*)(\/|$)/i;
 
@@ -769,26 +783,43 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   // attributed; CALLS already has an exact symbol target. Older graphs without
   // these metadata facts fail closed instead of redistributing imports.
   const incoming = new Map<string, number>();
+  // Display-only breakdown of the same total, so a reader can reconcile the
+  // number against the graph: CALLS edges + named imports + module.attr references.
+  const incomingParts = new Map<string, { calls: number; named: number; attrs: number }>();
+  const addIncoming = (id: string, kind: "calls" | "named" | "attrs", n: number): void => {
+    incoming.set(id, (incoming.get(id) ?? 0) + n);
+    const parts = incomingParts.get(id) ?? { calls: 0, named: 0, attrs: 0 };
+    parts[kind] += n;
+    incomingParts.set(id, parts);
+  };
   for (const e of graph.edges) {
     if (e.relationship_type === "CALLS" && symbolIds.has(e.to_external_id)) {
-      incoming.set(e.to_external_id, (incoming.get(e.to_external_id) ?? 0) + 1);
+      addIncoming(e.to_external_id, "calls", 1);
     } else if (e.relationship_type === "IMPORTS") {
       const named = e.properties?.symbol_imports;
       if (Array.isArray(named)) for (const id of new Set(named)) {
         if (typeof id === "string" && symbolIds.has(id) && fileBySymbolId.get(id) === e.to_external_id) {
-          incoming.set(id, (incoming.get(id) ?? 0) + 1);
+          addIncoming(id, "named", 1);
         }
       }
       const refs = e.properties?.symbol_references;
       if (refs && typeof refs === "object" && !Array.isArray(refs)) {
         for (const [id, count] of Object.entries(refs)) {
           if (symbolIds.has(id) && typeof count === "number" && Number.isSafeInteger(count) && count > 0 && fileBySymbolId.get(id) === e.to_external_id) {
-            incoming.set(id, (incoming.get(id) ?? 0) + count);
+            addIncoming(id, "attrs", count);
           }
         }
       }
     }
   }
+  const incomingBreakdown = (id: string): string => {
+    const parts = incomingParts.get(id);
+    if (!parts || (parts.named === 0 && parts.attrs === 0)) return "";
+    const bits = [`${parts.calls} call${parts.calls === 1 ? "" : "s"}`];
+    if (parts.named > 0) bits.push(`${parts.named} named import${parts.named === 1 ? "" : "s"}`);
+    if (parts.attrs > 0) bits.push(`${parts.attrs} module.attribute reference${parts.attrs === 1 ? "" : "s"}`);
+    return ` (${bits.join(" + ")})`;
+  };
   // Per-symbol churn share: file churn weighted by the symbol's line span so one
   // hot file no longer awards its full churn to every method it contains.
   const fileComplexityTotals = new Map<string, number>();
@@ -844,20 +875,22 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     // segment. `q.Clock().Now().Truncate` is a chain of return values, not a surface.
     const viaField = (c: string): boolean => !c.slice(0, c.lastIndexOf(".")).includes("(");
     const fieldOf = (c: string): string => c.slice(0, c.lastIndexOf("."));
+    const persistentRemove = (c: string): boolean =>
+      REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c)) && !BROWSER_WEB_STORAGE_FIELD_RE.test(fieldOf(c));
     const destructive = ext.find((c) => viaField(c) && (
       isDestructiveTerminal(lastSeg(c)) ||
-      (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
+      persistentRemove(c) ||
       extraSinks.some((re) => re.test(lastSeg(c)))));
     if (destructive) return destructive;
     return importedStatic.find((c) => viaField(c) && (
       isDestructiveTerminal(lastSeg(c)) ||
       IMPORTED_REPLACEMENT_CALL_RE.test(lastSeg(c)) ||
-      (REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c))) ||
+      persistentRemove(c) ||
       extraSinks.some((re) => re.test(lastSeg(c)))));
   };
-  const reachedSinkFrom = (id: string, depth: number, seen: Set<string>): string | undefined => {
+  const reachedSinkFrom = (id: string, depth: number, seen: Set<string>): { callee: string; owner: string } | undefined => {
     const own = sinkCallee(id);
-    if (own) return own;
+    if (own) return { callee: own, owner: id };
     if (depth === 0) return undefined;
     for (const t of fanOutTargets.get(id) ?? []) {
       if (seen.has(t)) continue;
@@ -867,7 +900,15 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     }
     return undefined;
   };
-  const sinkReached = new Map(normalizationSymbols.map((s) => [s.external_id, reachedSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
+  const endpointHandlers = new Set(
+    graph.edges
+      .filter((e) => e.relationship_type === "IMPLEMENTED_IN" && nodeById.get(e.from_external_id)?.kind === "Endpoint")
+      .map((e) => e.to_external_id)
+  );
+  const frameworkInvoked = (node: GraphNode): boolean =>
+    node.properties.cli_entrypoint === true || endpointHandlers.has(node.external_id);
+  const sinkHits = new Map(normalizationSymbols.map((s) => [s.external_id, reachedSinkFrom(s.external_id, 2, new Set([s.external_id]))]));
+  const sinkReached = new Map([...sinkHits].map(([k, v]) => [k, v?.callee]));
   const reachesSink = new Map([...sinkReached].map(([k, v]) => [k, v !== undefined]));
   const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
@@ -881,7 +922,15 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const postNormalizationExcluded = (node: GraphNode): boolean => {
     if (node.properties.ranking_exclusion_code === "python_class_with_methods" || node.properties.ranking_exclusion_code === "python_structural_container" || node.properties.ranking_exclusion_reason === "python_structural_container") return true;
     const code = node.properties.ranking_exclusion_reason_code;
-    if (node.properties.ranking_exclusion_code === "trivial_constructor" || node.properties.ranking_exclusion_code === "enum_declaration" || code === "python_trivial_thread_local_initializer" || code === "python_stdlib_enum_declaration") return true;
+    if (
+      node.properties.ranking_exclusion_code === "trivial_constructor" ||
+      node.properties.ranking_exclusion_code === "enum_declaration" ||
+      node.properties.ranking_exclusion_code === "data_shape_declaration" ||
+      code === "python_trivial_thread_local_initializer" ||
+      code === "python_trivial_constructor" ||
+      code === "python_stdlib_enum_declaration" ||
+      code === "python_data_shape_declaration"
+    ) return true;
     return (node.properties.ranking_exclusion_code === "thin_external_delegate" || code === "python_thin_external_delegate")
       && deriveDataSensitivity(node) <= 1
       && sinkCallee(node.external_id) === undefined;
@@ -964,11 +1013,15 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       const d = raw.d;
       const detectionTier = detectionFor(s.external_id);
       let score = Math.round(pExact * iExact * d * 10) / 10;
-      const disconnected = incoming_refs === 0 && fan_out === 0;
+      // A framework-invoked entry (a registered CLI command, or a handler bound to an
+      // Endpoint) has no static caller BY CONSTRUCTION; "disconnected" means dead-code
+      // shaped, which an entry the framework calls is not. Before per-symbol fan-in,
+      // such entries escaped this dampener only through file-split import counts.
+      const disconnected = incoming_refs === 0 && fan_out === 0 && !frameworkInvoked(s);
       if (disconnected) score = Math.round(score * 0.25 * 10) / 10;
       const reasons = [
         `ORS ${score} ≈ P${p} × I${i} × D${d}`,
-        `${incoming_refs} incoming symbol-specific structural reference${incoming_refs === 1 ? "" : "s"}`,
+        `${incoming_refs} incoming symbol-specific structural reference${incoming_refs === 1 ? "" : "s"}${incomingBreakdown(s.external_id)}`,
         churnAvailable
           ? `${git_churn} git churn line${git_churn === 1 ? "" : "s"} attributed to this symbol in recent history`
           : churnResult.state === "partial"
@@ -988,7 +1041,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       if (override && override.action !== "suppress") reasons.push(`config override (${override.action}): ${override.reason}`);
       return {
         ...(override && override.action !== "suppress" ? { override: { action: override.action, reason: override.reason } } : {}),
-        ...(sinkReached.get(s.external_id) ? { sink_callee: sinkReached.get(s.external_id) } : {}),
+        ...(sinkHits.get(s.external_id) ? { sink_callee: sinkHits.get(s.external_id)!.callee, sink_owner: sinkHits.get(s.external_id)!.owner } : {}),
         ...(raw.scheduledEntry ? { scheduled_entry: true } : {}),
         detection_tier: detectionTier,
         id: s.external_id,
@@ -1091,7 +1144,7 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
   rankExcludePaths: string[];
   floor: boolean;
   silence: boolean;
-  tuning: { churn_window_days: number };
+  tuning: { churn_window_days: number; churn_max_commits: number; churn_timeout_seconds: number };
   proof: { python_runner: string; attempt_limit: number; baseline_green_target: number };
   /** Every other ranking-changing classification setting, listed when set. */
   classification: { test_support_paths: string[]; scheduled_entry_paths: string[]; destructive_sinks: string[]; sensitivity_ignore: string[] };
@@ -1119,7 +1172,7 @@ export function configDisclosureFor(graph: LocalGraph, repoRoot: string): {
     rankExcludePaths: cfg.classification.rank_exclude_paths,
     floor: cfg.tuning.irreversibility_floor,
     silence: cfg.tuning.silence_multiplier,
-    tuning: { churn_window_days: cfg.tuning.churn_window_days },
+    tuning: { churn_window_days: cfg.tuning.churn_window_days, churn_max_commits: cfg.tuning.churn_max_commits, churn_timeout_seconds: cfg.tuning.churn_timeout_seconds },
     proof: cfg.proof,
     classification: {
       test_support_paths: cfg.classification.test_support_paths,

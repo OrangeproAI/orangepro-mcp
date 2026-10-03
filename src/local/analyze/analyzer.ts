@@ -1068,7 +1068,12 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 ...(notEntryPointAdjacent ? { denominator_reason_code: "not_entry_point_adjacent" } : {}),
                 ...(pythonRankingExclusion
                   ? {
-                      ranking_exclusion_code: pythonRankingExclusion.code === "python_trivial_thread_local_initializer" ? "trivial_constructor" : "enum_declaration",
+                      ranking_exclusion_code:
+                        pythonRankingExclusion.code === "python_trivial_constructor" || pythonRankingExclusion.code === "python_trivial_thread_local_initializer"
+                          ? "trivial_constructor"
+                          : pythonRankingExclusion.code === "python_data_shape_declaration"
+                            ? "data_shape_declaration"
+                            : "enum_declaration",
                       ranking_exclusion_reason_code: pythonRankingExclusion.code,
                       ranking_exclusion_reason: pythonRankingExclusion.reason
                     }

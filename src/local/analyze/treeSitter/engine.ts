@@ -126,11 +126,15 @@ export type RankingExclusionCode =
   | "trivial_constructor"
   | "enum_declaration"
   | "thin_external_delegate"
-  | "python_class_with_methods";
+  | "python_class_with_methods"
+  | "data_shape_declaration";
 
 export type PythonRankingExclusionCode =
+  /** Legacy code (pre-0.2.46 graphs); new graphs emit python_trivial_constructor. */
   | "python_trivial_thread_local_initializer"
+  | "python_trivial_constructor"
   | "python_stdlib_enum_declaration"
+  | "python_data_shape_declaration"
   | "python_thin_external_delegate";
 
 export interface TreeSitterPythonRankingExclusion {
@@ -2729,19 +2733,20 @@ function pythonImportsBefore(root: Node, stopAt: number): Map<string, PythonImpo
 function pythonBaseIsStdlib(
   base: Node,
   bindings: Map<string, PythonImportOrigin>,
-  module: "enum" | "threading",
+  module: string | readonly string[],
   allowed: Set<string>
 ): boolean {
+  const modules = typeof module === "string" ? [module] : module;
   const dotted = pythonDottedName(base);
   if (!dotted) return false;
   const parts = dotted.split(".");
   if (parts.length === 1) {
     const binding = bindings.get(parts[0]!);
-    return Boolean(binding?.kind === "named" && binding.module === module && binding.imported && allowed.has(binding.imported));
+    return Boolean(binding?.kind === "named" && modules.includes(binding.module) && binding.imported && allowed.has(binding.imported));
   }
   if (parts.length === 2 && allowed.has(parts[1]!)) {
     const binding = bindings.get(parts[0]!);
-    return Boolean(binding?.kind === "module" && binding.module === module);
+    return Boolean(binding?.kind === "module" && modules.includes(binding.module));
   }
   return false;
 }
@@ -2781,6 +2786,8 @@ function pythonParameterNames(fn: Node): string[] | null {
 function pythonLiteralOrParameter(node: Node | null, params: Set<string>): boolean {
   if (!node) return false;
   if (node.type === "identifier") return params.has(node.text);
+  // An f-string with {interpolation} computes a value; only plain literals qualify.
+  if ((node.type === "string" || node.type === "concatenated_string") && node.descendantsOfType("interpolation").length > 0) return false;
   return new Set(["none", "true", "false", "integer", "float", "string", "concatenated_string"]).has(node.type);
 }
 
@@ -2790,10 +2797,17 @@ function pythonDocstringStatement(statement: Node): boolean {
   return expression?.type === "string" || expression?.type === "concatenated_string";
 }
 
-function pythonSuperInitStatement(statement: Node): boolean {
+function pythonSuperInitStatement(statement: Node, params: Set<string> = new Set()): boolean {
   if (statement.type !== "expression_statement") return false;
   const call = namedChildren(statement)[0];
-  if (call?.type !== "call" || pythonCallArguments(call).length !== 0) return false;
+  if (call?.type !== "call") return false;
+  // super().__init__(...) may only FORWARD this constructor's own parameters or
+  // literals (positionally or by keyword). Any computed argument is behavior.
+  const forwardsOnly = pythonCallArguments(call).every((arg) =>
+    arg.type === "keyword_argument"
+      ? pythonLiteralOrParameter(arg.childForFieldName("value"), params)
+      : pythonLiteralOrParameter(arg, params));
+  if (!forwardsOnly) return false;
   const fn = call.childForFieldName("function");
   if (fn?.type !== "attribute" || fn.childForFieldName("attribute")?.text !== "__init__") return false;
   const receiver = fn.childForFieldName("object");
@@ -2810,7 +2824,7 @@ function pythonTrivialSelfAssignment(statement: Node, params: Set<string>): bool
   return pythonLiteralOrParameter(assignment.childForFieldName("right"), params);
 }
 
-function pythonTrivialThreadLocalInitializer(classNode: Node): string | null {
+function pythonTrivialInitializer(classNode: Node): string | null {
   const body = classNode.childForFieldName("body");
   if (!body) return null;
   const methods = namedChildren(body).flatMap((statement) => {
@@ -2831,37 +2845,92 @@ function pythonTrivialThreadLocalInitializer(classNode: Node): string | null {
   for (let i = 0; i < statements.length; i++) {
     const statement = statements[i]!;
     if (i === 0 && pythonDocstringStatement(statement)) continue;
-    if (statement.type === "pass_statement" || pythonSuperInitStatement(statement) || pythonTrivialSelfAssignment(statement, params)) continue;
+    if (statement.type === "pass_statement" || pythonSuperInitStatement(statement, params) || pythonTrivialSelfAssignment(statement, params)) continue;
     return null;
   }
   return pythonQualifiedFunctionName(fn) ?? null;
 }
 
+const PYTHON_TYPING_SHAPES = new Set(["TypedDict", "NamedTuple", "Protocol"]);
+const PYTHON_TYPING_MODULES = ["typing", "typing_extensions"] as const;
+const PYTHON_PYDANTIC_SHAPES = new Set(["BaseModel"]);
+const PYTHON_PYDANTIC_MODULES = ["pydantic", "pydantic.main", "pydantic.v1"] as const;
+const PYTHON_DATACLASS_MODULES = ["dataclasses", "pydantic.dataclasses"] as const;
+
+/** `@dataclass`, `@dataclass(...)`, `@dataclasses.dataclass(...)` (stdlib or pydantic's drop-in). */
+function pythonIsStdlibDataclassDecorator(decorator: Node, bindings: Map<string, PythonImportOrigin>): boolean {
+  let expression: Node | null = namedChildren(decorator)[0] ?? null;
+  if (expression?.type === "call") expression = expression.childForFieldName("function");
+  return Boolean(expression && pythonBaseIsStdlib(expression, bindings, PYTHON_DATACLASS_MODULES, new Set(["dataclass"])));
+}
+
+/** Class body holds only field declarations: annotations (with or without a default),
+ *  plain attribute assignments, a docstring, or `pass`. No methods, no nested classes,
+ *  no statements that run logic. */
+function pythonFieldOnlyBody(classNode: Node): boolean {
+  const body = classNode.childForFieldName("body");
+  if (!body) return false;
+  const statements = blockStatements(body);
+  if (statements.length === 0) return false;
+  return statements.every((statement, index) => {
+    if (statement.type === "pass_statement") return true;
+    if (index === 0 && pythonDocstringStatement(statement)) return true;
+    if (statement.type !== "expression_statement") return false;
+    const inner = namedChildren(statement);
+    // A lambda in a field value (e.g. custom JSON encoders) is behavior, not data.
+    return inner.length === 1 && inner[0]!.type === "assignment" && inner[0]!.childForFieldName("left")?.type === "identifier"
+      && inner[0]!.descendantsOfType("lambda").length === 0;
+  });
+}
+
 function extractPythonDeclarationRankingExclusions(root: Node): TreeSitterPythonRankingExclusion[] {
   const out: TreeSitterPythonRankingExclusion[] = [];
   for (const classNode of root.descendantsOfType("class_definition")) {
-    if (!classNode || hasPythonFunctionAncestor(classNode) || classNode.parent?.type !== "module") continue;
+    if (!classNode || hasPythonFunctionAncestor(classNode)) continue;
+    // Module-level classes only (decorated or not): nested-class symbol names are
+    // not guaranteed to line up with the analyzer's symbol table.
+    const decorated = classNode.parent?.type === "decorated_definition" ? classNode.parent : null;
+    if ((decorated ?? classNode).parent?.type !== "module") continue;
     const name = classNode.childForFieldName("name")?.text;
+    if (!name) continue;
     const bases = classNode.childForFieldName("superclasses");
-    if (!name || !bases) continue;
-    const bindings = pythonImportsBefore(root, classNode.startIndex);
-    const baseNodes = namedChildren(bases);
-    if (baseNodes.some((base) => pythonBaseIsStdlib(base, bindings, "enum", PYTHON_ENUM_TYPES)) && !pythonClassHasMethod(classNode)) {
+    const bindings = pythonImportsBefore(root, (decorated ?? classNode).startIndex);
+    const baseNodes = bases ? namedChildren(bases) : [];
+    const hasMethod = pythonClassHasMethod(classNode);
+    if (baseNodes.some((base) => pythonBaseIsStdlib(base, bindings, "enum", PYTHON_ENUM_TYPES)) && !hasMethod) {
       out.push({
         symbol: name,
         code: "python_stdlib_enum_declaration",
         reason: "Standard-library enum declaration without methods — retained in the graph but excluded from priority ranking."
       });
+      continue;
     }
-    if (baseNodes.some((base) => pythonBaseIsStdlib(base, bindings, "threading", new Set(["local"])))) {
-      const initializer = pythonTrivialThreadLocalInitializer(classNode);
-      if (initializer) {
+    // Data-shape declarations: a TypedDict/NamedTuple/Protocol, a pydantic model, or a
+    // stdlib @dataclass whose body only declares fields. No method ⇒ no behavior to test.
+    if (!hasMethod && pythonFieldOnlyBody(classNode)) {
+      const typedShape = baseNodes.some((base) =>
+        pythonBaseIsStdlib(base, bindings, PYTHON_TYPING_MODULES, PYTHON_TYPING_SHAPES) ||
+        pythonBaseIsStdlib(base, bindings, PYTHON_PYDANTIC_MODULES, PYTHON_PYDANTIC_SHAPES));
+      const dataclassShape = Boolean(decorated) && namedChildren(decorated!).some((child) =>
+        child.type === "decorator" && pythonIsStdlibDataclassDecorator(child, bindings));
+      if (typedShape || dataclassShape) {
         out.push({
-          symbol: initializer,
-          code: "python_trivial_thread_local_initializer",
-          reason: "Trivial threading.local initializer — retained in the graph but excluded from priority ranking."
+          symbol: name,
+          code: "python_data_shape_declaration",
+          reason: "Data-shape declaration (fields only, no methods) — retained in the graph but excluded from priority ranking."
         });
+        continue;
       }
+    }
+    // Trivial constructor on ANY class: the body only stores parameters/literals on
+    // self, forwards parameters/literals to super().__init__, or passes.
+    const initializer = pythonTrivialInitializer(classNode);
+    if (initializer) {
+      out.push({
+        symbol: initializer,
+        code: "python_trivial_constructor",
+        reason: "Trivial constructor (stores or forwards its parameters only) — retained in the graph but excluded from priority ranking."
+      });
     }
   }
   return out;

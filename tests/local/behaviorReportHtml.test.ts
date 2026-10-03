@@ -382,7 +382,7 @@ describe("renderBehaviorReport", () => {
       const html = renderBehaviorReport(data);
 
       expect(data.configDisclosure.proof).toEqual({ python_runner: "uv run python -m pytest -p no:warnings", attempt_limit: 17, baseline_green_target: 4 });
-      expect(data.configDisclosure.tuning).toEqual({ churn_window_days: 90 });
+      expect(data.configDisclosure.tuning).toEqual({ churn_window_days: 90, churn_max_commits: 20_000, churn_timeout_seconds: 300 });
       expect(html).toContain("Churn window:");
       expect(html).toContain("90 days");
       expect(html).toContain("Python proof: runner");

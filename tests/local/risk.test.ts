@@ -62,7 +62,7 @@ function testCase(id: string): LocalGraph["nodes"][number] {
   });
 }
 
-function edge(from: string, to: string, relationship_type: "CALLS" | "IMPORTS" | "TESTED_BY" | "COVERS"): LocalGraph["edges"][number] {
+function edge(from: string, to: string, relationship_type: "CALLS" | "IMPORTS" | "TESTED_BY" | "COVERS" | "IMPLEMENTED_IN"): LocalGraph["edges"][number] {
   return makeEdge({
     from_external_id: from,
     to_external_id: to,
@@ -419,6 +419,31 @@ describe("risk report trust safeguards", () => {
     expect(gap.reasons.join(" ")).toContain("structurally disconnected, score dampened");
   });
 
+  it("does not dampen framework-invoked entries (registered CLI command, Endpoint handler) as disconnected", () => {
+    const g = graph("/definitely/not/a/git/repo");
+    const cli = { ...symbol("sym:src/commands/report/send.ts#ReportSend.run", "ReportSend.run", "src/commands/report/send.ts"), properties: { file: "src/commands/report/send.ts", cli_entrypoint: true } };
+    const handler = symbol("sym:app/routes/health.py#health", "health", "app/routes/health.py");
+    const endpoint = makeNode({
+      kind: "Endpoint",
+      external_id: "endpoint:get-health",
+      title: "GET /health",
+      properties: {},
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance: { source_scope_id: "src", source_ref: "app/routes/health.py" }
+    });
+    const orphan = symbol("sym:src/util/old.ts#unusedHelper", "unusedHelper", "src/util/old.ts");
+    g.nodes = [cli, handler, endpoint, orphan];
+    g.edges = [edge(endpoint.external_id, handler.external_id, "IMPLEMENTED_IN")];
+    const ranked = rankRiskGaps(g, { limit: 10 });
+    const dampened = (id: string): boolean => (ranked.find((r) => r.id === id)?.reasons ?? []).some((r) => r.includes("structurally disconnected"));
+    expect(dampened(cli.external_id)).toBe(false);
+    expect(dampened(handler.external_id)).toBe(false);
+    // Dead-code shaped symbols (nothing calls them, they call nothing, no framework binding) still are.
+    expect(dampened(orphan.external_id)).toBe(true);
+  });
+
   it("keeps capture payment operations payment-sensitive", () => {
     const g = graph("/definitely/not/a/git/repo");
     g.nodes = [symbol("sym:src/payments/capture.ts#capturePayment", "capturePayment", "src/payments/capture.ts")];
@@ -592,7 +617,7 @@ describe("per-repo risk config (riskConfig.ts) — classification + overrides wi
     const a = loadRiskConfig("");
     const b = loadRiskConfig("/nonexistent/repo");
     expect(a.hash).toBe(b.hash);
-    expect(a.config.tuning).toEqual({ irreversibility_floor: true, silence_multiplier: true, churn_window_days: 180 });
+    expect(a.config.tuning).toEqual({ irreversibility_floor: true, silence_multiplier: true, churn_window_days: 180, churn_max_commits: 20_000, churn_timeout_seconds: 300 });
   });
 
   it("an override WITHOUT a reason is ignored with a warning (a tuned report must never pass as clean)", () => {
@@ -720,7 +745,16 @@ describe("round three — reviewer reproductions as fixtures", () => {
     expect(custom.config.proof).toEqual({ python_runner: "uv run python -m pytest -p no:warnings", attempt_limit: 17, baseline_green_target: 4 });
     expect(custom.hash).not.toBe(loadRiskConfig(autoRoot).hash);
     expect(configDisclosureFor(graph(customRoot), customRoot).proof).toEqual(custom.config.proof);
-    expect(configDisclosureFor(graph(customRoot), customRoot).tuning).toEqual({ churn_window_days: 90 });
+    expect(configDisclosureFor(graph(customRoot), customRoot).tuning).toEqual({ churn_window_days: 90, churn_max_commits: 20_000, churn_timeout_seconds: 300 });
+  });
+
+  it("churn history bounds are config levers: bounded, hashed, and disclosed", () => {
+    const root = repoWith(JSON.stringify({ tuning: { churn_max_commits: 50, churn_timeout_seconds: 9_999 } }));
+    const loaded = loadRiskConfig(root);
+    expect(loaded.config.tuning.churn_max_commits).toBe(100);
+    expect(loaded.config.tuning.churn_timeout_seconds).toBe(1_800);
+    expect(loaded.hash).not.toBe(loadRiskConfig(repoWith("{}")).hash);
+    expect(configDisclosureFor(graph(root), root).tuning).toEqual({ churn_window_days: 180, churn_max_commits: 100, churn_timeout_seconds: 1_800 });
   });
 
   it("#2 a suppressed symbol is DISCLOSED with its reason, not silently dropped", () => {
@@ -750,6 +784,33 @@ describe("round three — reviewer reproductions as fixtures", () => {
     expect(d.classification.test_support_paths).toEqual(["internal/testutil/**"]);
     expect(d.classification.destructive_sinks).toEqual(["Purge*"]);
     expect(d.sensitivityIgnored).toEqual(["log.CapturePanic"]);
+  });
+
+  it("NEGATIVE: browser Web Storage removeItem is not a destructive sink; a persistence-store remove still is", () => {
+    const g = graph();
+    const withExt = (n: LocalGraph["nodes"][number], external_callees: string[]) => ({ ...n, properties: { ...n.properties, external_callees } });
+    const ui = withExt(symbol("sym:web/src/session.ts#clearDraft", "clearDraft", "web/src/session.ts"), ["sessionStorage.removeItem"]);
+    const uiWin = withExt(symbol("sym:web/src/prefs.ts#resetPrefs", "resetPrefs", "web/src/prefs.ts"), ["window.localStorage.removeItem"]);
+    const store = withExt(symbol("sym:svc/store/gc.ts#purgeDraft", "purgeDraft", "svc/store/gc.ts"), ["this.draftStorage.removeItem"]);
+    g.nodes = [ui, uiWin, store];
+    const all = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const sink = (id: string): string | undefined => all.find((r) => r.id === id)?.sink_callee;
+    expect(sink(ui.external_id)).toBeUndefined();
+    expect(sink(uiWin.external_id)).toBeUndefined();
+    expect(sink(store.external_id)).toBe("this.draftStorage.removeItem");
+  });
+
+  it("R8.10 display grouping: forwarding wrappers name the symbol that owns the destructive call", () => {
+    const g = graph();
+    const owner = { ...symbol("sym:svc/repo.py#Repo.purge", "Repo.purge", "svc/repo.py"), properties: { file: "svc/repo.py", external_callees: ["self.table.delete"] } };
+    const wrapper = symbol("sym:svc/api.py#remove_item", "remove_item", "svc/api.py");
+    const outer = symbol("sym:svc/routes.py#remove_route", "remove_route", "svc/routes.py");
+    g.nodes = [owner, wrapper, outer];
+    g.edges = [edge(outer.external_id, wrapper.external_id, "CALLS"), edge(wrapper.external_id, owner.external_id, "CALLS")];
+    const all = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    for (const id of [owner.external_id, wrapper.external_id, outer.external_id]) {
+      expect(all.find((r) => r.id === id)?.sink_owner).toBe(owner.external_id);
+    }
   });
 
   it("#5 a destructive path ranked far below the top 200 still reaches the irreversible worklist (full-ranking search)", () => {

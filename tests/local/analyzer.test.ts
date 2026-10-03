@@ -1162,6 +1162,102 @@ describe("analyzeRepo", () => {
     expect(sinks("clear", "src/commands/reexport.py")).toBeUndefined();
   });
 
+  it("excludes trivial constructors on ANY class and fields-only data shapes, never behavior", async () => {
+    await preloadTreeSitter(["python"]);
+    writeFileSync(
+      join(dir, "src", "shapes.py"),
+      [
+        "from typing import TypedDict, NamedTuple",
+        "import typing_extensions as tx",
+        "from dataclasses import dataclass",
+        "import dataclasses",
+        "from pydantic import BaseModel, field_validator",
+        "class Base:",
+        "    pass",
+        "class PlainHolder:",
+        "    def __init__(self, a, b=2):",
+        "        self.a = a",
+        "        self.b = b",
+        "class ForwardingError(Base):",
+        "    def __init__(self, status, message):",
+        "        super().__init__(status=status, message=message)",
+        "class EmptyInit(Base):",
+        "    def __init__(self):",
+        "        pass",
+        "class Computing:",
+        "    def __init__(self, raw):",
+        "        self.value = parse(raw)",
+        "class Branching:",
+        "    def __init__(self, flag):",
+        "        if flag:",
+        "            self.x = 1",
+        "class ComputedSuper(Base):",
+        "    def __init__(self, raw):",
+        "        super().__init__(parse(raw))",
+        "class FormattedSuper(Base):",
+        "    def __init__(self, name):",
+        "        super().__init__(f\"failed: {name}\")",
+        "class Payload(TypedDict, total=False):",
+        "    texts: list[str]",
+        "    model: str | None",
+        "class Point(NamedTuple):",
+        "    x: int",
+        "    y: int",
+        "class Reader(tx.Protocol):",
+        "    name: str",
+        "@dataclass(frozen=True)",
+        "class Settings:",
+        "    \"\"\"settings\"\"\"",
+        "    retries: int = 3",
+        "@dataclasses.dataclass",
+        "class Row:",
+        "    key: str",
+        "class Request(BaseModel):",
+        "    user_id: str",
+        "    limit: int = 10",
+        "class ValidatedRequest(BaseModel):",
+        "    user_id: str",
+        "    @field_validator('user_id')",
+        "    def check(cls, v):",
+        "        return v",
+        "class MethodDict(TypedDict):",
+        "    a: int",
+        "    def helper(self):",
+        "        return 1",
+        "class EncodedModel(BaseModel):",
+        "    model_config = dict(json_encoders={int: lambda v: str(v)})",
+        "class NotAShape:",
+        "    a: int = 1",
+        "@my_decorator",
+        "class Decorated:",
+        "    a: int"
+      ].join("\n")
+    );
+    const fragment = analyzeRepo(dir);
+    const node = (name: string) => fragment.nodes.find((n) => n.external_id === `sym:src/shapes.py#${name}`);
+    const rank = (name: string): unknown => node(name)?.properties.ranking_exclusion_code;
+    // Trivial constructors on classes that have nothing to do with threading.local.
+    expect(rank("PlainHolder.__init__")).toBe("trivial_constructor");
+    expect(rank("ForwardingError.__init__")).toBe("trivial_constructor");
+    expect(rank("EmptyInit.__init__")).toBe("trivial_constructor");
+    expect(node("PlainHolder.__init__")?.properties.ranking_exclusion_reason_code).toBe("python_trivial_constructor");
+    // Constructors with behavior stay ranked.
+    expect(rank("Computing.__init__")).toBeUndefined();
+    expect(rank("Branching.__init__")).toBeUndefined();
+    expect(rank("ComputedSuper.__init__")).toBeUndefined();
+    expect(rank("FormattedSuper.__init__")).toBeUndefined();
+    // Fields-only data shapes.
+    for (const shape of ["Payload", "Point", "Reader", "Settings", "Row", "Request"]) {
+      expect(rank(shape), shape).toBe("data_shape_declaration");
+    }
+    // A shape with a method is behavior (its methods rank); unknown bases/decorators are not shapes.
+    expect(rank("ValidatedRequest")).toBe("python_class_with_methods");
+    expect(rank("MethodDict")).toBe("python_class_with_methods");
+    expect(rank("NotAShape")).toBeUndefined();
+    expect(rank("EncodedModel")).toBeUndefined();
+    expect(rank("Decorated")).toBeUndefined();
+  });
+
   it("persists Python ranking exclusions only from exact AST shapes", async () => {
     await preloadTreeSitter(["python"]);
     mkdirSync(join(dir, "vendor_local"), { recursive: true });
@@ -1209,7 +1305,7 @@ describe("analyzeRepo", () => {
       (node) => node.external_id === `sym:src/ranking.py#${symbol}`
     )?.properties.ranking_exclusion_reason_code;
 
-    expect(code("Holder.__init__")).toBe("python_trivial_thread_local_initializer");
+    expect(code("Holder.__init__")).toBe("python_trivial_constructor");
     expect(code("Color")).toBe("python_stdlib_enum_declaration");
     expect(code("relay")).toBe("python_thin_external_delegate");
     const rankCode = (name: string): unknown => fragment.nodes.find((node) => node.external_id === `sym:src/ranking.py#${name}`)?.properties.ranking_exclusion_code;

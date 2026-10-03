@@ -69,6 +69,11 @@ export interface ProofAttemptsFile {
   artifact_identity?: ArtifactIdentity;
   attempted: number;
   proven: number;
+  /** Why this run attempted what it did (e.g. disabled, no targets, scoped to changed files). */
+  status?: string;
+  reason?: string;
+  /** Number of uncommitted/changed files the dynamic pass was scoped to; absent = global top targets. */
+  scoped_changed_files?: number;
   attempts: ProofAttemptRecord[];
   skipped: Array<{
     target_symbol?: string;
@@ -200,6 +205,9 @@ export function proofAttemptsPath(root: string): string {
 interface AutoProveLike {
   attempted: number;
   proven: number;
+  status?: string;
+  reason?: string;
+  scoped_changed_files?: number;
   attempts: Array<{
     target_symbol: string;
     test_path: string;
@@ -250,6 +258,9 @@ export function distillProofAttempts(
     artifact_identity: meta.graph.artifact_identity,
     attempted: auto.attempted,
     proven: auto.proven,
+    ...(auto.status ? { status: auto.status } : {}),
+    ...(auto.reason ? { reason: redactSecrets(auto.reason) } : {}),
+    ...(auto.scoped_changed_files !== undefined ? { scoped_changed_files: auto.scoped_changed_files } : {}),
     attempts: auto.attempts.filter((a) => !a.deduped).map((a) => ({
       target_symbol: a.target_symbol,
       test_path: a.test_path || undefined,

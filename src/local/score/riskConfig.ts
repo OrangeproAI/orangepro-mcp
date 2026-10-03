@@ -40,6 +40,10 @@ export interface RiskConfig {
     silence_multiplier: boolean;
     /** Recent-history window used by bounded repository-level churn acquisition. */
     churn_window_days: number;
+    /** Safety bounds for that acquisition. Defaults are sized so an active monorepo's
+     *  full window completes; hitting either bound marks churn "partial" (disclosed). */
+    churn_max_commits: number;
+    churn_timeout_seconds: number;
   };
   /** Shared proof defaults. Consumers decide how to apply them. */
   proof: {
@@ -53,7 +57,7 @@ export interface RiskConfig {
 
 export const DEFAULT_RISK_CONFIG: RiskConfig = {
   classification: { test_support_paths: [], scheduled_entry_paths: [], destructive_sinks: [], sensitivity_ignore: [], rank_exclude_paths: [] },
-  tuning: { irreversibility_floor: true, silence_multiplier: true, churn_window_days: 180 },
+  tuning: { irreversibility_floor: true, silence_multiplier: true, churn_window_days: 180, churn_max_commits: 20_000, churn_timeout_seconds: 300 },
   proof: { python_runner: "auto", attempt_limit: 20, baseline_green_target: 5 },
   overrides: []
 };
@@ -99,6 +103,8 @@ function applyFile(cfg: RiskConfig, file: string, warnings: string[], label: str
     if (typeof tun.irreversibility_floor === "boolean") cfg.tuning.irreversibility_floor = tun.irreversibility_floor;
     if (typeof tun.silence_multiplier === "boolean") cfg.tuning.silence_multiplier = tun.silence_multiplier;
     if (tun.churn_window_days !== undefined) cfg.tuning.churn_window_days = boundedInt(tun.churn_window_days, cfg.tuning.churn_window_days, 1, 3_650);
+    if (tun.churn_max_commits !== undefined) cfg.tuning.churn_max_commits = boundedInt(tun.churn_max_commits, cfg.tuning.churn_max_commits, 100, 200_000);
+    if (tun.churn_timeout_seconds !== undefined) cfg.tuning.churn_timeout_seconds = boundedInt(tun.churn_timeout_seconds, cfg.tuning.churn_timeout_seconds, 10, 1_800);
     const proof = (raw.proof ?? {}) as Record<string, unknown>;
     if (typeof proof.python_runner === "string" && proof.python_runner.trim() !== "") {
       cfg.proof.python_runner = proof.python_runner.trim();

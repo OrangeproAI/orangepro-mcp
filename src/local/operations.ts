@@ -2266,7 +2266,8 @@ export async function opStart(
   );
   let autoProveResult: AutoProveResult;
   try {
-    autoProveResult = await autoProve(
+    const scopedFiles = autoProveChangedScope(loadGraph(workspacePaths(root).graphPath), changed, opts.baseRef);
+    const runAutoProve = (changedFiles: string[] | undefined): Promise<AutoProveResult> => autoProve(
       root,
       {
         autoLimit: opts.proofLimit ?? opts.autoLimit,
@@ -2276,10 +2277,20 @@ export async function opStart(
         provider: providerOpts.provider,
         model: providerOpts.model,
         prompt_version: opts.promptVersion,
-        changedFiles: autoProveChangedScope(loadGraph(workspacePaths(root).graphPath), changed, opts.baseRef)
+        changedFiles
       },
       { ...providerDeps, proveLoop: opProveLoop }
     );
+    autoProveResult = await runAutoProve(scopedFiles);
+    if (scopedFiles && autoProveResult.attempted === 0 && !opts.baseRef && !opts.noAuto) {
+      // An uncommitted working tree implicitly scoped the pass, but nothing in that
+      // scope was provable. Fall back to the global top targets instead of reporting
+      // "not attempted" for a reason the user cannot see. --base keeps strict scoping.
+      warnings.push(`auto-prove: none of the ${scopedFiles.length} uncommitted changed file(s) had a provable target with a linked test; ran the global top targets instead.`);
+      autoProveResult = await runAutoProve(undefined);
+    } else if (scopedFiles) {
+      autoProveResult = { ...autoProveResult, scoped_changed_files: scopedFiles.length };
+    }
     for (const skip of autoProveResult.skipped) warnings.push(`auto-prove skipped ${skip.target_symbol ?? skip.title}: ${skip.reason}`);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -2531,6 +2542,9 @@ export async function opStart(
     const dynForReport: DynamicProofReportInput = {
       attempted: autoProveResult.attempted,
       proven: autoProveResult.proven,
+      status: autoProveResult.status,
+      reason: autoProveResult.reason,
+      ...(autoProveResult.scoped_changed_files !== undefined ? { scopedChangedFiles: autoProveResult.scoped_changed_files } : {}),
       needsSetup: autoProveResult.needs_setup
         .filter((a) => !a.deduped)
         .map((a) => ({ category: a.category, reason: a.reason }))

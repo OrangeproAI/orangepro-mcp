@@ -1064,13 +1064,13 @@ renderRisks();
   const P=C.proof||{};
   const T=C.tuning||{};
   const clsSet=["test_support_paths","scheduled_entry_paths","destructive_sinks","sensitivity_ignore"].filter(k=>(K[k]||[]).length>0);
-  const tuned=C.overridesActive>0||(C.rankExcludePaths||[]).length>0||!C.floor||!C.silence||clsSet.length>0||(T.churn_window_days??180)!==180||P.python_runner!=="auto"||P.attempt_limit!==20||P.baseline_green_target!==5;
+  const tuned=C.overridesActive>0||(C.rankExcludePaths||[]).length>0||!C.floor||!C.silence||clsSet.length>0||(T.churn_window_days??180)!==180||(T.churn_max_commits??20000)!==20000||(T.churn_timeout_seconds??300)!==300||P.python_runner!=="auto"||P.attempt_limit!==20||P.baseline_green_target!==5;
   const bits=["config <b>"+esc(C.hash)+"</b>","overrides active <b>"+C.overridesActive+"</b>","suppressed <b>"+(C.suppressed||[]).length+"</b>"];
   if((C.rankExcludePaths||[]).length)bits.push("ranking excludes <b>"+esc(C.rankExcludePaths.join(", "))+"</b>");
   if(!C.floor)bits.push("<b>irreversibility floor OFF</b>");
   if(!C.silence)bits.push("<b>silence multiplier OFF</b>");
   let html="<div>"+bits.join(" · ")+"</div>";
-  html+='<span class="cfg-row">Churn window: <b>'+esc(String(T.churn_window_days??180))+' days</b></span>';
+  html+='<span class="cfg-row">Churn window: <b>'+esc(String(T.churn_window_days??180))+' days</b> · history bound <b>'+esc(String(T.churn_max_commits??20000))+' commits / '+esc(String(T.churn_timeout_seconds??300))+' s</b></span>';
   html+='<span class="cfg-row">Python proof: runner <b>'+esc(P.python_runner||"auto")+'</b> · attempt limit <b>'+esc(String(P.attempt_limit??20))+'</b> · green baseline target <b>'+esc(String(P.baseline_green_target??5))+'</b></span>';
   clsSet.forEach(k=>{html+='<span class="cfg-row">'+esc(k)+': <b>'+esc(K[k].join(", "))+'</b></span>';});
   if((C.sensitivityIgnored||[]).length)html+='<span class="cfg-row">sensitivity ignored by config (score changed): <b>'+esc(C.sensitivityIgnored.join(", "))+'</b></span>';
@@ -1090,7 +1090,7 @@ renderRisks();
     return \`<div class="wl-row" data-path="\${esc(path).replace(/"/g,'&quot;')}" title="\${inTop?'in the ranked list below — click to jump':'ranked, but below the top-20 cut'}"><span class="wl-path">\${esc(path)}</span><span class="wl-meta">\${esc(meta)}</span></div>\`;
   };
   const cf=(W.changeFrontier||[]).map(r=>row(r.path,"changes "+(r.probability>=7?"a lot":r.probability>=4?"often":"some"))).join("")||'<div class="wl-empty">nothing changing fast and unproven</div>';
-  const ir=(W.irreversible||[]).map(r=>row(r.path,"→ "+(r.sink||"").split(".").pop())).join("")||'<div class="wl-empty">no unproven path reaches a delete</div>';
+  const ir=(W.irreversible||[]).map(r=>row(r.path,"→ "+(r.sink||"").split(".").pop()+(r.sameSinkAs?" · same delete as "+r.sameSinkAs:""))).join("")||'<div class="wl-empty">no unproven path reaches a delete</div>';
   host.innerHTML=\`<div class="wl-grid">
     <div class="wl-card"><p class="wl-title wl-change">Changing fast · unproven</p><p class="wl-sub">Where the code moves most with nothing proving it. The place a bug is most likely to have just arrived.</p>\${cf}</div>
     <div class="wl-card"><p class="wl-title wl-irrev">Can destroy data · unproven</p><p class="wl-sub">Paths that reach a delete or purge with nothing proving they do the right thing. Rarely changing — which is why nobody looks.</p>\${ir}</div>

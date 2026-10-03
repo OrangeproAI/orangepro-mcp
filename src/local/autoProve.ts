@@ -501,6 +501,8 @@ export interface AutoProveResult {
   status: "proven-run" | "ran-no-proof" | "no-targets" | "skipped-no-key" | "disabled";
   /** Human guidance for skipped/disabled/no-target runs (e.g. the no-key message). */
   reason?: string;
+  /** Set by start when the pass was scoped to changed files (diagnostic only). */
+  scoped_changed_files?: number;
   attempted: number;
   proven: number;
   needs_setup: AutoProveAttempt[];

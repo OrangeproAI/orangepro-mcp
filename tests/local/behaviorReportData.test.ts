@@ -508,6 +508,14 @@ describe("buildBehaviorReportData — 0-Dynamically-Proven guidance names the do
     expect(data.summary.candidate).toBe(1);
   });
 
+  it("none attempted names WHY: disabled, scoped to changed files, or no linked targets", () => {
+    const body = (dyn: DynamicProofReportInput): string =>
+      buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api", dynamicProof: dyn }).proofGuidance.body;
+    expect(body({ attempted: 0, proven: 0, needsSetup: [], status: "disabled" })).toContain("--no-auto");
+    expect(body({ attempted: 0, proven: 0, needsSetup: [], status: "no-targets", scopedChangedFiles: 3 })).toContain("scoped to 3 changed files");
+    expect(body({ attempted: 0, proven: 0, needsSetup: [], status: "no-targets" })).toContain("No provable target with a linked existing test");
+  });
+
   it("dominantBlockReason tallies the most common category", () => {
     expect(dominantBlockReason([{ category: "module_not_found" }, { category: "engine_mismatch" }, { category: "module_not_found" }])).toEqual({
       label: "a missing module or dependency in the sandbox",

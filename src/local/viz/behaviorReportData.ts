@@ -86,14 +86,14 @@ export interface BehaviorReportData {
   /** Two views of one ranking: what is changing fastest with no proof, and what can destroy data with no proof. */
   worklists: {
     changeFrontier: Array<{ path: string; file: string; score: number; probability: number }>;
-    irreversible: Array<{ path: string; file: string; score: number; sink: string }>;
+    irreversible: Array<{ path: string; file: string; score: number; sink: string; sameSinkAs?: string }>;
   };
   /** What the per-repo config did to this ranking — always shown, so a tuned report never passes as clean. */
   configDisclosure: {
     hash: string; warnings: string[]; overridesActive: number;
     suppressed: Array<{ symbol: string; reason: string }>;
     rankExcludePaths: string[]; floor: boolean; silence: boolean;
-    tuning: { churn_window_days: number };
+    tuning: { churn_window_days: number; churn_max_commits: number; churn_timeout_seconds: number };
     proof: { python_runner: string; attempt_limit: number; baseline_green_target: number };
     classification: { test_support_paths: string[]; scheduled_entry_paths: string[]; destructive_sinks: string[]; sensitivity_ignore: string[] };
     sensitivityIgnored: string[];
@@ -183,6 +183,10 @@ export interface DynamicProofReportInput {
   proven: number;
   /** needs_setup attempts with their R-1 category + short redacted reason (for dominant-block naming). */
   needsSetup: Array<{ category?: string; reason?: string }>;
+  /** Why the pass attempted nothing (disabled, no targets, scoped to changed files). */
+  status?: string;
+  reason?: string;
+  scopedChangedFiles?: number;
 }
 
 export interface BehaviorReportDataOptions {
@@ -383,10 +387,19 @@ function proofGuidance(
   // — behaviors, flows, Statically Linked signals — is unaffected; only the dynamic pass is small.
   if (dyn) {
     if (dyn.attempted === 0) {
+      const why = dyn.status === "disabled"
+        ? " Auto-prove was disabled for this run (--no-auto)."
+        : dyn.scopedChangedFiles !== undefined
+          ? ` The pass was scoped to ${dyn.scopedChangedFiles.toLocaleString()} changed file${dyn.scopedChangedFiles === 1 ? "" : "s"} in the working tree, and none had a provable target with a linked test.`
+          : dyn.status === "no-targets"
+            ? " No provable target with a linked existing test was found."
+            : dyn.reason
+              ? ` ${dyn.reason}`
+              : "";
       return {
         state: "not_started",
         title: "0 Dynamically Proven — dynamic proof was not attempted",
-        body: "Dynamic proof was not attempted in this run. Static behavior mapping and Statically Linked signals are still available.",
+        body: `Dynamic proof was not attempted in this run.${why} Static behavior mapping and Statically Linked signals are still available.`,
         action: HANDOFF_ACTION
       };
     }
@@ -696,7 +709,7 @@ function displayTitle(title: string, file: string): string {
 
 /** Deterministic 1–2 line behavior context from graph facts only — no LLM.
  *  Sensitivity label mirrors deriveDataSensitivity's tiers. */
-export function riskContext(risk: RiskGap, churnWindowDays: number, churnMeta: Pick<ReturnType<typeof inspectRiskChurn>, "state" | "commitsScanned">): string {
+export function riskContext(risk: RiskGap, churnWindowDays: number, churnMeta: Pick<ReturnType<typeof inspectRiskChurn>, "state" | "commitsScanned">, sameSinkAs?: string): string {
   const sens =
     (risk.data_sensitivity ?? 1) >= 10 ? "payment/billing-sensitive"
       : (risk.data_sensitivity ?? 1) >= 9 ? "auth/session-sensitive"
@@ -735,6 +748,7 @@ export function riskContext(risk: RiskGap, churnWindowDays: number, churnMeta: P
   const seen = [
     pos + (sens ? ` on ${sens} paths` : ""),
     ...(sink ? [`reaches \`${sink}\` within two calls`] : []),
+    ...(sink && sameSinkAs ? [`same delete call as \`${sameSinkAs}\` (ranked higher)`] : []),
     ...(scheduled ? ["scheduled / queue-triggered"] : []),
     `${risk.fan_out ?? 0} downstream call${(risk.fan_out ?? 0) === 1 ? "" : "s"}`,
     churn,
@@ -1196,6 +1210,10 @@ function riskRows(risks: RiskGap[], graph: LocalGraph, churnWindowDays: number, 
   const riskIds = new Set(risks.map((r) => r.id));
   const firstRowForFile = new Map<string, string>();
   for (const r of risks) if (!firstRowForFile.has(r.file)) firstRowForFile.set(r.file, r.id);
+  // R8.10 (display only): rows that reach the SAME destructive call site through
+  // forwarding wrappers name the higher-ranked row. Order and membership unchanged.
+  const firstRowForSink = new Map<string, { id: string; title: string }>();
+  for (const r of risks) if (r.sink_owner && !firstRowForSink.has(r.sink_owner)) firstRowForSink.set(r.sink_owner, { id: r.id, title: r.title });
   // Ambiguity-qualified display: identical titles from DIFFERENT files
   // (multi-program repos: 76 x main) get their top-level dir as a prefix.
   // Purely display; single-file titles render unchanged everywhere else.
@@ -1240,7 +1258,14 @@ function riskRows(risks: RiskGap[], graph: LocalGraph, churnWindowDays: number, 
           todo: riskTodo(risk, verb, path, generatedTests)
         };
       })(),
-      context: riskContext(risk, churnWindowDays, churnMeta),
+      context: riskContext(
+        risk,
+        churnWindowDays,
+        churnMeta,
+        risk.sink_owner && firstRowForSink.get(risk.sink_owner) && firstRowForSink.get(risk.sink_owner)!.id !== risk.id
+          ? firstRowForSink.get(risk.sink_owner)!.title
+          : undefined
+      ),
       desc: risk.reasons.join(" · "),
       tags
     };
@@ -1293,7 +1318,16 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     provenIds,
     includeAssociated: true
   }).filter((r) => r.sink_callee).slice(0, 20)
-    .map((r) => ({ path: r.title, file: r.file, score: r.risk_score, sink: r.sink_callee ?? "" }));
+    .map((r, _index, rows) => {
+      const first = rows.find((x) => x.sink_owner && x.sink_owner === r.sink_owner);
+      return {
+        path: r.title,
+        file: r.file,
+        score: r.risk_score,
+        sink: r.sink_callee ?? "",
+        ...(first && first.id !== r.id ? { sameSinkAs: first.title } : {})
+      };
+    });
   const riskHealth = inspectRiskInputHealth(repoRoot);
   const codeFiles = Object.entries(graph.manifest.files).filter(([, file]) => file.kind === "code").map(([file]) => file);
   const churnMeta = inspectRiskChurn(repoRoot, codeFiles, riskHealth.churnWindow);
