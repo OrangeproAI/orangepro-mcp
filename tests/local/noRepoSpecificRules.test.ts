@@ -25,6 +25,36 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+// Mirrors the CI guard (.github/workflows/ci.yml), which rejects these names on any
+// added line under src/ or packages/, comments included. Checking whole files keeps
+// a local `npm test` from passing a change that CI will reject.
+const EVALUATION_REPO_NAMES = /litellm|mylocal|llmproviders|fastuuid/i;
+
+describe("no evaluation-repo names anywhere in shipped source", () => {
+  it("src/ and packages/ never name an evaluation repo, even in comments", () => {
+    const root = join(__dirname, "..", "..");
+    const shipped = (dir: string): string[] => {
+      try {
+        return readdirSync(dir).flatMap((name) => {
+          const full = join(dir, name);
+          if (name === "node_modules" || name === "dist") return [];
+          if (statSync(full).isDirectory()) return shipped(full);
+          return /\.(ts|mjs|js|json|html)$/.test(name) ? [full] : [];
+        });
+      } catch {
+        return [];
+      }
+    };
+    const hits: string[] = [];
+    for (const file of [...shipped(join(root, "src")), ...shipped(join(root, "packages"))]) {
+      readFileSync(file, "utf8").split("\n").forEach((line, index) => {
+        if (EVALUATION_REPO_NAMES.test(line)) hits.push(`${file.slice(root.length + 1)}:${index + 1}: ${line.trim().slice(0, 120)}`);
+      });
+    }
+    expect(hits).toEqual([]);
+  });
+});
+
 describe("no evaluation-repo-specific identifiers in rule code", () => {
   it("src/ and the proof spikes contain no evaluation-repo identifiers outside comments", () => {
     const root = join(__dirname, "..", "..");

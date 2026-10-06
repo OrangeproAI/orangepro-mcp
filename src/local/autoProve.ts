@@ -373,7 +373,7 @@ const EXISTING_LANE_MAX_WEAK_PER_SYMBOL = 3;
 // A runner that crashes without returning a result (no JSON) fails for the whole
 // project root, not for one test: test-specific problems come back as a classified
 // result. Three crashes in a row in one root stop further calls there instead of
-// walking every remaining linked target (litellm-scale repos queue 1,000+).
+// walking every remaining linked target (large polyglot repos can queue 1,000+).
 const RUNNER_CRASH_LIMIT = 3;
 const RUNNER_CRASH_RE = /did not return JSON/;
 // Out of disk space is machine-wide: every later sandbox copy fails the same way.
