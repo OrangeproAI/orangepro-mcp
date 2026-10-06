@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -422,5 +422,25 @@ describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
     // The proof still works and the outside dir is never written through the link.
     expect(verdict.status).toBe("proven");
     expect(verdict.proven).toBe(true);
+  }, TEST_TIMEOUT);
+});
+
+describe("go dynamic proof spike: failed copy cleanup (0.2.47)", () => {
+  it("removes its temp sandboxes when the module copy fails", () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "opro-go-fifo-"));
+    const privateTmp = mkdtempSync(path.join(tmpdir(), "opro-go-tmp-"));
+    try {
+      cpSync(path.join(fixtures, "method-target"), repo, { recursive: true });
+      // Node's recursive copy refuses a FIFO, which fails the copy part-way through.
+      spawnSync("mkfifo", [path.join(repo, "zz.fifo")]);
+      const run = spawnSync(process.execPath, [
+        spike, "--root", repo, "--test-run", "^TestDouble$", "--target", "parser.go", "--func", "Double", "--json"
+      ], { cwd: root, encoding: "utf8", env: { ...process.env, TMPDIR: privateTmp } });
+      expect(run.status).not.toBe(0);
+      expect(readdirSync(privateTmp).filter((name) => name.startsWith("opro-go-proof-"))).toEqual([]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(privateTmp, { recursive: true, force: true });
+    }
   }, TEST_TIMEOUT);
 });

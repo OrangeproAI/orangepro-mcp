@@ -1516,3 +1516,112 @@ describe("autoProve — v5 track wiring (opt-in, fake provider)", () => {
     expect(genBody).toContain("createOrder");
   });
 });
+
+function makeWorkspaceManyLinked(n: number): string {
+  const dir = mkdtempSync(join(tmpdir(), "autoprove-bounded-"));
+  tempDirs.push(dir);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture-app", version: "1.0.0", type: "module" }, null, 2), "utf8");
+  const names = Array.from({ length: n }, (_, i) => `createOrder${i}`);
+  writeFileSync(
+    join(dir, "orderService.ts"),
+    names.map((name, i) => `export function ${name}(id: string): string {\n  return \`order${i}-\${id}\`;\n}\n`).join(""),
+    "utf8"
+  );
+  writeFileSync(
+    join(dir, "orderService.test.ts"),
+    [
+      "import { describe, expect, it } from 'vitest';",
+      `import { ${names.join(", ")} } from './orderService';`,
+      "describe('orderService', () => {",
+      ...names.map((name, i) => `  it('${name} builds an id', () => { expect(${name}('1')).toBe('order${i}-1'); });`),
+      "});",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  opInit(dir, { clock, env: NO_ENV });
+  opAnalyze(dir, { source: dir }, { clock, env: NO_ENV });
+  return dir;
+}
+
+function setRankExcludePaths(dir: string, globs: string[]): void {
+  const path = join(dir, ".orangepro", "config.json");
+  const cfg = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+  cfg.classification = { ...(cfg.classification ?? {}), rank_exclude_paths: globs };
+  writeFileSync(path, JSON.stringify(cfg, null, 2), "utf8");
+}
+
+describe("autoProve — bounded proof lane (0.2.47)", () => {
+  it("stops calling a runner root after 3 consecutive crashes with no result", async () => {
+    const W = makeWorkspaceManyLinked(6);
+    const runner = vi.fn(() => ({ exitCode: 1, stderr: "TypeError: spike exploded", stdout: "" }));
+    const res = await autoProve(W, { existingOnly: true }, baseDeps(NO_ENV, { dynamicProofRunner: runner }));
+
+    expect(runner).toHaveBeenCalledTimes(3);
+    const crash = res.skipped.find((s) => /crashed 3 times in a row/.test(s.reason));
+    expect(crash).toBeDefined();
+    expect(crash!.reason).toMatch(/remaining linked targets? (was|were) not attempted/);
+  });
+
+  it("a returned result resets the crash count (crashes must be consecutive)", async () => {
+    const W = makeWorkspaceManyLinked(6);
+    let call = 0;
+    const runner = vi.fn(() => {
+      call++;
+      return call % 2 === 0
+        ? { exitCode: 0, stderr: "", stdout: oracle("non_killing") }
+        : { exitCode: 1, stderr: "TypeError: flaky", stdout: "" };
+    });
+    const res = await autoProve(W, { existingOnly: true }, baseDeps(NO_ENV, { dynamicProofRunner: runner }));
+
+    expect(runner.mock.calls.length).toBeGreaterThan(3);
+    expect(res.skipped.some((s) => /crashed 3 times in a row/.test(s.reason))).toBe(false);
+  });
+
+  it("stops every proof attempt, and skips generation, when the disk is full", async () => {
+    const W = makeWorkspaceManyLinked(4);
+    const runner = vi.fn(() => ({ exitCode: 1, stderr: "ENOSPC: no space left on device, mkdtemp '/tmp/opro-dynamic-proof-baseline-XXXXXX'", stdout: "" }));
+    const gen = fakeGenerate([fakeTest()]);
+    const res = await autoProve(W, {}, baseDeps(KEY_ENV, { generate: gen, dynamicProofRunner: runner }));
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(gen).not.toHaveBeenCalled();
+    expect(res.skipped.some((s) => s.title === "Disk full")).toBe(true);
+    expect(res.reason).toMatch(/disk ran out of space/);
+    expect(res.generated_files).toEqual([]);
+  });
+
+  it("never attempts targets under classification.rank_exclude_paths", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    setRankExcludePaths(W, ["orderService.ts"]);
+    const runner = vi.fn(proofRunner("proven"));
+    const res = await autoProve(W, { existingOnly: true }, baseDeps(NO_ENV, { dynamicProofRunner: runner }));
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(res.proven).toBe(0);
+    const excluded = res.skipped.find((s) => s.title === "Excluded paths");
+    expect(excluded?.reason).toMatch(/^2 linked targets are under classification\.rank_exclude_paths/);
+  });
+
+  it("without rank_exclude_paths the same targets are attempted (exclusion is config-only)", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const runner = vi.fn(proofRunner("proven"));
+    const res = await autoProve(W, { existingOnly: true }, baseDeps(NO_ENV, { dynamicProofRunner: runner }));
+
+    expect(res.proven).toBe(2);
+    expect(res.skipped.some((s) => s.title === "Excluded paths")).toBe(false);
+  });
+
+  it("opStart --no-ai never calls the generation lane even when a provider key is in the environment", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const gen = fakeGenerate([fakeTest()]);
+    const res = await opStart(
+      W,
+      { ai: false, aiFlows: false },
+      { clock, env: KEY_ENV, generate: gen, dynamicProofRunner: proofRunner("non_killing") } as never
+    );
+    expect(gen).not.toHaveBeenCalled();
+    expect(res.auto_prove.attempted).toBeGreaterThan(0);
+    expect(res.auto_prove.generated_files ?? []).toEqual([]);
+  });
+});

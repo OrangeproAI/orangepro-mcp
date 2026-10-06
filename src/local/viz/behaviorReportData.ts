@@ -731,7 +731,10 @@ export function riskContext(risk: RiskGap, churnWindowDays: number, churnMeta: P
       : "change history unavailable";
   const tier = risk.detection_tier ?? "";
   const evidence = tier === "candidate"
-    ? "no test links here (a similarly-named test exists but never calls it)"
+    // Candidate = a name-level signal only. The analyzer did not credit an asserted
+    // call; it cannot claim the test never calls the code (stored-result asserts and
+    // pytest.raises are not yet credited for Python).
+    ? "no confirmed test link (a similarly-named test exists, but no asserted call to it was recognized)"
     : tier === "associated" ? "a test calls it but nothing proves it fails when broken" : "no test links here";
   const sinkShort = sink ? sink.split(".").pop() ?? sink : "";
   // Line 1 — the consequence, in plain English, from the signals only.

@@ -1886,3 +1886,71 @@ describe("dynamic proof spike — workspace package resolution (M-3 aspect 2)", 
     }
   }, 20_000);
 });
+
+describe("dynamic proof spike: sandbox size and cleanup (0.2.47)", () => {
+  function polyglotCopy(): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "opro-spike-polyglot-"));
+    cpSync(fixtureRoot, dir, { recursive: true });
+    // Heavy non-JS directories a polyglot repo root carries: a Python env and a Rust build.
+    mkdirSync(path.join(dir, ".venv", "lib"), { recursive: true });
+    writeFileSync(path.join(dir, ".venv", "lib", "big.py"), "x = 1\n");
+    mkdirSync(path.join(dir, "native", "target", "debug"), { recursive: true });
+    writeFileSync(path.join(dir, "native", "Cargo.toml"), "[package]\nname = \"native\"\n");
+    writeFileSync(path.join(dir, "native", "target", "debug", "big.rlib"), "bin");
+    // A JS `target/` with no Cargo.toml next to it is ordinary source and must still be copied.
+    mkdirSync(path.join(dir, "src", "target"), { recursive: true });
+    writeFileSync(path.join(dir, "src", "target", "keep.ts"), "export const keep = 1;\n");
+    writeFileSync(path.join(dir, "src", "order.sandbox.test.ts"), [
+      "import { existsSync } from \"node:fs\";",
+      "import path from \"node:path\";",
+      "import { describe, expect, it } from \"vitest\";",
+      "import { OrderService } from \"./order.service\";",
+      "describe(\"sandbox contents\", () => {",
+      "  it(\"excludes heavy non-JS dirs and keeps the real result\", async () => {",
+      "    const here = path.dirname(new URL(import.meta.url).pathname);",
+      "    expect(existsSync(path.join(here, \"..\", \".venv\"))).toBe(false);",
+      "    expect(existsSync(path.join(here, \"..\", \"native\", \"target\"))).toBe(false);",
+      "    expect(existsSync(path.join(here, \"..\", \"native\", \"Cargo.toml\"))).toBe(true);",
+      "    expect(existsSync(path.join(here, \"target\", \"keep.ts\"))).toBe(true);",
+      "    const result = await new OrderService().createOrder({ total: 42 });",
+      "    expect(result).toEqual({ id: \"real-order\", total: 42, source: \"real\" });",
+      "  });",
+      "});",
+      ""
+    ].join("\n"));
+    return dir;
+  }
+
+  it("does not copy Python envs or Cargo build output into the sandbox", () => {
+    const dir = polyglotCopy();
+    try {
+      const stdout = execFileSync(process.execPath, [
+        script, "--root", dir, "--test", "src/order.sandbox.test.ts", "--target", "src/order.service.ts",
+        "--method", "createOrder", "--replacement", sentinelReturn, "--vitest-bin", vitestBin, "--runner", "vitest", "--json"
+      ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const result = JSON.parse(stdout) as { status: string; baseline: { exitCode: number } };
+      expect(result.baseline.exitCode).toBe(0);
+      expect(result.status).toBe("proven");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("removes its temp sandbox when the copy itself fails", () => {
+    const dir = polyglotCopy();
+    const privateTmp = mkdtempSync(path.join(tmpdir(), "opro-spike-tmp-"));
+    try {
+      // Node's recursive copy refuses a FIFO, which fails the copy part-way through.
+      execFileSync("mkfifo", [path.join(dir, "src", "zz.fifo")]);
+      const run = spawnSync(process.execPath, [
+        script, "--root", dir, "--test", "src/order.real.test.ts", "--target", "src/order.service.ts",
+        "--method", "createOrder", "--replacement", sentinelReturn, "--vitest-bin", vitestBin, "--runner", "vitest", "--json"
+      ], { cwd: root, encoding: "utf8", env: { ...process.env, TMPDIR: privateTmp } });
+      expect(run.status).not.toBe(0);
+      expect(readdirSync(privateTmp).filter((name) => name.startsWith("opro-dynamic-proof-"))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(privateTmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

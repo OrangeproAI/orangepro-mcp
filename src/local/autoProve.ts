@@ -18,6 +18,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { generateTests, readDeclaredDeps, unresolvedLocalImports } from "./generate/generator.js";
 import { GENERATED_DIR, runHintsFor } from "./generate/runHints.js";
 import { rankRiskGaps } from "./score/risk.js";
+import { globToRegExp, loadRiskConfig } from "./score/riskConfig.js";
 import { resolveProviderConfig } from "./localConfig.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
 import { resolveContained } from "./reprove/paths.js";
@@ -369,6 +370,14 @@ const GEN_WINDOW = 5;
 // file (every eligible symbol × every importing test) cannot starve the shared budget before
 // a provable hard-edge symbol is tried. Small K; promote to a flag if a repo needs a wider sweep.
 const EXISTING_LANE_MAX_WEAK_PER_SYMBOL = 3;
+// A runner that crashes without returning a result (no JSON) fails for the whole
+// project root, not for one test: test-specific problems come back as a classified
+// result. Three crashes in a row in one root stop further calls there instead of
+// walking every remaining linked target (litellm-scale repos queue 1,000+).
+const RUNNER_CRASH_LIMIT = 3;
+const RUNNER_CRASH_RE = /did not return JSON/;
+// Out of disk space is machine-wide: every later sandbox copy fails the same way.
+const DISK_FULL_RE = /\bENOSPC\b|no space left on device/i;
 
 const RUNNER_ROOT_MARKERS: Readonly<Record<string, readonly string[]>> = {
   typescript: ["package.json"],
@@ -1018,6 +1027,8 @@ interface ExistingLaneResult {
   nonPythonAttempted: number;
   /** Symbols the existing-tests lane already proved this run — generation skips them. */
   provenSymbols: Set<string>;
+  /** Set when a sandbox copy ran out of disk space; every later proof call is skipped. */
+  diskFull?: string;
 }
 
 /**
@@ -1056,6 +1067,13 @@ function proveExistingAssociatedTests(
   let nonPythonCountedAttempts = 0;
   const pythonPreflightGreen = new Set<string>();
   const pythonBlockedCounts = new Map<string, { count: number; block: ProjectBlock; root: string }>();
+  // classification.rank_exclude_paths removes paths from ranking; proof follows the
+  // same scope so excluded areas never cost runner calls or sandbox copies.
+  const proofExcludeRe = loadRiskConfig(sourceRoot).config.classification.rank_exclude_paths.map(globToRegExp);
+  const excludedTargets = new Set<string>();
+  const runnerCrashes = new Map<string, number>();
+  const crashBlocked = new Map<string, { language: string; root: string; skipped: number; lastError: string }>();
+  let diskFull: string | undefined;
 
   const changed = opts.changedFiles && opts.changedFiles.length > 0 ? new Set(opts.changedFiles) : null;
   const reader = fileReaderFor(sourceRoot); // R-2: source scan for the node:sqlite env profile
@@ -1073,6 +1091,11 @@ function proveExistingAssociatedTests(
     // A hard-edge pick uses the relaxed shape-only guard (mirrors the add() decision above).
     if (!(hard ? isEligibleHardExistingTarget(node) : isEligibleProvableTarget(node))) continue;
     if (changed && !changed.has(symbolFileOf(node!))) continue;
+    if (diskFull) break;
+    if (proofExcludeRe.length > 0 && proofExcludeRe.some((re) => re.test(symbolFileOf(node!)))) {
+      excludedTargets.add(symId);
+      continue;
+    }
     // Fix 1: already Proven for the CURRENT code (fingerprint match under #162) → skip. Re-closing
     // it would overstate newly-proven and append a redundant closed cert every run.
     if (alreadyProven.has(symId)) continue;
@@ -1081,6 +1104,12 @@ function proveExistingAssociatedTests(
     const targetFileRel = symbolFileOf(node!);
     const targetLanguageName = language ?? targetLanguage(symId);
     const runnerRoot = projectRoot ?? proofRunnerRoot(sourceRoot, targetFileRel, testRel);
+    const crashKey = `${targetLanguageName}\u0000${runnerRoot}`;
+    const crashBlock = crashBlocked.get(crashKey);
+    if (crashBlock) {
+      crashBlock.skipped++;
+      continue;
+    }
     // A prior candidate in this exact runner project hit a classified project-wide
     // toolchain/environment failure. Preserve the budget and explain the skip.
     const isPython = isPythonFile(targetFileRel);
@@ -1167,9 +1196,22 @@ function proveExistingAssociatedTests(
     } catch (e) {
       attempted--;
       if (!isPython) nonPythonCountedAttempts--;
-      reportProgress(`proof skipped: ${symId}: ${redactSecrets(errMsg(e))}`);
+      const message = redactSecrets(errMsg(e));
+      reportProgress(`proof skipped: ${symId}: ${message}`);
+      if (DISK_FULL_RE.test(message)) {
+        diskFull = message;
+        break;
+      }
+      if (RUNNER_CRASH_RE.test(message)) {
+        const crashes = (runnerCrashes.get(crashKey) ?? 0) + 1;
+        runnerCrashes.set(crashKey, crashes);
+        if (crashes >= RUNNER_CRASH_LIMIT) {
+          crashBlocked.set(crashKey, { language: targetLanguageName, root: runnerRoot, skipped: 0, lastError: message.slice(0, 200) });
+        }
+      }
       continue;
     }
+    runnerCrashes.delete(crashKey);
     const { classification, reason, category } = classifyProof(result, { sourceRoot, targetFileRel });
     const baselineGreen = baselineGreenOf(result);
     if (isPython) {
@@ -1222,7 +1264,28 @@ function proveExistingAssociatedTests(
     project_root: root,
     blocked_by: block.blockedBy
   }));
-  return { attempts, needsSetup, skipped, proven, attempted, nonPythonAttempted: nonPythonCountedAttempts, provenSymbols };
+  for (const block of crashBlocked.values()) {
+    skipped.push({
+      title: `${block.language} project ${block.root}`,
+      reason: `the proof runner crashed ${RUNNER_CRASH_LIMIT} times in a row without returning a result; ${block.skipped} remaining linked target${block.skipped === 1 ? " was" : "s were"} not attempted in this root. Last error: ${block.lastError}`,
+      language: block.language,
+      project_root: block.root
+    });
+  }
+  if (excludedTargets.size > 0) {
+    const n = excludedTargets.size;
+    skipped.push({
+      title: "Excluded paths",
+      reason: `${n} linked target${n === 1 ? " is" : "s are"} under classification.rank_exclude_paths and ${n === 1 ? "was" : "were"} not attempted.`
+    });
+  }
+  if (diskFull) {
+    skipped.push({
+      title: "Disk full",
+      reason: `the disk ran out of space while preparing a proof sandbox; all remaining proof attempts were stopped. Free disk space and rerun. (${diskFull.slice(0, 200)})`
+    });
+  }
+  return { attempts, needsSetup, skipped, proven, attempted, nonPythonAttempted: nonPythonCountedAttempts, provenSymbols, ...(diskFull ? { diskFull } : {}) };
 }
 
 /**
@@ -1291,12 +1354,14 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     autoLimit
   );
 
-  if (opts.existingOnly) {
+  if (opts.existingOnly || ex.diskFull) {
     const status: AutoProveResult["status"] = ex.proven > 0 ? "proven-run" : ex.attempted > 0 ? "ran-no-proof" : "no-targets";
     return {
       ran: ex.attempted > 0,
       status,
-      reason: "existing-tests-only: generation disabled.",
+      reason: ex.diskFull
+        ? "Proof stopped: the disk ran out of space while preparing a proof sandbox. Free disk space and rerun."
+        : "existing-tests-only: generation disabled.",
       attempted: ex.attempted,
       proven: ex.proven,
       needs_setup: ex.needsSetup,

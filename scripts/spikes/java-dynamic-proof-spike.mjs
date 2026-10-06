@@ -106,16 +106,22 @@ function resolveInside(root, relOrAbs) {
 function copyModuleRoot(root, label) {
   const tmpRoot = mkdtempSync(path.join(tmpdir(), `opro-java-proof-${label}-`));
   const repoRoot = path.join(tmpRoot, "module");
-  cpSync(root, repoRoot, {
-    recursive: true,
-    filter(source) {
-      const name = path.basename(source);
-      if (source !== root && lstatSync(source).isSymbolicLink()) {
-        return false;
+  try {
+    cpSync(root, repoRoot, {
+      recursive: true,
+      filter(source) {
+        const name = path.basename(source);
+        if (source !== root && lstatSync(source).isSymbolicLink()) {
+          return false;
+        }
+        return name !== "node_modules" && name !== ".git" && name !== ".orangepro" && name !== "target";
       }
-      return name !== "node_modules" && name !== ".git" && name !== ".orangepro" && name !== "target";
-    }
-  });
+    });
+  } catch (error) {
+    // A failed copy (e.g. ENOSPC) must not leave a partial sandbox behind.
+    rmSync(tmpRoot, { recursive: true, force: true });
+    throw error;
+  }
   return { tmpRoot, repoRoot };
 }
 
@@ -506,7 +512,13 @@ function main() {
   const timeoutMs = parseTimeoutMs(args.timeoutMs);
 
   const baselineCopy = copyModuleRoot(root, "baseline");
-  const mutantCopy = copyModuleRoot(root, "mutant");
+  let mutantCopy;
+  try {
+    mutantCopy = copyModuleRoot(root, "mutant");
+  } catch (error) {
+    rmSync(baselineCopy.tmpRoot, { recursive: true, force: true });
+    throw error;
+  }
   try {
     const baseline = runSurefire({
       repoRoot: baselineCopy.repoRoot,

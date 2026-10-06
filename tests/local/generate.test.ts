@@ -3840,3 +3840,53 @@ describe("generateTests — v5 planning JSON hardening", () => {
     expect(result.warnings.some((w) => /no scenario tied to the original/.test(w))).toBe(true);
   });
 });
+
+describe("generateTests — provider error text in persisted drafts (0.2.47)", () => {
+  it("keeps the provider response body out of fallback drafts and missing evidence, but in the terminal warning", async () => {
+    const symbol = makeNode({
+      kind: "CodeSymbol",
+      external_id: "sym:src/orders.py#create_order",
+      title: "create_order",
+      properties: { file: "src/orders.py", symbol_kind: "function" },
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance: provenance("src/orders.py"),
+      behavior_source: "code_export",
+      denominator_eligible: true,
+      denominator_reason: "Testable code behavior."
+    });
+    const file = makeNode({
+      kind: "File",
+      external_id: "src/orders.py",
+      title: "orders.py",
+      properties: { role: "code", language: "python", file: "src/orders.py" },
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance: provenance("src/orders.py")
+    });
+    const body = "{\"error\":{\"message\":\"You have no credits remaining.\",\"code\":\"credit_balance_exhausted\"}}";
+    const provider: ModelProvider = {
+      providerName: "fake",
+      modelName: "out-of-credits",
+      complete: async () => {
+        throw new Error(`Model provider HTTP 429: ${body}`);
+      }
+    };
+    const result = await generateTests(
+      makeGraph({ nodes: [symbol, file] }),
+      { target_ids: [symbol.external_id], limit: 2, prompt_version: "v5", manual_planning_fallback: true },
+      provider,
+      (rel) => (rel === "src/orders.py" ? "def create_order(payload):\n    return {'id': 'o_1'}\n" : null),
+      CLOCK
+    );
+
+    const persisted = JSON.stringify({ tests: result.generated_tests, missing: result.missing_evidence });
+    expect(result.generated_tests.length).toBeGreaterThan(0);
+    expect(persisted).toContain("Model provider HTTP 429 (response body omitted)");
+    expect(persisted).not.toContain("credits remaining");
+    expect(persisted).not.toContain("credit_balance_exhausted");
+    expect(result.warnings.join("\n")).toContain("credits remaining");
+  });
+});

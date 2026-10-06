@@ -646,8 +646,33 @@ function copyRuntimeAliasTarget(absTarget, dest, isFile) {
   });
 }
 
-function copyFixtureRoot(root, label, { linkNodeModules, workspaceRoot }) {
+// A failed copy (e.g. ENOSPC) must not leave a partial multi-GB sandbox behind:
+// remove this copy's temp dir before rethrowing.
+function copyFixtureRoot(root, label, options) {
   const tmpRoot = mkdtempSync(path.join(tmpdir(), `opro-dynamic-proof-${label}-`));
+  try {
+    return populateFixtureRoot(tmpRoot, root, options);
+  } catch (error) {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+// Directories that are never JS test inputs but can be very large when the analyzed
+// root is a polyglot repo: Python environments and caches, and Rust build output
+// (`target/` next to a Cargo.toml). Copying them made each sandbox several GB.
+const NON_JS_HEAVY_DIRS = new Set([".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"]);
+function isNonJsHeavyDir(source, name) {
+  if (!NON_JS_HEAVY_DIRS.has(name) && name !== "target") {
+    return false;
+  }
+  if (!lstatSync(source).isDirectory()) {
+    return false;
+  }
+  return name !== "target" || existsSync(path.join(path.dirname(source), "Cargo.toml"));
+}
+
+function populateFixtureRoot(tmpRoot, root, { linkNodeModules, workspaceRoot }) {
   const monoRoot = path.join(tmpRoot, "mono");
   // On any policy violation, mirror nothing → package lands alone at tmpRoot/mono with its
   // dangling extends / unresolved alias → baseline fails to transform/resolve → honest
@@ -728,6 +753,9 @@ function copyFixtureRoot(root, label, { linkNodeModules, workspaceRoot }) {
     filter(source) {
       const name = path.basename(source);
       if (source !== root && lstatSync(source).isSymbolicLink()) {
+        return false;
+      }
+      if (source !== root && isNonJsHeavyDir(source, name)) {
         return false;
       }
       return name !== "node_modules" && name !== ".git" && name !== ".orangepro";
@@ -2283,7 +2311,13 @@ function main() {
   const mochaBin = args.mochaBin ? path.resolve(args.mochaBin) : defaultMochaBin(root, workspaceRoot);
 
   const baselineCopy = copyFixtureRoot(root, "baseline", { linkNodeModules: args.linkNodeModules, workspaceRoot });
-  const mutantCopy = copyFixtureRoot(root, "mutant", { linkNodeModules: args.linkNodeModules, workspaceRoot });
+  let mutantCopy;
+  try {
+    mutantCopy = copyFixtureRoot(root, "mutant", { linkNodeModules: args.linkNodeModules, workspaceRoot });
+  } catch (error) {
+    rmSync(baselineCopy.tmpRoot, { recursive: true, force: true });
+    throw error;
+  }
   try {
     const baseline = runTest({ runner, repoRoot: baselineCopy.repoRoot, monoRoot: baselineCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: baselineCopy.aliases });
     mutateMethod(path.join(mutantCopy.repoRoot, targetRel), args.method, replacementBody);

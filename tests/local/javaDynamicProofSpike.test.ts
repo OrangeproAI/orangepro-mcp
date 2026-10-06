@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -296,3 +296,24 @@ describe.skipIf(!HAS_JAVA_MAVEN)("java dynamic proof spike (J-1)", () => {
     expect(seen).not.toContain("sk-test-secret-value");
   }, TEST_TIMEOUT);
 }, { concurrent: true });
+
+describe("java dynamic proof spike: failed copy cleanup (0.2.47)", () => {
+  it("removes its temp sandboxes when the module copy fails", () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "opro-java-fifo-"));
+    const privateTmp = mkdtempSync(path.join(tmpdir(), "opro-java-tmp-"));
+    try {
+      cpSync(path.join(fixtures, "proven"), repo, { recursive: true });
+      // Node's recursive copy refuses a FIFO, which fails the copy part-way through.
+      spawnSync("mkfifo", [path.join(repo, "zz.fifo")]);
+      const run = spawnSync(process.execPath, [
+        spike, "--root", repo, "--test-class", "ai.orangepro.fixture.CalculatorTest", "--test-method", "addsTwoNumbers",
+        "--target", "src/main/java/ai/orangepro/fixture/Calculator.java", "--method", "add", "--json"
+      ], { cwd: root, encoding: "utf8", env: { ...process.env, TMPDIR: privateTmp } });
+      expect(run.status).not.toBe(0);
+      expect(readdirSync(privateTmp).filter((name) => name.startsWith("opro-java-proof-"))).toEqual([]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(privateTmp, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

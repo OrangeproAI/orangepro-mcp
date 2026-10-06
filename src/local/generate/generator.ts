@@ -95,12 +95,19 @@ function testFilesForSourceFile(graph: LocalGraph, sourceFile: string): string[]
   return [...out];
 }
 
+/** `Model provider HTTP 429: {...body...}` → `Model provider HTTP 429 (response body omitted)`. */
+export function persistedProviderError(message: string): string {
+  const match = /^(Model provider HTTP \d+):/.exec(message);
+  return match ? `${match[1]} (response body omitted)` : message;
+}
+
 /**
  * Strip a Markdown code fence (and any prose around it) from a model body. Real
  * BYOK models frequently wrap the test in ```ts … ``` with a prose preamble/suffix;
  * the fenced content is the runnable code. With no fence, return the body as-is so
  * the deterministic stand-in and already-clean models are untouched.
  */
+
 export function stripCodeFence(body: string): string {
   const m = body.match(/```[a-zA-Z0-9]*\s*\n?([\s\S]*?)```/);
   return (m ? m[1] : body).trim();
@@ -2429,14 +2436,18 @@ export async function generateTests(
         });
       } catch (callErr) {
         const msg = redactSecrets(callErr instanceof Error ? callErr.message : String(callErr));
+        // The terminal warning keeps the provider's response for diagnosis. Persisted
+        // drafts and missing-evidence rows end up in shareable reports, so they carry
+        // only the status line, never the provider's response body (account/billing text).
+        const persisted = persistedProviderError(msg);
         warnings.push(`V5 planning call failed for "${gc.ctx.behavior_title}": ${msg} — no test emitted.`);
         missing.push({
           external_id: behavior.external_id,
           title: gc.ctx.behavior_title,
-          reason: `V5 planning call failed: ${msg}`,
+          reason: `V5 planning call failed: ${persisted}`,
           needed: ["a reachable model provider"]
         });
-        emitManualPlanningFallback(`V5 planning call failed: ${msg}.`);
+        emitManualPlanningFallback(`V5 planning call failed: ${persisted}.`);
         continue;
       }
       try {

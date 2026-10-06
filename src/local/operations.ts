@@ -2261,7 +2261,9 @@ export async function opStart(
   reportProgress(
     opts.noAuto
       ? "auto-prove: disabled (--no-auto)"
-      : "auto-prove: driving generate → prove on the top provable targets",
+      : opts.ai === false
+        ? "auto-prove: proving with existing tests only (--no-ai: no test generation)"
+        : "auto-prove: driving generate → prove on the top provable targets",
     { current: 6, total: 8 }
   );
   let autoProveResult: AutoProveResult;
@@ -2277,7 +2279,12 @@ export async function opStart(
         provider: providerOpts.provider,
         model: providerOpts.model,
         prompt_version: opts.promptVersion,
-        changedFiles
+        changedFiles,
+        // --no-ai means no model calls anywhere in the run. The generation lane is gated
+        // only by a key in the environment, so with a real provider configured it must
+        // honor the flag explicitly. Without a key (or with the offline deterministic
+        // provider) no model is called anyway and the released no-key path is unchanged.
+        existingOnly: opts.ai === false && generationProviderConfigured && !deterministicGeneration
       },
       { ...providerDeps, proveLoop: opProveLoop }
     );
