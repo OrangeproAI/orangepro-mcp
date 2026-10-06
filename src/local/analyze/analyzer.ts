@@ -2020,6 +2020,50 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const targetRel = resolvePythonImport(testRel, binding.module) ?? undefined;
       return { targetRel, imported: binding.imported, kind: binding.kind };
     };
+    // R12.4: the module that `fromRel` re-exports `name` from, via exactly one
+    // explicit, unaliased `from X import name` (identical repeats count once). Any
+    // other binding of that local name in the module makes it ambiguous.
+    const pythonReExportTerminal = (fromRel: string, name: string): string | null => {
+      const exportStructure = nonTsStructureByFile.get(fromRel)?.structure;
+      if (!exportStructure) return null;
+      const sameName = exportStructure.imports.filter((c) => c.local === name);
+      const exports = [...new Map(sameName.filter((c) => c.kind === "named" && c.imported === name).map((c) => [c.module, c])).values()];
+      if (exports.length !== 1 || sameName.some((c) => !(c.kind === "named" && c.imported === name))) return null;
+      const terminal = resolvePythonImport(fromRel, exports[0]!.module);
+      return terminal && terminal !== fromRel && !isNonProductFile(terminal) ? terminal : null;
+    };
+    const pythonSymbolOrReExport = (targetRel: string, name: string): string | null => {
+      if (symbolKind(targetRel, name) !== undefined) return eligiblePythonSymbol(targetRel, name);
+      const terminal = pythonReExportTerminal(targetRel, name);
+      return terminal ? eligiblePythonSymbol(terminal, name) : null;
+    };
+    // R12.3: the in-repo module file a dotted qualifier names. `from pkg import mod`
+    // (pkg does not define `mod`, and `pkg.mod` is a module) is a module binding, and
+    // `m.sub.f()` resolves `m` + `.sub` instead of looking `f` up in `m` itself.
+    // undefined = the root is not a module binding (callers keep the class path);
+    // null = a module binding whose dotted path is not an in-repo module (fail closed).
+    const pythonQualifiedModuleFile = (testRel: string, structure: TreeSitterStructure, qualifier: string): string | null | undefined => {
+      if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(qualifier)) return undefined;
+      const parts = qualifier.split(".");
+      const root = parts[0]!;
+      const matches = [...new Map(structure.imports.filter((i) => i.local === root)
+        .map((i) => [`${i.kind}|${i.module}|${i.imported ?? ""}`, i])).values()];
+      if (matches.length === 0) return undefined;
+      if (matches.length > 1) return null;
+      const binding = matches[0]!;
+      const join = (base: string, tail: string): string => (base.endsWith(".") ? `${base}${tail}` : `${base}.${tail}`);
+      let rootModule: string;
+      if (binding.kind === "module") rootModule = binding.module;
+      else {
+        if (binding.imported !== root) return undefined;
+        const packageRel = resolvePythonImport(testRel, binding.module);
+        const submodule = join(binding.module, root);
+        if (!resolvePythonImport(testRel, submodule) || (packageRel && symbolKind(packageRel, root) !== undefined)) return undefined;
+        rootModule = submodule;
+      }
+      const modulePath = parts.length > 1 ? join(rootModule, parts.slice(1).join(".")) : rootModule;
+      return resolvePythonImport(testRel, modulePath);
+    };
     const resolvePythonClassExport = (fromRel: string, targetRel: string | undefined, className: string): { targetRel: string; className: string } | null => {
       if (!targetRel || isNonProductFile(targetRel)) return null;
       if (symbolKind(targetRel, className) === "class") return { targetRel, className };
@@ -2169,7 +2213,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         if (binding === null) return null;
         if (binding) {
           if (binding.kind !== "named" || !binding.targetRel || isNonProductFile(binding.targetRel) || binding.imported !== callee) return null;
-          return eligiblePythonSymbol(binding.targetRel, callee);
+          // R12.3/R12.4 resolution serves the labelled association lanes only; the
+          // direct-assert lane keeps its 0.2.48 resolution (and precision) unchanged.
+          return associationRule ? pythonSymbolOrReExport(binding.targetRel, callee) : eligiblePythonSymbol(binding.targetRel, callee);
         }
         if (!conventionTargetRel) return null;
         if (hasWildcardImport) return null;
@@ -2177,6 +2223,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       }
       const rootQualifier = pythonQualifierRoot(qualifier);
       if (shadowed.has(rootQualifier)) return null;
+      const moduleFile = associationRule ? pythonQualifiedModuleFile(testRel, structure, qualifier) : undefined;
+      if (moduleFile === null) return null;
+      if (moduleFile) return isNonProductFile(moduleFile) ? null : pythonSymbolOrReExport(moduleFile, callee);
       const binding = pythonProofImportBinding(testRel, structure, rootQualifier);
       if (binding === null) return null;
       if (binding?.kind === "module") {
@@ -2427,6 +2476,11 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         const targetName = parts.slice(i).join(".");
         if (targetRel && !isNonProductFile(targetRel) && symbolsByFile.get(targetRel)?.has(targetName)) {
           return `sym:${targetRel}#${targetName}`;
+        }
+        // R12.4: a patch on a re-exported path suppresses the terminal function too.
+        if (targetRel && !targetName.includes(".") && !symbolsByFile.get(targetRel)?.has(targetName)) {
+          const terminal = pythonReExportTerminal(targetRel, targetName);
+          if (terminal && symbolsByFile.get(terminal)?.has(targetName)) return `sym:${terminal}#${targetName}`;
         }
       }
       return null;
@@ -2701,6 +2755,10 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                     ? "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never dynamic Proven."
                     : proof.associationRule === "raises_block"
                       ? "Exact imported call that is the only statement inside pytest.raises; this is Association only, never dynamic Proven."
+                      : proof.associationRule === "nested_assert_call"
+                        ? "Exact imported call nested inside a pytest assert condition; this is Association only, never dynamic Proven."
+                        : proof.associationRule === "raised_call_in_raises"
+                          ? "Exact imported call raised as the only statement inside pytest.raises; this is Association only, never dynamic Proven."
                       : "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
               }
             }

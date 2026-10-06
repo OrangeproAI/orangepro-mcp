@@ -1109,3 +1109,176 @@ describe("Python import bindings: identical repeated imports (R11.4, 0.2.48)", (
     expect(hardCoverEdges(root)).toEqual([]);
   });
 });
+
+describe("Python association: nested asserts, raised calls, module paths, re-exports (R12, 0.2.49)", () => {
+  const core = ["def parse(value):", "    return [value] * 2", "", "def build_error(code):", "    return ValueError(code)"].join("\n");
+  const rules = (root: string): Array<[string, unknown]> => staticAssociationDetails(root).map((e) => [e.to, e.rule]);
+
+  it("R12.1 credits a call nested in the assert condition, but not in the message or a lambda", () => {
+    const root = repo({
+      "app/core.py": core,
+      "tests/test_core.py": [
+        "from app.core import build_error, parse",
+        "",
+        "def test_nested():",
+        "    assert len(parse(2)) > 0",
+        "",
+        "def test_message_and_lambda():",
+        "    values = [1]",
+        "    assert values, str(build_error(1))",
+        "    assert all(map(lambda v: build_error(v), values))"
+      ].join("\n")
+    });
+    expect(rules(root)).toEqual([["sym:app/core.py#parse", "nested_assert_call"]]);
+  });
+
+  it("R12.2 credits `raise f(...)` as the only statement inside pytest.raises", () => {
+    const root = repo({
+      "app/core.py": core,
+      "tests/test_core.py": [
+        "import pytest",
+        "from app.core import build_error",
+        "",
+        "def test_raises():",
+        "    with pytest.raises(ValueError):",
+        "        raise build_error(1)"
+      ].join("\n")
+    });
+    expect(rules(root)).toEqual([["sym:app/core.py#build_error", "raised_call_in_raises"]]);
+  });
+
+  it("R12.3 resolves `from package import module` and dotted module paths, and fails closed on a missing path", () => {
+    const root = repo({
+      "app/__init__.py": "",
+      "app/core.py": core,
+      "tests/test_from_package.py": [
+        "from app import core",
+        "",
+        "def test_module_binding():",
+        "    result = core.parse(2)",
+        "    assert result == [2, 2]"
+      ].join("\n"),
+      "tests/test_dotted.py": [
+        "import app",
+        "",
+        "def test_dotted():",
+        "    err = app.core.build_error(1)",
+        "    assert err",
+        "",
+        "def test_missing_path():",
+        "    out = app.missing.parse(1)",
+        "    assert out"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([
+      "test:tests/test_dotted.py -> sym:app/core.py#build_error",
+      "test:tests/test_from_package.py -> sym:app/core.py#parse"
+    ]);
+  });
+
+  it("R12.4 follows one explicit re-export hop, but not an aliased or ambiguous one", () => {
+    const root = repo({
+      "pkg/__init__.py": ["from .impl import parse", "from .impl import build_error as make_error"].join("\n"),
+      "pkg/impl.py": core,
+      "dup/__init__.py": ["try:", "    from .one import parse", "except ImportError:", "    from .two import parse"].join("\n"),
+      "dup/one.py": core,
+      "dup/two.py": core,
+      "tests/test_pkg.py": [
+        "import pkg",
+        "import dup",
+        "from pkg import parse",
+        "",
+        "def test_module_reexport():",
+        "    assert pkg.parse(1) == [1, 1]",
+        "",
+        "def test_named_reexport():",
+        "    out = parse(3)",
+        "    assert out",
+        "",
+        "def test_aliased():",
+        "    assert pkg.make_error(1)",
+        "",
+        "def test_ambiguous():",
+        "    assert dup.parse(1)"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:tests/test_pkg.py -> sym:pkg/impl.py#parse"]);
+  });
+
+  it("R12.4 suppresses a link when the test patches the re-exported path", () => {
+    const root = repo({
+      "pkg/__init__.py": "from .impl import parse",
+      "pkg/impl.py": core,
+      "tests/test_pkg.py": [
+        "from unittest.mock import patch",
+        "from pkg import parse",
+        "",
+        "@patch('pkg.parse')",
+        "def test_patched(mock_parse):",
+        "    out = parse(1)",
+        "    assert out"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+});
+
+describe("R12.1 keeps the expected-vs-actual guard (0.2.49)", () => {
+  it("credits a nested call when only one side of the comparison calls, but not when both do", () => {
+    const root = repo({
+      "app/core.py": ["def parse(value):", "    return [value] * 2", "", "def expected(value):", "    return [value] * 2"].join("\n"),
+      "tests/test_one_side.py": ["from app.core import parse", "", "def test_one_side():", "    assert len(parse(2)) == 2"].join("\n"),
+      "tests/test_both_sides.py": ["from app.core import expected, parse", "", "def test_both():", "    assert sorted(parse(2)) == sorted(expected(2))"].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:tests/test_one_side.py -> sym:app/core.py#parse"]);
+  });
+});
+
+describe("R12 scope guards (0.2.49)", () => {
+  it("R12.1 skips a call on the expected side of a comparison", () => {
+    const root = repo({
+      "app/core.py": ["def parse(value):", "    return [value] * 2", "", "def rate(value):", "    return 2"].join("\n"),
+      "tests/test_core.py": [
+        "from app.core import parse, rate",
+        "",
+        "def test_oracle_side(item):",
+        "    total = compute(item)",
+        "    assert total == 10 + rate(item)",
+        "",
+        "def test_attribute_actual(meta):",
+        "    assert meta.items == list(parse(1))",
+        "",
+        "def test_literal_expected():",
+        "    assert len(parse(1)) == 2"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([["sym:app/core.py#parse", "nested_assert_call"]]);
+  });
+
+  it("keeps the direct-assert lane on its 0.2.48 resolution (no re-export hop there)", () => {
+    const root = repo({
+      "pkg/__init__.py": "from .impl import parse",
+      "pkg/impl.py": ["def parse(value):", "    return value"].join("\n"),
+      "tests/test_pkg.py": ["import pkg", "", "def test_direct():", "    assert pkg.parse(1) == 1"].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+});
+
+describe("R12.1 counts only results that reach the assert through builtin wrappers (0.2.49)", () => {
+  it("credits `list(f())` but not `cache.get(key=f(x))`", () => {
+    const root = repo({
+      "app/core.py": ["def items():", "    return [1]", "", "def cache_key(value):", "    return f'k:{value}'"].join("\n"),
+      "tests/test_core.py": [
+        "from app.core import cache_key, items",
+        "",
+        "def test_wrapped():",
+        "    assert list(items()) == [1]",
+        "",
+        "def test_argument(cache):",
+        "    assert cache.get(key=cache_key(1)) is not None"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root).map((e) => [e.to, e.rule])).toEqual([["sym:app/core.py#items", "nested_assert_call"]]);
+  });
+});

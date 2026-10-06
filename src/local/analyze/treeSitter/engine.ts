@@ -110,7 +110,11 @@ export type PythonAssociationRule =
    */
   | "stored_result_assert"
   /** R11.2: `f(...)` is the only statement inside `with pytest.raises(...)`. */
-  | "raises_block";
+  | "raises_block"
+  /** R12.1: `f(...)` anywhere inside an assert condition, e.g. `assert len(f(x)) > 0`. */
+  | "nested_assert_call"
+  /** R12.2: `raise f(...)` is the only statement inside `with pytest.raises(...)`. */
+  | "raised_call_in_raises";
 
 /** Direct in-repo bases as written on a Python class declaration. */
 export interface TreeSitterPythonClassInfo {
@@ -2587,6 +2591,17 @@ function pythonStructuralAssociationProofCalls(
     : [];
 }
 
+const PYTHON_RESULT_WRAPPERS = new Set(["len", "list", "tuple", "set", "frozenset", "dict", "sorted", "reversed", "next", "iter", "str", "bytes", "int", "float", "bool", "repr", "type", "isinstance", "any", "all", "sum", "min", "max", "abs", "round"]);
+
+const PYTHON_LITERAL_TYPES = new Set(["string", "concatenated_string", "integer", "float", "true", "false", "none", "list", "tuple", "set", "dictionary", "unary_operator"]);
+
+/** An expected-value operand: a literal (containers of literals/names allowed) or a bare name not computed in the test. */
+function pythonExpectedValueSide(node: Node, computedNames: ReadonlySet<string>): boolean {
+  if (node.type === "identifier") return !computedNames.has(node.text);
+  if (!PYTHON_LITERAL_TYPES.has(node.type)) return false;
+  return node.descendantsOfType("call").length === 0 && node.descendantsOfType("attribute").length === 0 && node.descendantsOfType("subscript").length === 0;
+}
+
 /** A bare identifier occurrence (not an attribute name or a keyword-argument name). */
 function pythonMentionsName(node: Node, name: string): boolean {
   return node.descendantsOfType("identifier").some((identifier) => {
@@ -2622,6 +2637,14 @@ function pythonStoredResultAndRaisesCalls(
     for (const name of pythonBindingNames(node)) writes.set(name, (writes.get(name) ?? 0) + 1);
   }
   const assertions = lexical.filter((node) => node.type === "assert_statement");
+  const computedNames = new Set<string>();
+  for (const node of lexical) {
+    if (node.type !== "assignment" && node.type !== "annotated_assignment") continue;
+    const value = node.childForFieldName("right");
+    if (value && (value.type === "call" || value.type === "await" || value.type === "attribute" || value.type === "subscript" || value.descendantsOfType("call").length > 0)) {
+      for (const name of pythonBindingTargetNames(node.childForFieldName("left"))) computedNames.add(name);
+    }
+  }
   const freeCall = (call: Node | null): { callee: string; qualifier?: string; via: "free" | "qualified" } | null => {
     if (!call || pythonStructuralReceiverSyntax(call)) return null;
     const parts = callParts(call, "python");
@@ -2641,6 +2664,40 @@ function pythonStoredResultAndRaisesCalls(
     const checked = assertions.some((assertion) => assertion.startIndex > node.endIndex && names.some((name) => pythonMentionsName(assertion, name)));
     if (checked) out.push({ call: parts, rule: "stored_result_assert" });
   }
+  // R12.1: any call inside the assert condition (not its message, not inside a lambda).
+  for (const assertion of assertions) {
+    const condition = namedChildren(assertion)[0];
+    if (!condition) continue;
+    // `assert f(x) == g(y)`: calls on both sides leave expected vs. actual ambiguous
+    // (one side is usually the oracle), so the whole assert is skipped, as the
+    // direct-assert lane already does.
+    if (condition.type === "comparison_operator") {
+      const operands = namedChildren(condition);
+      const sidesWithCalls = operands.filter((operand) => operand.type === "call" || operand.descendantsOfType("call").length > 0);
+      if (sidesWithCalls.length > 1) continue;
+      // The call side must be the *actual* side. It is only when the other side is an
+      // expected value: a literal, or a bare name the test did not compute from a call,
+      // attribute or subscript. `assert result[0] == f(x)` / `assert meta.v == f(x)` /
+      // `assert computed == base + f(x)` use f as the oracle and are not credited.
+      if (operands.length !== 2 || !operands.every((operand) => sidesWithCalls.includes(operand) || pythonExpectedValueSide(operand, computedNames))) continue;
+    }
+    // A nested call counts only when its result reaches the assert through builtin
+    // wrappers (`len(f(x))`, `list(f())`, `isinstance(f(), T)`). As an argument to any
+    // other call (`cache.get(key=f(x))`) it is an input to the subject, not the subject.
+    const insideLambda = (call: Node): boolean => {
+      for (let cur = call.parent; cur && cur.id !== condition.id; cur = cur.parent) {
+        if (cur.type === "lambda") return true;
+        if (cur.type === "call" && !PYTHON_RESULT_WRAPPERS.has(cur.childForFieldName("function")?.text ?? "")) return true;
+      }
+      return false;
+    };
+    const calls = [...(condition.type === "call" ? [condition] : []), ...condition.descendantsOfType("call").filter((call): call is Node => Boolean(call))];
+    for (const call of calls) {
+      if (call.type !== "call" || insideLambda(call)) continue;
+      const parts = freeCall(call);
+      if (parts) out.push({ call: parts, rule: "nested_assert_call" });
+    }
+  }
   for (const node of lexical) {
     if (node.type !== "with_statement") continue;
     const clause = namedChildren(node).find((child) => child.type === "with_clause");
@@ -2648,8 +2705,16 @@ function pythonStoredResultAndRaisesCalls(
     if (!items.some((item) => pythonIsPytestRaises(item.childForFieldName("value") ?? namedChildren(item)[0] ?? null, imports))) continue;
     const block = node.childForFieldName("body");
     const statements = block ? blockStatements(block) : [];
-    if (statements.length !== 1 || statements[0]!.type !== "expression_statement") continue;
-    const expressions = namedChildren(statements[0]!);
+    if (statements.length !== 1) continue;
+    const statement = statements[0]!;
+    if (statement.type === "raise_statement") {
+      // R12.2: `raise f(...)` (the raised value, not a `from` cause).
+      const parts = freeCall(pythonExactCall(namedChildren(statement)[0] ?? null));
+      if (parts) out.push({ call: parts, rule: "raised_call_in_raises" });
+      continue;
+    }
+    if (statement.type !== "expression_statement") continue;
+    const expressions = namedChildren(statement);
     if (expressions.length !== 1) continue;
     const parts = freeCall(pythonExactCall(expressions[0]!));
     if (parts) out.push({ call: parts, rule: "raises_block" });
