@@ -2009,8 +2009,11 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       structure: TreeSitterStructure,
       local: string
     ): { targetRel?: string; imported?: string; kind: "module" | "named" } | null | undefined => {
-      const matches = structure.imports.filter((i) => i.local === local);
-      if (matches.length === 0) return undefined;
+      const all = structure.imports.filter((i) => i.local === local);
+      if (all.length === 0) return undefined;
+      // R11.4: the same import repeated (typically inside several test functions)
+      // is one binding. Only bindings that differ in module, name or kind are ambiguous.
+      const matches = [...new Map(all.map((i) => [`${i.kind}|${i.module}|${i.imported ?? ""}`, i])).values()];
       if (matches.length > 1) return null;
       const binding = matches[0];
       if (!binding) return null;
@@ -2401,7 +2404,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       const parts = reference.split(".").filter(Boolean);
       if (parts.length < 2) return null;
       // `patch.object(ImportedClass, "method")` / `ImportedClass.method = MagicMock()`.
-      const binding = structure.imports.filter((entry) => entry.local === parts[0]);
+      // R11.4: identical repeated imports are one binding (same rule as proof targets).
+      const binding = [...new Map(structure.imports.filter((entry) => entry.local === parts[0])
+        .map((entry) => [`${entry.kind}|${entry.module}|${entry.imported ?? ""}`, entry])).values()];
       if (binding.length === 1) {
         const imported = binding[0]!;
         const targetRel = resolvePythonImport(testRel, imported.module);
@@ -2414,7 +2419,10 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       }
       // `patch("package.module.Class.method")`: find one exact in-repo module
       // prefix, then require the remaining class-method symbol to exist there.
-      for (let i = 1; i < parts.length - 1; i++) {
+      // R11.3: the last split (`patch("package.module.function")`) resolves a
+      // module-level function, so a patched free function is suppressed like a
+      // patched method instead of being silently ignored.
+      for (let i = 1; i < parts.length; i++) {
         const targetRel = uniquePythonModule(parts.slice(0, i).join("."));
         const targetName = parts.slice(i).join(".");
         if (targetRel && !isNonProductFile(targetRel) && symbolsByFile.get(targetRel)?.has(targetName)) {
@@ -2689,7 +2697,11 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 rule: proof.associationRule,
                 reason: proof.associationRule === "unique_method_name_import"
                   ? "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never dynamic Proven."
-                  : "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
+                  : proof.associationRule === "stored_result_assert"
+                    ? "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never dynamic Proven."
+                    : proof.associationRule === "raises_block"
+                      ? "Exact imported call that is the only statement inside pytest.raises; this is Association only, never dynamic Proven."
+                      : "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
               }
             }
           : undefined;

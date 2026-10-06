@@ -884,3 +884,228 @@ describe("Python hard proof", () => {
     expect(hardCoverEdges(ambiguousFallback)).toEqual([]);
   });
 });
+
+describe("Python association: stored results and pytest.raises (R11, 0.2.48)", () => {
+  const source = [
+    "def parse(value):",
+    "    if value < 0:",
+    "        raise ValueError('negative')",
+    "    return value * 2",
+    "",
+    "def split(value):",
+    "    return value, value + 1",
+    "",
+    "async def fetch(value):",
+    "    return value",
+    "",
+    "class Config:",
+    "    def __init__(self, value):",
+    "        self.value = value"
+  ].join("\n");
+  const rule = (root: string): Array<[string, unknown]> =>
+    staticAssociationDetails(root).map((e) => [e.to, e.rule]);
+
+  it("credits a call whose stored result is checked by a later assert", () => {
+    const root = repo({
+      "app/core.py": source,
+      "tests/test_core.py": [
+        "from app.core import parse",
+        "",
+        "def test_parse():",
+        "    result = parse(2)",
+        "    assert result == 4"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root)).toEqual([{
+      to: "sym:app/core.py#parse",
+      detector: "python_static_association",
+      rule: "stored_result_assert",
+      reason: "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never dynamic Proven."
+    }]);
+  });
+
+  it("credits tuple unpacking and awaited calls", () => {
+    const root = repo({
+      "app/core.py": source,
+      "tests/test_core.py": [
+        "import pytest",
+        "from app.core import fetch, split",
+        "",
+        "def test_split():",
+        "    low, high = split(1)",
+        "    assert high == 2",
+        "",
+        "@pytest.mark.asyncio",
+        "async def test_fetch():",
+        "    got = await fetch(3)",
+        "    assert got == 3"
+      ].join("\n")
+    });
+    expect(rule(root)).toEqual([
+      ["sym:app/core.py#fetch", "stored_result_assert"],
+      ["sym:app/core.py#split", "stored_result_assert"]
+    ]);
+  });
+
+  it("credits the only call inside pytest.raises, including `from pytest import raises` and mixed with-items", () => {
+    const root = repo({
+      "app/core.py": source,
+      "tests/test_core.py": [
+        "import pytest",
+        "from pytest import raises",
+        "from unittest.mock import patch",
+        "from app.core import fetch, parse",
+        "",
+        "def test_parse_rejects_negative():",
+        "    with pytest.raises(ValueError):",
+        "        parse(-1)",
+        "",
+        "async def test_fetch_raises():",
+        "    with patch('os.getcwd'), raises(RuntimeError) as err:",
+        "        await fetch(None)",
+        "    assert 'x' in str(err.value)"
+      ].join("\n")
+    });
+    expect(rule(root)).toEqual([
+      ["sym:app/core.py#fetch", "raises_block"],
+      ["sym:app/core.py#parse", "raises_block"]
+    ]);
+  });
+
+  it("does not credit results that no assert checks, names written twice, or asserts before the call", () => {
+    const root = repo({
+      "app/core.py": source,
+      "tests/test_core.py": [
+        "from unittest.mock import MagicMock",
+        "from app.core import parse, split",
+        "",
+        "def test_only_mock_checked():",
+        "    hook = MagicMock()",
+        "    result = parse(2)",
+        "    assert hook.called",
+        "",
+        "def test_rebound():",
+        "    result = parse(2)",
+        "    result = 7",
+        "    assert result == 7",
+        "",
+        "def test_assert_before():",
+        "    value = 1",
+        "    assert value",
+        "    out = split(value)",
+        "",
+        "def test_attribute_name_only():",
+        "    result = parse(2)",
+        "    other = MagicMock()",
+        "    assert other.result == 1"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("does not credit multi-statement raises blocks, constructors, local receivers, or a mocked target", () => {
+    const root = repo({
+      "app/core.py": source,
+      "tests/test_core.py": [
+        "import pytest",
+        "from unittest.mock import patch",
+        "from app.core import Config, parse, split",
+        "",
+        "def test_two_statements():",
+        "    with pytest.raises(ValueError):",
+        "        split(1)",
+        "        parse(-1)",
+        "",
+        "def test_constructor_as_data():",
+        "    cfg = Config(1)",
+        "    assert cfg.value == 1",
+        "",
+        "def test_local_receiver():",
+        "    helper = make_helper()",
+        "    out = helper.parse(2)",
+        "    assert out == 4",
+        "",
+        "@patch('app.core.parse')",
+        "def test_mocked(mock_parse):",
+        "    result = parse(2)",
+        "    assert result"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+
+  it("keeps a legacy direct-assert link unchanged when the same test also stores a result", () => {
+    const root = repo({
+      "app/core.py": source,
+      "tests/test_core.py": [
+        "from app.core import parse",
+        "",
+        "def test_parse_twice():",
+        "    assert parse(1) == 2",
+        "    result = parse(2)",
+        "    assert result == 4"
+      ].join("\n")
+    });
+    expect(staticAssociationDetails(root)).toEqual([]);
+    expect(hardCoverEdges(root)).toEqual(["test:tests/test_core.py -> sym:app/core.py#parse"]);
+  });
+});
+
+describe("Python mock suppression for patched module-level functions (R11.3, 0.2.48)", () => {
+  it("suppresses a direct-assert link when the test patches that exact function, but not when it patches a sibling", () => {
+    const root = repo({
+      "app/core.py": ["def parse(value):", "    return value * 2", "", "def audit(value):", "    return value"].join("\n"),
+      "tests/test_core.py": [
+        "from unittest.mock import patch",
+        "from app.core import parse",
+        "",
+        "@patch('app.core.parse')",
+        "def test_patched_target(mock_parse):",
+        "    assert parse(2) == 4",
+        "",
+        "@patch('app.core.audit')",
+        "def test_patched_sibling(mock_audit):",
+        "    assert parse(3) == 6"
+      ].join("\n")
+    });
+    expect(hardCoverEdgeDetails(root)).toEqual([
+      { from: "test:tests/test_core.py", to: "sym:app/core.py#parse", testName: "test_patched_sibling" }
+    ]);
+  });
+});
+
+describe("Python import bindings: identical repeated imports (R11.4, 0.2.48)", () => {
+  it("treats the same function-local import in several tests as one binding", () => {
+    const root = repo({
+      "app/core.py": ["def parse(value):", "    return value * 2"].join("\n"),
+      "tests/test_core.py": [
+        "def test_one():",
+        "    from app.core import parse",
+        "    assert parse(1) == 2",
+        "",
+        "def test_two():",
+        "    from app.core import parse",
+        "    result = parse(2)",
+        "    assert result == 4"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual(["test:tests/test_core.py -> sym:app/core.py#parse"]);
+  });
+
+  it("still refuses a local name bound to two different targets", () => {
+    const root = repo({
+      "app/core.py": ["def parse(value):", "    return value * 2"].join("\n"),
+      "app/other.py": ["def parse(value):", "    return value * 3"].join("\n"),
+      "tests/test_core.py": [
+        "def test_one():",
+        "    from app.core import parse",
+        "    assert parse(1) == 2",
+        "",
+        "def test_two():",
+        "    from app.other import parse",
+        "    assert parse(1) == 3"
+      ].join("\n")
+    });
+    expect(hardCoverEdges(root)).toEqual([]);
+  });
+});

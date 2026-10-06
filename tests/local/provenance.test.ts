@@ -56,14 +56,14 @@ describe("artifact identity", () => {
     expect(comparisonCompatibility(null, base)).toBe("provenance_incomplete");
   });
 
-  it("pins analyzer v6, targeted-mutation oracle v3, and the stable-population ORS identity", () => {
+  it("pins analyzer v7, targeted-mutation oracle v3, and the stable-population ORS identity", () => {
     const identity = buildArtifactIdentity(graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } }), inputs);
 
-    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v6");
+    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v7");
     expect(PROOF_ORACLE_VERSION).toBe("orangepro.targeted_mutation_oracle.v3");
     expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v2");
     expect(identity).toMatchObject({
-      analyzer_version: "orangepro.analyzer.v6",
+      analyzer_version: "orangepro.analyzer.v7",
       oracle_version: "orangepro.targeted_mutation_oracle.v3",
       ors_version: "orangepro.ors.stable_population.v2"
     });

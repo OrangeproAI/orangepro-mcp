@@ -103,7 +103,14 @@ export type PythonAssociationRule =
    * constrained to one imported, in-repo class owner. This is not an exact
    * constructor/type association and must retain its own detector provenance.
    */
-  | "unique_method_name_import";
+  | "unique_method_name_import"
+  /**
+   * R11.1: `name = f(...)` (or tuple unpacking), the name is written once in the
+   * test, and a later `assert` mentions it. Free/module-qualified calls only.
+   */
+  | "stored_result_assert"
+  /** R11.2: `f(...)` is the only statement inside `with pytest.raises(...)`. */
+  | "raises_block";
 
 /** Direct in-repo bases as written on a Python class declaration. */
 export interface TreeSitterPythonClassInfo {
@@ -2580,6 +2587,76 @@ function pythonStructuralAssociationProofCalls(
     : [];
 }
 
+/** A bare identifier occurrence (not an attribute name or a keyword-argument name). */
+function pythonMentionsName(node: Node, name: string): boolean {
+  return node.descendantsOfType("identifier").some((identifier) => {
+    if (!identifier || identifier.text !== name) return false;
+    const parent = identifier.parent;
+    if (parent?.type === "attribute" && parent.childForFieldName("attribute")?.id === identifier.id) return false;
+    if (parent?.type === "keyword_argument" && parent.childForFieldName("name")?.id === identifier.id) return false;
+    return true;
+  });
+}
+
+function pythonIsPytestRaises(node: Node | null, imports: TreeSitterImportBinding[]): boolean {
+  const call = node?.type === "as_pattern" ? namedChildren(node)[0] ?? null : node;
+  if (call?.type !== "call") return false;
+  const fn = pythonDottedName(call.childForFieldName("function"));
+  return fn === "pytest.raises" || pythonCanonicalImportedRef(fn, imports) === "pytest.raises";
+}
+
+/**
+ * R11.1 / R11.2: free or module-qualified calls whose outcome the test checks
+ * without wrapping the call in the assert itself. Capitalized receivers stay with
+ * the class/static lane; anything else resolves through the strict import resolver
+ * (and per-test mock suppression) in the analyzer, which fails closed.
+ */
+function pythonStoredResultAndRaisesCalls(
+  body: Node,
+  imports: TreeSitterImportBinding[]
+): Array<{ call: { callee: string; qualifier?: string; via: "free" | "qualified" }; rule: PythonAssociationRule }> {
+  const out: Array<{ call: { callee: string; qualifier?: string; via: "free" | "qualified" }; rule: PythonAssociationRule }> = [];
+  const lexical = pythonLexicalNodes(body);
+  const writes = new Map<string, number>();
+  for (const node of lexical) {
+    for (const name of pythonBindingNames(node)) writes.set(name, (writes.get(name) ?? 0) + 1);
+  }
+  const assertions = lexical.filter((node) => node.type === "assert_statement");
+  const freeCall = (call: Node | null): { callee: string; qualifier?: string; via: "free" | "qualified" } | null => {
+    if (!call || pythonStructuralReceiverSyntax(call)) return null;
+    const parts = callParts(call, "python");
+    // A capitalized callee is a constructor: building test data, not exercising a
+    // behavior. Constructors keep their existing lanes.
+    return parts && !pythonLooksLikeClassRef(parts.callee) ? parts : null;
+  };
+  for (const node of lexical) {
+    if (node.type !== "assignment") continue;
+    const target = node.childForFieldName("left");
+    const value = node.childForFieldName("right");
+    if (!target || !value || !["identifier", "pattern_list", "tuple_pattern", "list_pattern"].includes(target.type)) continue;
+    const parts = freeCall(pythonExactCall(value));
+    if (!parts) continue;
+    const names = pythonBindingTargetNames(target).filter((name) => name !== "_" && writes.get(name) === 1);
+    if (names.length === 0) continue;
+    const checked = assertions.some((assertion) => assertion.startIndex > node.endIndex && names.some((name) => pythonMentionsName(assertion, name)));
+    if (checked) out.push({ call: parts, rule: "stored_result_assert" });
+  }
+  for (const node of lexical) {
+    if (node.type !== "with_statement") continue;
+    const clause = namedChildren(node).find((child) => child.type === "with_clause");
+    const items = clause ? namedChildren(clause).filter((child) => child.type === "with_item") : [];
+    if (!items.some((item) => pythonIsPytestRaises(item.childForFieldName("value") ?? namedChildren(item)[0] ?? null, imports))) continue;
+    const block = node.childForFieldName("body");
+    const statements = block ? blockStatements(block) : [];
+    if (statements.length !== 1 || statements[0]!.type !== "expression_statement") continue;
+    const expressions = namedChildren(statements[0]!);
+    if (expressions.length !== 1) continue;
+    const parts = freeCall(pythonExactCall(expressions[0]!));
+    if (parts) out.push({ call: parts, rule: "raises_block" });
+  }
+  return out;
+}
+
 function extractPythonProofCalls(root: Node, imports: TreeSitterImportBinding[]): TreeSitterPythonProofCall[] {
   const out: TreeSitterPythonProofCall[] = [];
   const seen = new Set<string>();
@@ -2661,7 +2738,12 @@ function extractPythonProofCalls(root: Node, imports: TreeSitterImportBinding[])
       const name = functionName(node, "python");
       const body = node.childForFieldName("body");
       if (name && /^test_[A-Za-z0-9_]*$/.test(name) && body) {
-        processBlock(body, node, testClass ? `${testClass.name}::${name}` : name, localBindings(node, "python"), pythonSetupReceivers(testClass?.node ?? null));
+        const testName = testClass ? `${testClass.name}::${name}` : name;
+        const shadowed = localBindings(node, "python");
+        processBlock(body, node, testName, shadowed, pythonSetupReceivers(testClass?.node ?? null));
+        // Runs after the legacy lanes so an already-credited (test, callee) pair keeps
+        // its original provenance; `add` dedups on test + qualifier + callee.
+        for (const stored of pythonStoredResultAndRaisesCalls(body, imports)) add(testName, shadowed, stored.call, undefined, stored.rule);
       }
       if (insideFunction) return;
     }
