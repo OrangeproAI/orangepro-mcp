@@ -134,6 +134,18 @@ export function provenSymbolIds(graph: LocalGraph, ledger: Ledger): Set<string> 
   return out;
 }
 
+/**
+ * The current proof record behind each Dynamically Proven symbol, chosen exactly as
+ * buildRtm chooses it. Display only (for example, naming the test that proved it).
+ */
+export function provenLedgerRecords(graph: LocalGraph, ledger: Ledger): Map<string, Ledger["records"][number]> {
+  const out = new Map<string, Ledger["records"][number]>();
+  for (const [symbol, selected] of selectLedgerBySymbol(ledger, graph)) {
+    if (selected.proven) out.set(symbol, selected.record);
+  }
+  return out;
+}
+
 function inScope(node: GraphNode, targetSet: Set<string> | null, fileSet: Set<string> | null): boolean {
   if (!targetSet && !fileSet) return true;
   if (targetSet?.has(node.external_id)) return true;

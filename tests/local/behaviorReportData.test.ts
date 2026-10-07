@@ -641,3 +641,92 @@ describe("ranking-only exclusion disclosure (R8.6)", () => {
     expect(current.summary).toEqual(baseline.summary);
   });
 });
+
+describe("short report reads the same build as the detailed report", () => {
+  it("exposing the ranking rows changes nothing in the report data", async () => {
+    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+    const g = graph();
+    const low = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
+    low.properties = { ...low.properties, external_callees: ["this.store.deleteExpired"] };
+    g.nodes = [...g.nodes, low];
+    const plain = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    expect(build.data).toEqual(plain);
+    expect(build.topGaps.map((r) => r.title)).toEqual(plain.risks.map((r) => r.path.replace(/^[^:]+: /, "")));
+    expect(build.deleteGaps.map((r) => r.title)).toEqual(plain.worklists.irreversible.map((r) => r.path));
+    expect(build.deleteTotal).toBeGreaterThanOrEqual(build.deleteGaps.length);
+  });
+
+  it("renders counts from the data, escapes names, and stays offline", async () => {
+    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
+    const g = graph();
+    const evil = codeSymbol("sym:src/store/gc.ts#Gc.sweep<img src=x>", "Gc.sweep<img src=x>", "src/store/gc.ts");
+    evil.properties = { ...evil.properties, external_callees: ["this.store.deleteExpired"], start_line: 7 };
+    g.nodes = [...g.nodes, evil];
+    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    const common = { data: build.data, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal, proofs: [], lineOf: (id: string) => (id.includes("Gc.sweep") ? 7 : undefined), detailedHref: "behavior-coverage.html" };
+
+    const offline = renderShortReport({ ...common, repoWeb: null });
+    expect(offline).toContain(`${build.data.summary.total.toLocaleString("en-US")} functions mapped.`);
+    expect(offline).toContain(`${build.data.worklists.irreversible.length} code paths that delete data`);
+    expect(offline).not.toContain("<img src=x>");
+    expect(offline).toContain("Gc.<wbr>sweep&lt;img src=x&gt;");
+    expect(offline).not.toMatch(/<script[^>]+src=|<link[^>]+href=/i);
+    expect(offline).not.toContain("/blob/");
+    expect(offline).toContain('href="behavior-coverage.html"');
+
+    // A commit and a known host are both required before any code link is written.
+    const linked = renderShortReport({ ...common, data: { ...build.data, provenance: { ...build.data.provenance, commit: "abc1234def" } }, repoWeb: { base: "https://github.com/acme/orders-api", host: "github" } });
+    expect(linked).toContain("https://github.com/acme/orders-api/blob/abc1234def/src/store/gc.ts#L7");
+  });
+
+  it("names the test behind each proof", async () => {
+    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
+    const build = buildBehaviorReportDataWithGaps(graph(), EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    const html = renderShortReport({
+      data: build.data, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal,
+      proofs: [{ symbolId: "sym:src/orders.service.ts#OrdersService.create", title: "OrdersService.create", file: "src/orders.service.ts", sentinel: "return 0", testPath: "tests/test_orders.py", testId: "tests/test_orders.py::test_create" }],
+      lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
+    });
+    expect(html).toContain("tests/test_orders.py::test_create");
+    expect(html).toContain("<code>return 0</code>");
+    expect(html).toContain("the project&#39;s own test, unchanged");
+  });
+});
+
+describe("short report keeps proven delete paths in its count", () => {
+  it("a proven destructive path leaves the worklist but stays in the summary's delete count", async () => {
+    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
+    const g = graph();
+    const sweep = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
+    sweep.properties = { ...sweep.properties, external_callees: ["this.archiveStore.deleteExpired"] };
+    const purge = codeSymbol("sym:src/store/purge.ts#Purger.run", "Purger.run", "src/store/purge.ts");
+    purge.properties = { ...purge.properties, external_callees: ["this.archiveStore.deleteAll"] };
+    g.nodes = [...g.nodes, sweep, purge];
+    g.manifest.files["src/store/gc.ts"] = { hash: "sha256:gc-v1", size: 64, kind: "code" };
+    const ledger = dynamicLedger("sym:src/store/gc.ts#Gc.sweep", g);
+
+    const build = buildBehaviorReportDataWithGaps(g, ledger, { repoRoot: "/definitely/not/a/git/repo" });
+    // The detailed worklist is unchanged: only the unproven path is listed there.
+    expect(build.data.worklists.irreversible.map((r) => r.path)).toEqual(["Purger.run"]);
+    expect(build.provenDeleteGaps.map((r) => r.title)).toEqual(["Gc.sweep"]);
+
+    const html = renderShortReport({
+      data: build.data, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal, provenDeleteGaps: build.provenDeleteGaps,
+      proofs: [{ symbolId: "sym:src/store/gc.ts#Gc.sweep", title: "Gc.sweep", file: "src/store/gc.ts" }],
+      lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
+    });
+    expect(html).toContain("1 of 2 code paths that delete data have no test linked to them.");
+    expect(html).toContain("1 is proven: the test fails when the code breaks");
+    expect(html).toContain("Archive store");
+  });
+
+  it("does no extra ranking work when nothing is proven", async () => {
+    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+    const build = buildBehaviorReportDataWithGaps(graph(), EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    expect(build.provenDeleteGaps).toEqual([]);
+  });
+});

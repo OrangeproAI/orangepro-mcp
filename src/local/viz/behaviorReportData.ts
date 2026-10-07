@@ -1290,6 +1290,30 @@ function frameworkLabel(graph: LocalGraph): string {
 }
 
 export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts: BehaviorReportDataOptions = {}): BehaviorReportData {
+  return buildBehaviorReportDataWithGaps(graph, ledger, opts).data;
+}
+
+/**
+ * The ranking rows behind the report, for renderers that need structured values
+ * (scores, references, evidence tier) instead of display strings. `topGaps` is
+ * aligned 1:1 with `data.risks`; `deleteGaps` with `data.worklists.irreversible`.
+ * `deleteTotal` counts every ranked path that reaches a destructive call, before
+ * the display cap. Same computation as `buildBehaviorReportData`; nothing re-ranked.
+ */
+export interface BehaviorReportBuild {
+  data: BehaviorReportData;
+  topGaps: RiskGap[];
+  deleteGaps: RiskGap[];
+  deleteTotal: number;
+  /**
+   * Destructive paths that are already Dynamically Proven. The worklist ranks only
+   * unproven paths, so these never appear in `deleteGaps`; a summary that counts
+   * delete paths needs them to keep its denominator whole. Empty when nothing is proven.
+   */
+  provenDeleteGaps: RiskGap[];
+}
+
+export function buildBehaviorReportDataWithGaps(graph: LocalGraph, ledger: Ledger, opts: BehaviorReportDataOptions = {}): BehaviorReportBuild {
   const { rows } = buildRtm(graph, ledger);
   const flowIds = flowSymbolIds(graph);
   const summary = summaryFromRows(rows, flowIds);
@@ -1315,12 +1339,14 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   // Consequence view: a static test association is not dynamic proof. Keep
   // Associated sink paths visible here while the main priority-gap list retains
   // its existing behavior and excludes hard-linked rows.
-  const irreversible = rankRiskGaps(graph, {
+  const sinkRanked = rankRiskGaps(graph, {
     repoRoot,
     limit: Number.MAX_SAFE_INTEGER,
     provenIds,
     includeAssociated: true
-  }).filter((r) => r.sink_callee).slice(0, 20)
+  }).filter((r) => r.sink_callee);
+  const deleteGaps = sinkRanked.slice(0, 20);
+  const irreversible = deleteGaps
     .map((r, _index, rows) => {
       const first = rows.find((x) => x.sink_owner && x.sink_owner === r.sink_owner);
       return {
@@ -1366,7 +1392,7 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
   const risks = riskRows(riskGaps, graph, configDisclosure.tuning.churn_window_days, churnMeta);
   const sortedBehaviors = [...lists.behaviors].sort((a, b) => tierRank(a) - tierRank(b));
   const flowRows = flows(graph, rows, riskGaps);
-  return {
+  const data: BehaviorReportData = {
     repo: path.basename(repoRoot || graph.workspace.name || "repo"),
     scanned: (graph.updated_at || graph.created_at || new Date(0).toISOString()).slice(0, 10),
     framework: frameworkLabel(graph),
@@ -1404,4 +1430,9 @@ export function buildBehaviorReportData(graph: LocalGraph, ledger: Ledger, opts:
     generationOutcome: graph.analysis?.start_generation ?? null,
     shownCount: risks.reduce((acc, r) => acc + r.generatedTests.length, 0)
   };
+  const provenDeleteGaps = provenIds.size === 0
+    ? []
+    : rankRiskGaps(graph, { repoRoot, limit: Number.MAX_SAFE_INTEGER, provenIds: new Set(), includeAssociated: true })
+        .filter((r) => r.sink_callee && provenIds.has(r.id));
+  return { data, topGaps: riskGaps, deleteGaps, deleteTotal: sinkRanked.length, provenDeleteGaps };
 }

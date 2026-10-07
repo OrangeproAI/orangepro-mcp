@@ -34,6 +34,7 @@ import {
 import type { GenerateComparison } from "./operations.js";
 import { dominantBlockReason } from "./viz/behaviorReportData.js";
 import { coverageRevealLine } from "./viz/coverageReveal.js";
+import { shortReportPath } from "./viz/shortReport.js";
 import { autoProve, isRoastSurvivor } from "./autoProve.js";
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
@@ -269,6 +270,7 @@ async function main(): Promise<number> {
         if (res.behavior_coverage_path) {
           out(`  behavior coverage: ${res.behavior_coverage_path}`);
           out(`    open with:    open ${res.behavior_coverage_path}`);
+          if (existsSync(shortReportPath(res.behavior_coverage_path))) out(`  short summary:     ${shortReportPath(res.behavior_coverage_path)}`);
         }
         if (res.coverage_report_path) out(`  coverage report: ${res.coverage_report_path}`);
         if (res.generation_diagnostics_path) out(`  generation diagnostics: ${res.generation_diagnostics_path}`);
@@ -519,6 +521,7 @@ async function main(): Promise<number> {
           if (coverageHtml) {
             out(`  behavior coverage:       ${coverageHtml}`);
             out(`    open with: open ${coverageHtml}`);
+            if (existsSync(shortReportPath(coverageHtml))) out(`  short summary:           ${shortReportPath(coverageHtml)}`);
           }
           if (coverageReport) out(`  coverage report:         ${coverageReport}`);
           for (const w of [...new Set([...res.warnings, ...aiFlowWarnings, ...htmlWarnings])]) out(`  warning: ${w}`);

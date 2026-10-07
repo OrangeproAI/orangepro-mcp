@@ -157,6 +157,30 @@ describe("operations round trip", () => {
     expect(html).not.toContain(`\"source\":\"${outputRoot.split("/").pop()}\"`);
   });
 
+  it("writes the short summary next to the detailed report, linking code only through a credential-free known host", () => {
+    const outputRoot = makeTempDir();
+    const sourceRoot = makeTempDir();
+    writeFileSync(join(sourceRoot, "orders.ts"), "export function placeOrder() { return 'placed'; }\n", "utf8");
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "OrangePro", GIT_AUTHOR_EMAIL: "opro@example.com", GIT_COMMITTER_NAME: "OrangePro", GIT_COMMITTER_EMAIL: "opro@example.com" };
+    execFileSync("git", ["init"], { cwd: sourceRoot, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: sourceRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: sourceRoot, stdio: "ignore", env: gitEnv });
+    execFileSync("git", ["remote", "add", "origin", "https://someone:tok3n-value@github.com/acme/orders.git"], { cwd: sourceRoot, stdio: "ignore" });
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim();
+
+    opInit(outputRoot, deps);
+    opAnalyze(outputRoot, { source: sourceRoot, suppressProgress: true }, deps);
+    const result = opBehaviorCoverageHtml(outputRoot, "report.html", undefined, { persistBaseline: false });
+
+    expect(result.short_report_path).toBe(join(outputRoot, "short_report.html"));
+    const short = readFileSync(result.short_report_path!, "utf8");
+    expect(short).toContain(`https://github.com/acme/orders/commit/${sha}`);
+    expect(short).not.toContain("tok3n-value");
+    expect(short).not.toContain("someone");
+    expect(short).toContain('href="report.html"');
+    expect(readFileSync(result.behavior_coverage_path, "utf8")).not.toContain("short_report.html");
+  });
+
   it("init → analyze → status → score → export produces a valid pack", () => {
     const W = makeTempDir();
     writeFixture(W);

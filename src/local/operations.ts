@@ -1,7 +1,7 @@
 import { loadRiskConfig } from "./score/riskConfig.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pingTelemetry } from "./telemetry.js";
 import {
@@ -81,8 +81,9 @@ import { changedImpact } from "./freshness/changed.js";
 import { explainTest } from "./explain/explain.js";
 import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
-import { buildBehaviorReportData, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
+import { buildBehaviorReportDataWithGaps, type BehaviorReportBuild, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { renderBehaviorReport } from "./viz/behaviorReportHtml.js";
+import { renderShortReport, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
 import { renderCoverageReport } from "./pack/coverageReport.js";
 import { confirmedCoverageByLayer } from "./score/coverage.js";
 import { prepareRuntimeCoverage, RuntimeCoveragePrepareResult, type CommandRunner } from "./analyze/coverageArtifacts.js";
@@ -97,10 +98,11 @@ import {
   targetFingerprint,
   targetLanguage,
   type DynamicProofCertificate,
+  type Ledger,
   type LedgerRecord,
   type LedgerStats
 } from "./ledger.js";
-import { buildRtm, provenSymbolIds, renderRtmCsv, renderRtmMarkdown, type RtmFormat, type RtmResult } from "./rtm.js";
+import { buildRtm, provenLedgerRecords, provenSymbolIds, renderRtmCsv, renderRtmMarkdown, type RtmFormat, type RtmResult } from "./rtm.js";
 import {
   buildProofDoctor,
   distillProofAttempts,
@@ -2993,7 +2995,7 @@ export function opBehaviorCoverageHtml(
   outputPath = "orangepro-behavior-coverage.html",
   dynamicProof?: DynamicProofReportInput,
   options: { persistBaseline?: boolean } = {}
-): { behavior_coverage_path: string } {
+): { behavior_coverage_path: string; short_report_path?: string } {
   const graph = loadGraph(workspacePaths(root).graphPath);
   // Standalone regens have no this-run outcome: fall back to the persisted
   // proof-attempts sidecar ONLY when it anchors to the current graph+commit
@@ -3002,7 +3004,9 @@ export function opBehaviorCoverageHtml(
   // Artifacts may be written from a different working directory when callers
   // use `opro start <source>`. Risk scoring must follow the analyzed source
   // root recorded in the graph, never the artifact/output root.
-  const data = buildBehaviorReportData(graph, loadLedger(root), { repoRoot: graph.workspace.root, dynamicProof: dyn });
+  const ledger = loadLedger(root);
+  const build = buildBehaviorReportDataWithGaps(graph, ledger, { repoRoot: graph.workspace.root, dynamicProof: dyn });
+  const data = build.data;
   // Delta-since-last-run: best-effort read of the previous snapshot; a missing
   // or unreadable baseline means first run (banner hidden). Display-only —
   // the delta never touches tiers, ranks, or counts.
@@ -3016,6 +3020,15 @@ export function opBehaviorCoverageHtml(
   const html = renderBehaviorReport(data);
   const htmlPath = resolve(root, outputPath);
   writeFileSync(htmlPath, html, "utf8");
+  // The short summary reads the same data and ranking rows; it never changes the
+  // detailed report. A failure here must not fail the run.
+  let shortPath: string | undefined;
+  try {
+    shortPath = shortReportPath(htmlPath);
+    writeFileSync(shortPath, renderShortReport(shortReportInput(graph, ledger, build, htmlPath)), "utf8");
+  } catch {
+    shortPath = undefined;
+  }
   if (options.persistBaseline !== false) {
     try {
       writeFileSync(baselinePath, JSON.stringify(reportBaselineOf(data, new Date().toISOString())), "utf8");
@@ -3023,7 +3036,61 @@ export function opBehaviorCoverageHtml(
       // baseline write is advisory
     }
   }
-  return { behavior_coverage_path: htmlPath };
+  return { behavior_coverage_path: htmlPath, ...(shortPath ? { short_report_path: shortPath } : {}) };
+}
+
+/** Inputs for the short summary: line numbers, proof records and the repository web link. */
+function shortReportInput(graph: LocalGraph, ledger: Ledger, build: BehaviorReportBuild, htmlPath: string): Parameters<typeof renderShortReport>[0] {
+  const nodes = new Map(graph.nodes.map((n) => [n.external_id, n]));
+  const lineOf = (id: string): number | undefined => {
+    const line = nodes.get(id)?.properties.start_line;
+    return typeof line === "number" && line > 0 ? line : undefined;
+  };
+  const proofs: ShortReportProof[] = [];
+  for (const [symbolId, record] of provenLedgerRecords(graph, ledger)) {
+    const node = nodes.get(symbolId);
+    const cert = record.dynamic_proof;
+    const command = cert?.command ?? "";
+    const nodeId = /(\S+\.\w+::[\w:\[\]\-.]+)/.exec(command)?.[1];
+    proofs.push({
+      symbolId,
+      title: node?.title ?? symbolId.split("#").pop() ?? symbolId,
+      file: typeof node?.properties.file === "string" ? node.properties.file : symbolId.replace(/^sym:/, "").split("#")[0] ?? "",
+      ...(cert?.sentinel_source ? { sentinel: cert.sentinel_source } : cert?.sentinel && !/^(return|promise)-json$/.test(cert.sentinel) ? { sentinel: `return ${cert.sentinel}` } : {}),
+      ...(cert?.test_path ? { testPath: cert.test_path } : {}),
+      ...(nodeId ? { testId: nodeId } : {}),
+      generated: Boolean(record.provider || record.model)
+    });
+  }
+  proofs.sort((a, b) => a.file.localeCompare(b.file) || a.title.localeCompare(b.title));
+  const denominator = graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true);
+  const functionLike = denominator.filter((n) => n.properties.symbol_kind === "function" || n.properties.symbol_kind === "method").length;
+  let remote: string | null = null;
+  try {
+    remote = execFileSync("git", ["-C", graph.workspace.root, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000
+    }).trim();
+  } catch {
+    remote = null;
+  }
+  return {
+    data: build.data,
+    topGaps: build.topGaps,
+    deleteGaps: build.deleteGaps,
+    deleteTotal: build.deleteTotal,
+    provenDeleteGaps: build.provenDeleteGaps,
+    proofs,
+    lineOf,
+    repoWeb: repoWebFromRemote(remote),
+    detailedHref: basename(htmlPath),
+    kinds: {
+      functionLike,
+      classes: denominator.filter((n) => n.properties.symbol_kind === "class").length,
+      total: denominator.length
+    }
+  };
 }
 
 /** Fresh-only sidecar view for report regens; unreadable or stale ⇒ undefined. */
