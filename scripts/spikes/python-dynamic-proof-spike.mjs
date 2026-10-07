@@ -365,10 +365,27 @@ function isExactPytestNodeId(nodeid) {
   return parts.length >= 2 && /^test[A-Za-z0-9_]*(?:\[.+\])?$/.test(parts[parts.length - 1]);
 }
 
+/**
+ * pytest prints the code's own stdout, stderr and log records under "Captured ..."
+ * section headers. A logged "ERROR ..." or printed "ImportError" there is program
+ * output, not a pytest error report, so those sections are removed before looking
+ * for collection/setup errors. Everything outside them is kept as is.
+ */
+function withoutCapturedSections(text) {
+  const out = [];
+  let captured = false;
+  for (const line of text.split("\n")) {
+    if (/^-+ Captured (?:stdout|stderr|log)\b.*-+$/.test(line)) { captured = true; continue; }
+    if (captured && (/^[=_]{3,}/.test(line) || /^-{3,} .+ -{3,}$/.test(line))) captured = false;
+    if (!captured) out.push(line);
+  }
+  return out.join("\n");
+}
+
 function classifyPytest(run, nodeid) {
   if (run.timedOut) return { kind: "otherError", reason: "pytest timed out" };
   if (run.exitCode === 0) return { kind: "passed" };
-  const normalized = run.output.replace(/\r/g, "");
+  const normalized = withoutCapturedSections(run.output.replace(/\r/g, ""));
   const hasErrorSummary = /(^|\n)ERROR(?:S)?(?:\s|$)/.test(normalized) || /(^|\n)ERROR\s+collecting\s+/i.test(normalized) || /(^|\n)ImportError\b|(^|\n)ModuleNotFoundError\b|(^|\n)SyntaxError\b/i.test(normalized);
   if (hasErrorSummary) return { kind: "collectionError", reason: "pytest reported collection/import/setup error" };
   const failedTarget = exactNodeIdPattern(nodeid).test(normalized);

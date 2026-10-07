@@ -172,6 +172,40 @@ describe.skipIf(!HAS_UV)("python dynamic proof spike (R7.1)", () => {
     } finally { rmSync(fixture, { recursive: true, force: true }); }
   }, TEST_TIMEOUT);
 
+  it("proves a kill even when the code under test logs ERROR lines that pytest prints as captured output", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "store.py": [
+        "import logging",
+        "log = logging.getLogger('store')",
+        "",
+        "class Store:",
+        "    def __init__(self, client):",
+        "        log.error('Error connecting to backing store')",
+        "        print('ERROR something printed by the app')",
+        "        self.client = client",
+        "",
+        "    def remove(self, key):",
+        "        self.client.delete(key)",
+        ""
+      ].join("\n"),
+      "tests/test_store.py": [
+        "from unittest.mock import MagicMock",
+        "from store import Store",
+        "",
+        "def test_remove_deletes_key():",
+        "    client = MagicMock()",
+        "    Store(client).remove('a')",
+        "    client.delete.assert_called_once_with('a')",
+        ""
+      ].join("\n")
+    });
+    try {
+      const verdict = runSpike(fixture, { test: "tests/test_store.py::test_remove_deletes_key", target: "store.py", func: "remove" });
+      expect(verdict.status).toBe("proven");
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }, TEST_TIMEOUT);
+
   it("still refuses an unannotated function that returns a value on any path", () => {
     const fixture = tempPythonProject({
       "pyproject.toml": UV_PROJECT,
