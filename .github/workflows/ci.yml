@@ -198,9 +198,16 @@ jobs:
         with:
           python-version: "3.13"
       - run: npm ci
-      - run: python3 -m pip install pytest
-      - run: python3 -m pytest --version
+      # The proof suite drives real projects through uv; without it every case skips.
+      - run: python3 -m pip install pytest uv
+      - name: Preflight (fail if pytest or uv is missing)
+        run: |
+          python3 -m pytest --version
+          uv --version
       - run: npm run test:spike:python
+        env:
+          # Makes the suite fail, not skip, if uv is ever missing again.
+          ORANGEPRO_REQUIRE_UV: "1"
 
   smoke-package:
     name: smoke + npm package surface

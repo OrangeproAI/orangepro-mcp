@@ -38,6 +38,16 @@ function tempPythonProject(files: Record<string, string>): string {
   return dir;
 }
 
+// CI sets ORANGEPRO_REQUIRE_UV=1 so a missing uv fails the job instead of silently
+// skipping every proof case below (a green run must mean these cases executed).
+const REQUIRE_UV = process.env.ORANGEPRO_REQUIRE_UV === "1";
+
+describe("python proof environment", () => {
+  it.runIf(REQUIRE_UV)("has uv, so the proof cases run instead of being skipped", () => {
+    expect(HAS_UV, "ORANGEPRO_REQUIRE_UV=1 but uv was not found on PATH").toBe(true);
+  });
+});
+
 describe.skipIf(!HAS_UV)("python dynamic proof spike (R7.1)", () => {
   it("proves a typed scalar function and discloses identical runner diagnostics", () => {
     const fixture = tempPythonProject({
