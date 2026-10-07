@@ -28,6 +28,8 @@ export interface ShortReportProof {
   /** Test file (and node id, when the runner command names one). */
   testPath?: string;
   testId?: string;
+  /** True when `testPath` is a repository-relative path that can be linked. */
+  testPathResolved?: boolean;
   /** True when the proving test was written by a model rather than taken from the repository. */
   generated?: boolean;
 }
@@ -86,6 +88,32 @@ export function denominatorNoun(kinds?: { functionLike: number; classes: number;
   if (!kinds || kinds.total === 0 || kinds.functionLike / kinds.total >= 0.9) return { plural: "functions", singular: "function", title: "Functions mapped" };
   if ((kinds.functionLike + kinds.classes) / kinds.total >= 0.9) return { plural: "functions and classes", singular: "function or class", title: "Functions and classes mapped" };
   return { plural: "code symbols", singular: "code symbol", title: "Code symbols mapped" };
+}
+
+// Labels the oracle records in place of a concrete value (mode names, not code).
+const SENTINEL_MODE_LABELS = new Set(["return-json", "promise-json", "go-zero-return", "java-typed-sentinel"]);
+
+/**
+ * The replacement a proof applied, as code, from the certificate's `sentinel`
+ * (the value; `sentinel_source` only says how it was chosen). Mode labels and
+ * empty values return undefined so the page states it in words instead.
+ */
+export function proofSentinelText(sentinel: string | undefined): string | undefined {
+  const value = sentinel?.trim();
+  if (!value || SENTINEL_MODE_LABELS.has(value)) return undefined;
+  return /^return\b/.test(value) ? value : `return ${value}`;
+}
+
+/**
+ * Repository-relative path for a test path recorded relative to a sub-project
+ * (`tests/x.py` run from `pkg/` → `pkg/tests/x.py`). Resolved only when exactly
+ * one scanned file matches; otherwise the recorded path is kept as is.
+ */
+export function repoRelativeTestPath(recorded: string, repoFiles: readonly string[]): { path: string; resolved: boolean } {
+  const clean = recorded.replace(/^\.\//, "");
+  if (repoFiles.includes(clean)) return { path: clean, resolved: true };
+  const matches = repoFiles.filter((f) => f.endsWith(`/${clean}`));
+  return matches.length === 1 ? { path: matches[0]!, resolved: true } : { path: clean, resolved: false };
 }
 
 export function permalink(web: RepoWeb, commit: string, file: string, line?: number): string {
@@ -195,6 +223,12 @@ export function renderShortReport(input: ShortReportInput): string {
   const excluded = data.configDisclosure.rankExcludePaths;
   const provenIds = new Set(input.proofs.map((p) => p.symbolId));
   const pct = s.total > 0 ? (s.associated / s.total) * 100 : 0;
+
+  const testCell = (p: ShortReportProof): string => {
+    const label = `<span class="mono">${breakable(p.testId ?? p.testPath ?? "")}</span>`;
+    if (!input.repoWeb || !commit || !p.testPath || !p.testPathResolved) return label;
+    return `<a class="mono code" href="${esc(permalink(input.repoWeb, commit, p.testPath))}" target="_blank" rel="noopener noreferrer">${breakable(p.testId ?? p.testPath)}</a>`;
+  };
 
   const link = (label: string, file: string, symbolId: string): string => {
     const line = input.lineOf(symbolId);
@@ -355,7 +389,7 @@ ${rankedRows}
         </div>
         <dl class="diff">
           <dt>Simulated</dt><dd>${p.sentinel ? `Function body replaced with <code>${esc(p.sentinel)}</code> in an isolated copy` : "Function replaced with a fixed return value in an isolated copy"}</dd>
-          <dt>Test</dt><dd>${p.testId || p.testPath ? `<span class="mono">${esc(p.testId ?? p.testPath)}</span>` : "Recorded in the proof ledger"}${p.generated ? " (generated test)" : " (the project&#39;s own test, unchanged)"}</dd>
+          <dt>Test</dt><dd>${p.testId || p.testPath ? testCell(p) : "Recorded in the proof ledger"}${p.generated ? " (generated test)" : " (the project&#39;s own test, unchanged)"}</dd>
         </dl>
         <p class="small muted">The test passed on the original code and failed at its assertion on the simulated change.</p>
       </li>`

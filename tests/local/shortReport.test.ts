@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { denominatorNoun, permalink, repoWebFromRemote, shortReportPath, storeLabel } from "../../src/local/viz/shortReport.js";
+import { denominatorNoun, permalink, proofSentinelText, repoRelativeTestPath, repoWebFromRemote, shortReportPath, storeLabel } from "../../src/local/viz/shortReport.js";
 
 describe("short report helpers", () => {
   it("writes next to the detailed report with a short_ prefix", () => {
@@ -46,5 +46,23 @@ describe("short report helpers", () => {
     expect(denominatorNoun({ functionLike: 60, classes: 38, total: 100 }).plural).toBe("functions and classes");
     expect(denominatorNoun({ functionLike: 40, classes: 20, total: 100 }).plural).toBe("code symbols");
     expect(denominatorNoun(undefined).plural).toBe("functions");
+  });
+
+  it("shows the value a proof substituted, never the label of how it was chosen", () => {
+    expect(proofSentinelText("0")).toBe("return 0");
+    expect(proofSentinelText("''")).toBe("return ''");
+    expect(proofSentinelText("return None")).toBe("return None");
+    expect(proofSentinelText("return-json")).toBeUndefined();
+    expect(proofSentinelText("go-zero-return")).toBeUndefined();
+    expect(proofSentinelText("java-typed-sentinel")).toBeUndefined();
+    expect(proofSentinelText(undefined)).toBeUndefined();
+  });
+
+  it("names a proof's test by its repository path only when one file matches", () => {
+    const files = ["pkg-extras/tests/test_db.py", "tests/test_api.py", "a/tests/test_dup.py", "b/tests/test_dup.py"];
+    expect(repoRelativeTestPath("tests/test_db.py", files)).toEqual({ path: "pkg-extras/tests/test_db.py", resolved: true });
+    expect(repoRelativeTestPath("./tests/test_api.py", files)).toEqual({ path: "tests/test_api.py", resolved: true });
+    expect(repoRelativeTestPath("tests/test_dup.py", files)).toEqual({ path: "tests/test_dup.py", resolved: false });
+    expect(repoRelativeTestPath("tests/test_missing.py", files)).toEqual({ path: "tests/test_missing.py", resolved: false });
   });
 });

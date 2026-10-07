@@ -83,7 +83,7 @@ import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
 import { buildBehaviorReportDataWithGaps, type BehaviorReportBuild, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { renderBehaviorReport } from "./viz/behaviorReportHtml.js";
-import { renderShortReport, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
+import { proofSentinelText, renderShortReport, repoRelativeTestPath, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
 import { renderCoverageReport } from "./pack/coverageReport.js";
 import { confirmedCoverageByLayer } from "./score/coverage.js";
 import { prepareRuntimeCoverage, RuntimeCoveragePrepareResult, type CommandRunner } from "./analyze/coverageArtifacts.js";
@@ -3047,17 +3047,23 @@ function shortReportInput(graph: LocalGraph, ledger: Ledger, build: BehaviorRepo
     return typeof line === "number" && line > 0 ? line : undefined;
   };
   const proofs: ShortReportProof[] = [];
+  const repoFiles = Object.keys(graph.manifest?.files ?? {});
   for (const [symbolId, record] of provenLedgerRecords(graph, ledger)) {
     const node = nodes.get(symbolId);
     const cert = record.dynamic_proof;
     const command = cert?.command ?? "";
-    const nodeId = /(\S+\.\w+::[\w:\[\]\-.]+)/.exec(command)?.[1];
+    const recordedId = /(\S+\.\w+::[\w:\[\]\-.]+)/.exec(command)?.[1];
+    const test = cert?.test_path ? repoRelativeTestPath(cert.test_path, repoFiles) : undefined;
+    // Name the test by its repository path; the runner recorded it relative to its project.
+    const nodeId = recordedId && test && cert?.test_path && recordedId.startsWith(`${cert.test_path.replace(/^\.\//, "")}::`)
+      ? `${test.path}${recordedId.slice(cert.test_path.replace(/^\.\//, "").length)}`
+      : recordedId;
     proofs.push({
       symbolId,
       title: node?.title ?? symbolId.split("#").pop() ?? symbolId,
       file: typeof node?.properties.file === "string" ? node.properties.file : symbolId.replace(/^sym:/, "").split("#")[0] ?? "",
-      ...(cert?.sentinel_source ? { sentinel: cert.sentinel_source } : cert?.sentinel && !/^(return|promise)-json$/.test(cert.sentinel) ? { sentinel: `return ${cert.sentinel}` } : {}),
-      ...(cert?.test_path ? { testPath: cert.test_path } : {}),
+      ...(proofSentinelText(cert?.sentinel) ? { sentinel: proofSentinelText(cert?.sentinel) } : {}),
+      ...(test ? { testPath: test.path, testPathResolved: test.resolved } : {}),
       ...(nodeId ? { testId: nodeId } : {}),
       generated: Boolean(record.provider || record.model)
     });
