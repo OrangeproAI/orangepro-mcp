@@ -2,8 +2,10 @@
 """Fail-closed Python mutation helper for dynamic proof.
 
 A sentinel is selected from the declared return annotation. An unannotated function
-may use only a direct, unambiguous observed test oracle supplied by the spike; all
-other shapes are refused rather than guessing a type-incompatible mutation.
+may use only a direct, unambiguous observed test oracle supplied by the spike, or,
+when its own body never returns a value, `None`: it already returns None on every
+path, so the mutation removes only its side effects and cannot change the type a
+caller receives. All other shapes are refused rather than guessing a mutation.
 """
 
 from __future__ import annotations
@@ -63,6 +65,19 @@ def sentinel_for(annotation: ast.expr | None, oracle_type: str | None) -> tuple[
     return (observed, f"observed_oracle:{oracle_type}") if observed else None
 
 
+def returns_value(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True when the function's own body (not nested functions or classes) returns a value."""
+    stack: list[ast.AST] = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Return) and node.value is not None and not (isinstance(node.value, ast.Constant) and node.value.value is None):
+            return True
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True)
@@ -96,6 +111,8 @@ def main() -> None:
         fail("unsupported_generator")
 
     sentinel = sentinel_for(fn.returns, args.oracle_type)
+    if sentinel is None and fn.returns is None and not returns_value(fn):
+        sentinel = ("None", "body:no_return_value")
     if sentinel is None:
         fail("return_annotation_or_observed_oracle_required")
     expression, sentinel_source = sentinel

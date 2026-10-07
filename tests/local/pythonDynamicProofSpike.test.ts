@@ -130,6 +130,51 @@ describe.skipIf(!HAS_UV)("python dynamic proof spike (R7.1)", () => {
     } finally { rmSync(fixture, { recursive: true, force: true }); }
   }, TEST_TIMEOUT);
 
+  it("proves an unannotated function that never returns a value by removing its side effect", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "store.py": [
+        "class Store:",
+        "    def __init__(self, client):",
+        "        self.client = client",
+        "",
+        "    def remove(self, key):",
+        "        def prefixed(k):",
+        "            return 'ns:' + k",
+        "        self.client.delete(prefixed(key))",
+        ""
+      ].join("\n"),
+      "tests/test_store.py": [
+        "from unittest.mock import MagicMock",
+        "from store import Store",
+        "",
+        "def test_remove_deletes_prefixed_key():",
+        "    client = MagicMock()",
+        "    Store(client).remove('a')",
+        "    client.delete.assert_called_once_with('ns:a')",
+        ""
+      ].join("\n")
+    });
+    try {
+      const verdict = runSpike(fixture, { test: "tests/test_store.py::test_remove_deletes_prefixed_key", target: "store.py", func: "remove" });
+      expect(verdict.status).toBe("proven");
+      expect(verdict.mutation).toEqual({ sentinel: "None", source: "body:no_return_value" });
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }, TEST_TIMEOUT);
+
+  it("still refuses an unannotated function that returns a value on any path", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "app.py": "def pick(flag):\n    if flag:\n        return 'yes'\n    print('no')\n",
+      "tests/test_app.py": "from app import pick\n\ndef test_pick():\n    assert pick(True)\n"
+    });
+    try {
+      const verdict = runSpike(fixture, { test: "tests/test_app.py::test_pick", target: "app.py", func: "pick" });
+      expect(verdict.status).toBe("unrunnable");
+      expect(verdict.reason).toContain("return_annotation_or_observed_oracle_required");
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }, TEST_TIMEOUT);
+
   it("permits an unannotated function only when a direct scalar equality oracle constrains it", () => {
     const fixture = tempPythonProject({
       "pyproject.toml": UV_PROJECT,
