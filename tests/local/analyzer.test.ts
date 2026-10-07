@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { languageOf, roleOf, isTestFile, testLayerOf } from "../../src/local/analyze/classify.js";
 import { detectFrameworksFromManifest, detectFromPackageJson, frameworkFromConfig } from "../../src/local/analyze/frameworks.js";
 import { extractSymbols, extractTestNames } from "../../src/local/analyze/symbols.js";
-import { analyzeRepo } from "../../src/local/analyze/analyzer.js";
+import { analyzeRepo, testPathForNameMatch } from "../../src/local/analyze/analyzer.js";
 import { extractTreeSitterStructure, preloadTreeSitter } from "../../src/local/analyze/treeSitter/engine.js";
 import type { GraphNode } from "../../src/local/graph/ontology.js";
 
@@ -889,6 +889,46 @@ describe("analyzeRepo", () => {
           ((e.from_external_id === symId && e.to_external_id === testId) || (e.from_external_id === testId && e.to_external_id === symId))
       )
     ).toBe(false);
+  });
+
+  it("R13.2 name matches do not change when tests move between test-root folders", () => {
+    const layout = (root: string, testDir: string[]): number | undefined => {
+      mkdirSync(join(root, "src", "shop", "billing"), { recursive: true });
+      mkdirSync(join(root, ...testDir, "billing"), { recursive: true });
+      writeFileSync(
+        join(root, "src", "shop", "billing", "invoice.controller.ts"),
+        ["export function refundInvoice(id: string, reason: string): string {", '  if (!reason) throw new Error("reason required");', "  return `refund:${id}`;", "}"].join("\n")
+      );
+      writeFileSync(
+        join(root, ...testDir, "billing", "invoice.test.ts"),
+        ['import { it } from "vitest";', 'it("refunds an invoice", () => {});'].join("\n")
+      );
+      const testId = `test:${[...testDir, "billing", "invoice.test.ts"].join("/")}`;
+      return analyzeRepo(root).candidate_edges.find(
+        (e) =>
+          e.from_external_id === "sym:src/shop/billing/invoice.controller.ts#refundInvoice" &&
+          e.to_external_id === testId &&
+          e.relationship_type === "MAY_BE_TESTED_BY" &&
+          e.reason?.startsWith("Token overlap")
+      )?.confidence;
+    };
+    // Before R13.2 the folder `test_shop` added the code word "shop" (0.6) while
+    // `unit` diluted the match (0.33). Both layouts now score the same.
+    const mirrored = layout(join(dir, "a"), ["tests", "test_shop"]);
+    const unit = layout(join(dir, "b"), ["tests", "unit"]);
+    expect(mirrored).toBe(0.4);
+    expect(unit).toBe(0.4);
+  });
+
+  it("R13.2 test-root folders carry no words; a folder that mirrors code keeps its words", () => {
+    const code = new Set(["shop", "billing", "integrations", "packages", "server", "src"]);
+    expect(testPathForNameMatch("tests/test_shop/billing/test_invoice.py", code)).toBe("billing/test_invoice.py");
+    expect(testPathForNameMatch("tests/unit/billing/test_invoice.py", code)).toBe("billing/test_invoice.py");
+    expect(testPathForNameMatch("tests/unit/integrations/test_slack.py", code)).toBe("integrations/test_slack.py");
+    expect(testPathForNameMatch("packages/server/test/integration/user.spec.ts", code)).toBe("packages/server/user.spec.ts");
+    expect(testPathForNameMatch("tests/proxy_unit_tests/test_keys.py", code)).toBe("test_keys.py");
+    expect(testPathForNameMatch("svc/history/engine_test.go", code)).toBe("svc/history/engine_test.go");
+    expect(testPathForNameMatch("test_root_file.py", code)).toBe("test_root_file.py");
   });
 
   it("retains direct Python test links when a different test patches the same exact target", async () => {

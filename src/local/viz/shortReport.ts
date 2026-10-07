@@ -116,6 +116,34 @@ export function repoRelativeTestPath(recorded: string, repoFiles: readonly strin
   return matches.length === 1 ? { path: matches[0]!, resolved: true } : { path: clean, resolved: false };
 }
 
+/**
+ * Where a proof's test lives, from the certificate. Runners record the test as
+ * `file::selector` relative to the project they ran in; the file part is resolved
+ * to a repository path (unique match only) and the selector is kept. When the
+ * recorded path has no selector, the one in the runner command for that file is used.
+ */
+export function proofTestLocation(
+  recorded: string | undefined,
+  command: string | undefined,
+  repoFiles: readonly string[]
+): { testPath?: string; testPathResolved?: boolean; testId?: string } {
+  const value = (recorded ?? "").trim().replace(/^\.\//, "");
+  const cut = value.indexOf("::");
+  const file = cut >= 0 ? value.slice(0, cut) : value;
+  if (!file) return {};
+  let selector = cut >= 0 ? value.slice(cut) : "";
+  if (!selector && command) {
+    for (const m of command.matchAll(/(\S+?\.\w+)(::\S+)/g)) {
+      if (m[1]!.replace(/^['"]?\.?\/?/, "").endsWith(file)) {
+        selector = m[2]!.replace(/['"]+$/, "");
+        break;
+      }
+    }
+  }
+  const where = repoRelativeTestPath(file, repoFiles);
+  return { testPath: where.path, testPathResolved: where.resolved, ...(selector ? { testId: `${where.path}${selector}` } : {}) };
+}
+
 export function permalink(web: RepoWeb, commit: string, file: string, line?: number): string {
   const enc = file.split("/").map(encodeURIComponent).join("/");
   const anchor = line ? `#L${line}` : "";
@@ -315,7 +343,7 @@ export function renderShortReport(input: ShortReportInput): string {
         provenDeletes.length > 0
           ? `${provenDeletes.length} ${provenDeletes.length === 1 ? "is" : "are"} proven: the test fails when the code breaks (section 03). `
           : "None is proven yet. "
-      }This is missing test protection, not a bug found in the code.</p>
+      }This is missing test protection, not a bug found in the code. Deletes from a cache are not counted.</p>
     </div>
     ${legend}
     <div class="tblwrap" style="margin-top:8px"><table class="tbl">

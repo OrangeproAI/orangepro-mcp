@@ -5,7 +5,7 @@ import { ORANGEPRO_VERSION } from "./version.js";
 import { hashString } from "./util/hash.js";
 
 export const ARTIFACT_IDENTITY_VERSION = "orangepro.artifact_identity.v1" as const;
-export const ANALYZER_VERSION = "orangepro.analyzer.v8" as const;
+export const ANALYZER_VERSION = "orangepro.analyzer.v9" as const;
 export const PROOF_ORACLE_VERSION = "orangepro.targeted_mutation_oracle.v3" as const;
 
 export type ComparisonCompatibilityState =

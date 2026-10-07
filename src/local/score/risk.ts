@@ -644,6 +644,18 @@ const PERSISTENCE_FIELD_RE = /(store|client|db|repo|repository|persistence|manag
 // `window.`) is a per-tab/per-device client cache, not a durable data store. Its
 // `removeItem` matches the persistence vocabulary ("storage") by name only.
 const BROWSER_WEB_STORAGE_FIELD_RE = /(^|\.)(sessionStorage|localStorage)$/;
+// A delete on a cache evicts a copy; the data it came from still exists. The code
+// names the cache: the receiver (`self._model_cache.delete`), the method
+// (`delete_cache`), or the class making the call (`RedisCache.delete_cache`).
+const CACHE_WORDS = new Set(["cache", "caches", "cached", "caching"]);
+export function namesCache(name: string): boolean {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .some((word) => CACHE_WORDS.has(word));
+}
 const SCHEDULED_ENTRY_NAME_RE = /(^|\.)(run|execute|handle|process|tick|scan)$/i;
 const SCHEDULED_ENTRY_PATH_RE = /(^|\/)(jobs?|workers?|scanners?|scavengers?|cron|schedulers?|processors?|consumers?|reconcil\w*)(\/|$)/i;
 
@@ -863,11 +875,18 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     const ext = (n.properties as { external_callees?: string[] } | undefined)?.external_callees ?? [];
     const importedStatic = (n.properties as { imported_static_callees?: string[] } | undefined)?.imported_static_callees ?? [];
     const constructorChains = (n.properties as { constructor_chain_sinks?: unknown } | undefined)?.constructor_chain_sinks;
+    // Cache evictions are not data deletion (see namesCache). A sink the project
+    // configured explicitly (`destructive_sinks`) always counts.
+    const title = n.title ?? "";
+    const ownerIsCache = title.includes(".") && namesCache(title.slice(0, title.lastIndexOf(".")));
+    const configured = (c: string): boolean => extraSinks.some((re) => re.test(lastSeg(c)));
+    const evictsCache = (c: string): boolean => ownerIsCache || namesCache(c);
     if (Array.isArray(constructorChains)) {
       const retained = constructorChains.find((entry) => {
         if (!entry || typeof entry !== "object") return false;
         const fact = entry as { callee?: unknown; constructor_symbol?: unknown };
-        return typeof fact.callee === "string" && typeof fact.constructor_symbol === "string" && nodeById.has(fact.constructor_symbol);
+        if (typeof fact.callee !== "string" || typeof fact.constructor_symbol !== "string" || !nodeById.has(fact.constructor_symbol)) return false;
+        return configured(fact.callee) || !(evictsCache(fact.callee) || namesCache(nodeById.get(fact.constructor_symbol)?.title ?? ""));
       }) as { callee: string; constructor_symbol: string } | undefined;
       if (retained) return retained.callee;
     }
@@ -878,15 +897,15 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     const persistentRemove = (c: string): boolean =>
       REMOVE_CALL_RE.test(lastSeg(c)) && PERSISTENCE_FIELD_RE.test(fieldOf(c)) && !BROWSER_WEB_STORAGE_FIELD_RE.test(fieldOf(c));
     const destructive = ext.find((c) => viaField(c) && (
-      isDestructiveTerminal(lastSeg(c)) ||
-      persistentRemove(c) ||
-      extraSinks.some((re) => re.test(lastSeg(c)))));
+      configured(c) ||
+      (!evictsCache(c) && (isDestructiveTerminal(lastSeg(c)) || persistentRemove(c)))));
     if (destructive) return destructive;
     return importedStatic.find((c) => viaField(c) && (
-      isDestructiveTerminal(lastSeg(c)) ||
-      IMPORTED_REPLACEMENT_CALL_RE.test(lastSeg(c)) ||
-      persistentRemove(c) ||
-      extraSinks.some((re) => re.test(lastSeg(c)))));
+      configured(c) ||
+      (!evictsCache(c) && (
+        isDestructiveTerminal(lastSeg(c)) ||
+        IMPORTED_REPLACEMENT_CALL_RE.test(lastSeg(c)) ||
+        persistentRemove(c)))));
   };
   const reachedSinkFrom = (id: string, depth: number, seen: Set<string>): { callee: string; owner: string } | undefined => {
     const own = sinkCallee(id);

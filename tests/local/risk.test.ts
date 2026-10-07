@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
-import { configDisclosureFor, inspectRiskInputHealth, ORS_VERSION, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
+import { configDisclosureFor, inspectRiskInputHealth, namesCache, ORS_VERSION, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
 import { builtInRankExclusion } from "../../src/local/score/rankEligibility.js";
 
 const dirs: string[] = [];
@@ -798,6 +798,52 @@ describe("round three — reviewer reproductions as fixtures", () => {
     expect(sink(ui.external_id)).toBeUndefined();
     expect(sink(uiWin.external_id)).toBeUndefined();
     expect(sink(store.external_id)).toBe("this.draftStorage.removeItem");
+  });
+
+  it("R13.1 NEGATIVE: a delete on a cache (receiver, method or owning class names it) is not a data deletion", () => {
+    const g = graph();
+    const withExt = (n: LocalGraph["nodes"][number], external_callees: string[]) => ({ ...n, properties: { ...n.properties, external_callees } });
+    const viaField = withExt(symbol("sym:svc/router.py#Router.remove_deployment", "Router.remove_deployment", "svc/router.py"), ["self._model_info_cache.delete_cache"]);
+    const camel = withExt(symbol("sym:svc/history.go#Engine.Evict", "Engine.Evict", "svc/history.go"), ["e.historyCache.Delete"]);
+    const methodName = withExt(symbol("sym:svc/keys.py#revoke_local", "revoke_local", "svc/keys.py"), ["self.client.purgeCache"]);
+    const acronym = withExt(symbol("sym:svc/lru.py#LRUCache.drop_oldest", "LRUCache.drop_oldest", "svc/lru.py"), ["self.store.delete"]);
+    const owner = withExt(symbol("sym:svc/redis_cache.py#RedisCache.delete_cache", "RedisCache.delete_cache", "svc/redis_cache.py"), ["self.redis_client.delete"]);
+    const caller = symbol("sym:svc/api.py#clear_entry", "clear_entry", "svc/api.py");
+    g.nodes = [viaField, camel, methodName, acronym, owner, caller];
+    g.edges = [edge(caller.external_id, owner.external_id, "CALLS")];
+    const all = rankRiskGaps(g, { limit: 20, repoRoot: "" });
+    for (const n of g.nodes) expect(all.find((r) => r.id === n.external_id)?.sink_callee).toBeUndefined();
+  });
+
+  it("R13.1 POSITIVE: durable-store deletes still count, including words that only contain 'cache' as a substring", () => {
+    const g = graph();
+    const withExt = (n: LocalGraph["nodes"][number], external_callees: string[]) => ({ ...n, properties: { ...n.properties, external_callees } });
+    const table = withExt(symbol("sym:svc/invoice.py#delete_invoice", "delete_invoice", "svc/invoice.py"), ["orm.db.invoicetable.delete"]);
+    const substring = withExt(symbol("sym:svc/resp.py#purge_responses", "purge_responses", "svc/resp.py"), ["self.db.cachedresponses_v2.delete"]);
+    const goStore = withExt(symbol("sym:svc/gc.go#gc.Sweep", "gc.Sweep", "svc/gc.go"), ["g.store.DeleteExpired"]);
+    g.nodes = [table, substring, goStore];
+    const all = rankRiskGaps(g, { limit: 20, repoRoot: "" });
+    expect(all.find((r) => r.id === table.external_id)?.sink_callee).toBe("orm.db.invoicetable.delete");
+    expect(all.find((r) => r.id === substring.external_id)?.sink_callee).toBe("self.db.cachedresponses_v2.delete");
+    expect(all.find((r) => r.id === goStore.external_id)?.sink_callee).toBe("g.store.DeleteExpired");
+  });
+
+  it("R13.1 a cache delete the project configured as a destructive sink still counts", () => {
+    const root = repoWith(JSON.stringify({ classification: { destructive_sinks: ["delete_cache"] } }));
+    const g = graph(root);
+    g.nodes = [{ ...symbol("sym:svc/redis_cache.py#RedisCache.delete_cache", "RedisCache.delete_cache", "svc/redis_cache.py"), properties: { file: "svc/redis_cache.py", external_callees: ["self.client.delete_cache"] } }];
+    const all = rankRiskGaps(g, { limit: 20, repoRoot: root });
+    expect(all[0]?.sink_callee).toBe("self.client.delete_cache");
+  });
+
+  it("R13.1 namesCache splits on dots, underscores and camelCase, and needs a whole word", () => {
+    expect(namesCache("self._discovered_model_info_cache")).toBe(true);
+    expect(namesCache("s.historyCache")).toBe(true);
+    expect(namesCache("LRUCache")).toBe(true);
+    expect(namesCache("delete_cached_value")).toBe(true);
+    expect(namesCache("cachedresponses")).toBe(false);
+    expect(namesCache("self.cachet_client")).toBe(false);
+    expect(namesCache("orm.db.app_invoicetable")).toBe(false);
   });
 
   it("R8.10 display grouping: forwarding wrappers name the symbol that owns the destructive call", () => {

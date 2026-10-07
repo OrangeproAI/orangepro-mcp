@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { denominatorNoun, permalink, proofSentinelText, repoRelativeTestPath, repoWebFromRemote, shortReportPath, storeLabel } from "../../src/local/viz/shortReport.js";
+import { denominatorNoun, permalink, proofSentinelText, proofTestLocation, repoRelativeTestPath, repoWebFromRemote, shortReportPath, storeLabel } from "../../src/local/viz/shortReport.js";
 
 describe("short report helpers", () => {
   it("writes next to the detailed report with a short_ prefix", () => {
@@ -64,5 +64,19 @@ describe("short report helpers", () => {
     expect(repoRelativeTestPath("./tests/test_api.py", files)).toEqual({ path: "tests/test_api.py", resolved: true });
     expect(repoRelativeTestPath("tests/test_dup.py", files)).toEqual({ path: "tests/test_dup.py", resolved: false });
     expect(repoRelativeTestPath("tests/test_missing.py", files)).toEqual({ path: "tests/test_missing.py", resolved: false });
+  });
+
+  it("locates a proof's test from real certificate shapes (file::selector, project-relative)", () => {
+    const files = ["tests/unit/caching/test_cache.py", "extras/tests/test_db_fail_fast.py", "pkg/tests/test_x.py"];
+    // Selector recorded in the test path itself, repo-relative already.
+    expect(proofTestLocation("tests/unit/caching/test_cache.py::test_delete[ns]", "python -m pytest -q tests/unit/caching/test_cache.py::test_delete[ns]", files))
+      .toEqual({ testPath: "tests/unit/caching/test_cache.py", testPathResolved: true, testId: "tests/unit/caching/test_cache.py::test_delete[ns]" });
+    // Recorded relative to a sub-project: resolved to the repository path, selector kept.
+    expect(proofTestLocation("tests/test_db_fail_fast.py::test_max_ts", undefined, files))
+      .toEqual({ testPath: "extras/tests/test_db_fail_fast.py", testPathResolved: true, testId: "extras/tests/test_db_fail_fast.py::test_max_ts" });
+    // File only: the selector comes from the runner command.
+    expect(proofTestLocation("tests/test_x.py", "/venv/bin/python -m pytest -q tests/test_x.py::TestA::test_b --tb=short", files))
+      .toEqual({ testPath: "pkg/tests/test_x.py", testPathResolved: true, testId: "pkg/tests/test_x.py::TestA::test_b" });
+    expect(proofTestLocation(undefined, "x", files)).toEqual({});
   });
 });

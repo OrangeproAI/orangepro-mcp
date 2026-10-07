@@ -378,6 +378,21 @@ function textTokens(text: string): Set<string> {
   return new Set(spaced);
 }
 
+// Folders that only say where tests live (`tests/unit/`, `tests/test_pkg/`) carry
+// no behavior words, so moving tests between them must not change name matches.
+// A container-named folder that also names a code folder (`integrations/`) mirrors
+// the code and keeps its words.
+const TEST_CONTAINER_FOLDER_RE = /^(?:tests?|__tests__|spec|unit|integration|functional|e2e|acceptance)$/i;
+const TEST_NAMED_FOLDER_RE = /^(?:tests?_.+|.+_tests?)$/i;
+export function testPathForNameMatch(file: string, codeFolders: ReadonlySet<string>): string {
+  const parts = file.split("/");
+  const name = parts.pop() ?? "";
+  const kept = parts.filter(
+    (folder) => !((TEST_CONTAINER_FOLDER_RE.test(folder) && !codeFolders.has(folder.toLowerCase())) || TEST_NAMED_FOLDER_RE.test(folder))
+  );
+  return [...kept, name].join("/");
+}
+
 function tokenJaccard(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
   let intersection = 0;
@@ -3051,9 +3066,15 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   if (semanticTargets.length > 0 && testNodes.length > 0) {
     const testTokensById = new Map<string, Set<string>>();
     const testsByToken = new Map<string, Set<GraphNode>>();
+    const codeFolders = new Set<string>();
+    for (const target of semanticTargets) {
+      const folders = String(target.properties.file ?? "").split("/");
+      folders.pop();
+      for (const folder of folders) codeFolders.add(folder.toLowerCase());
+    }
     for (const t of testNodes) {
       const names = Array.isArray(t.properties.test_names) ? t.properties.test_names.map(String).join(" ") : "";
-      const tokens = textTokens(`${t.title ?? ""} ${names} ${t.properties.file ?? ""}`);
+      const tokens = textTokens(`${t.title ?? ""} ${names} ${testPathForNameMatch(String(t.properties.file ?? ""), codeFolders)}`);
       testTokensById.set(t.external_id, tokens);
       for (const token of tokens) {
         const bucket = testsByToken.get(token);

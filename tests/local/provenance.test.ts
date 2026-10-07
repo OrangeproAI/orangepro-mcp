@@ -59,11 +59,11 @@ describe("artifact identity", () => {
   it("pins analyzer v8, targeted-mutation oracle v3, and the stable-population ORS identity", () => {
     const identity = buildArtifactIdentity(graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } }), inputs);
 
-    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v8");
+    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v9");
     expect(PROOF_ORACLE_VERSION).toBe("orangepro.targeted_mutation_oracle.v3");
     expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v2");
     expect(identity).toMatchObject({
-      analyzer_version: "orangepro.analyzer.v8",
+      analyzer_version: "orangepro.analyzer.v9",
       oracle_version: "orangepro.targeted_mutation_oracle.v3",
       ors_version: "orangepro.ors.stable_population.v2"
     });

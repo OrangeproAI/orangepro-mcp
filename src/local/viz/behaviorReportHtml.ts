@@ -1093,7 +1093,7 @@ renderRisks();
   const ir=(W.irreversible||[]).map(r=>row(r.path,"→ "+(r.sink||"").split(".").pop()+(r.sameSinkAs?" · same delete as "+r.sameSinkAs:""))).join("")||'<div class="wl-empty">no unproven path reaches a delete</div>';
   host.innerHTML=\`<div class="wl-grid">
     <div class="wl-card"><p class="wl-title wl-change">Changing fast · unproven</p><p class="wl-sub">Where the code moves most with nothing proving it. The place a bug is most likely to have just arrived.</p>\${cf}</div>
-    <div class="wl-card"><p class="wl-title wl-irrev">Can destroy data · unproven</p><p class="wl-sub">Paths that reach a delete or purge with nothing proving they do the right thing. Rarely changing — which is why nobody looks.</p>\${ir}</div>
+    <div class="wl-card"><p class="wl-title wl-irrev">Can destroy data · unproven</p><p class="wl-sub">Paths that reach a delete or purge (cache evictions are not counted) with nothing proving they do the right thing. Rarely changing — which is why nobody looks.</p>\${ir}</div>
   </div>\`;
   host.addEventListener("click",e=>{const r=e.target.closest("[data-path]");if(r&&topPaths.has(r.getAttribute("data-path")))scrollToRisk(r.getAttribute("data-path"));});
 })();

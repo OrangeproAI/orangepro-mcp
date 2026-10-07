@@ -83,7 +83,7 @@ import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
 import { buildBehaviorReportDataWithGaps, type BehaviorReportBuild, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { renderBehaviorReport } from "./viz/behaviorReportHtml.js";
-import { proofSentinelText, renderShortReport, repoRelativeTestPath, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
+import { proofSentinelText, proofTestLocation, renderShortReport, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
 import { renderCoverageReport } from "./pack/coverageReport.js";
 import { confirmedCoverageByLayer } from "./score/coverage.js";
 import { prepareRuntimeCoverage, RuntimeCoveragePrepareResult, type CommandRunner } from "./analyze/coverageArtifacts.js";
@@ -3052,19 +3052,14 @@ function shortReportInput(graph: LocalGraph, ledger: Ledger, build: BehaviorRepo
     const node = nodes.get(symbolId);
     const cert = record.dynamic_proof;
     const command = cert?.command ?? "";
-    const recordedId = /(\S+\.\w+::[\w:\[\]\-.]+)/.exec(command)?.[1];
-    const test = cert?.test_path ? repoRelativeTestPath(cert.test_path, repoFiles) : undefined;
     // Name the test by its repository path; the runner recorded it relative to its project.
-    const nodeId = recordedId && test && cert?.test_path && recordedId.startsWith(`${cert.test_path.replace(/^\.\//, "")}::`)
-      ? `${test.path}${recordedId.slice(cert.test_path.replace(/^\.\//, "").length)}`
-      : recordedId;
+    const test = proofTestLocation(cert?.test_path, command, repoFiles);
     proofs.push({
       symbolId,
       title: node?.title ?? symbolId.split("#").pop() ?? symbolId,
       file: typeof node?.properties.file === "string" ? node.properties.file : symbolId.replace(/^sym:/, "").split("#")[0] ?? "",
       ...(proofSentinelText(cert?.sentinel) ? { sentinel: proofSentinelText(cert?.sentinel) } : {}),
-      ...(test ? { testPath: test.path, testPathResolved: test.resolved } : {}),
-      ...(nodeId ? { testId: nodeId } : {}),
+      ...test,
       generated: Boolean(record.provider || record.model)
     });
   }
