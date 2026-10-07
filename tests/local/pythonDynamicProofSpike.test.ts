@@ -173,6 +173,32 @@ describe.skipIf(!HAS_UV)("python dynamic proof spike (R7.1)", () => {
     } finally { rmSync(fixture, { recursive: true, force: true }); }
   }, TEST_TIMEOUT);
 
+  it("proves a target inside a namespace subpackage (no __init__.py) of a regular package", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "pkg/__init__.py": "",
+      "pkg/experimental/server/db.py": "def answer() -> int:\n    return 42\n",
+      "tests/test_db.py": "from pkg.experimental.server.db import answer\n\ndef test_answer():\n    assert answer() == 42\n"
+    });
+    try {
+      const verdict = runSpike(fixture, { test: "tests/test_db.py::test_answer", target: "pkg/experimental/server/db.py", func: "answer" });
+      expect(verdict.status).toBe("proven");
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }, TEST_TIMEOUT);
+
+  it("still refuses a target whose top-level folder is not a regular package", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "loose/server/db.py": "def answer() -> int:\n    return 42\n",
+      "tests/test_db.py": "from loose.server.db import answer\n\ndef test_answer():\n    assert answer() == 42\n"
+    });
+    try {
+      const verdict = runSpike(fixture, { test: "tests/test_db.py::test_answer", target: "loose/server/db.py", func: "answer" });
+      expect(verdict.status).toBe("unrunnable");
+      expect(verdict.reason).toContain("target_not_loaded_from_sandbox");
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }, TEST_TIMEOUT);
+
   it("parses a custom runner into argv without a shell and redacts separate diagnostic tails", () => {
     const fixture = tempPythonProject({
       "pyproject.toml": UV_PROJECT,

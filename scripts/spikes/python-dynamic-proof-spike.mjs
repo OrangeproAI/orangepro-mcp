@@ -238,7 +238,7 @@ function pythonRunnerPlan(repoRoot, projectRoot, sourceRepoRoot, sourceProjectRo
 }
 
 /** Derive only unambiguous regular Python modules; namespace packages fail closed. */
-function targetModule(repoRoot, projectRoot, targetAbs) {
+function targetModuleNames(repoRoot, projectRoot, targetAbs, allowNamespaceSubpackages) {
   const roots = [...new Set([projectRoot, repoRoot, path.join(projectRoot, "src"), path.join(repoRoot, "src")])];
   const matches = [];
   for (const root of roots) {
@@ -246,11 +246,24 @@ function targetModule(repoRoot, projectRoot, targetAbs) {
     const parts = path.relative(root, targetAbs).split(path.sep);
     if (!parts.every((part) => /^[A-Za-z_]\w*(?:\.py)?$/.test(part)) || !parts.at(-1)?.endsWith(".py")) continue;
     const file = parts.pop();
-    if (parts.some((_, i) => !existsSync(path.join(root, ...parts.slice(0, i + 1), "__init__.py")))) continue;
+    const isPackage = (i) => existsSync(path.join(root, ...parts.slice(0, i + 1), "__init__.py"));
+    // Strict: every folder is a regular package. Namespace-tolerant (PEP 420): the
+    // top-level folder must be a regular package; folders below it may omit __init__.py.
+    const ok = allowNamespaceSubpackages ? parts.length > 0 && isPackage(0) : parts.every((_, i) => isPackage(i));
+    if (!ok) continue;
     const name = file === "__init__.py" ? parts.join(".") : [...parts, file.slice(0, -3)].join(".");
     if (name) matches.push(name);
   }
-  return new Set(matches).size === 1 ? matches[0] : null;
+  return new Set(matches);
+}
+
+function targetModule(repoRoot, projectRoot, targetAbs) {
+  const strict = targetModuleNames(repoRoot, projectRoot, targetAbs, false);
+  if (strict.size > 0) return strict.size === 1 ? [...strict][0] : null;
+  // Only when no strict name exists. checkTargetImport still requires the import to
+  // resolve to the copied file, so a wrong name fails closed instead of proving.
+  const tolerant = targetModuleNames(repoRoot, projectRoot, targetAbs, true);
+  return tolerant.size === 1 ? [...tolerant][0] : null;
 }
 
 function checkTargetImport(plan, moduleName, copiedTarget, timeoutMs) {
