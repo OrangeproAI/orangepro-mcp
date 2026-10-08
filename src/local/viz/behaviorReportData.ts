@@ -7,6 +7,7 @@ import { inspectRiskChurn, inspectRiskInputHealth, isEntryPoint, rankPriorityGap
 import { PROOF_BLOCKER_GUIDE } from "../proofDoctor.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "../generate/draftGuidance.js";
 import { buildArtifactIdentity, comparisonCompatibility, type ComparisonCompatibilityState } from "../provenance.js";
+import type { ReportFeedback } from "../feedback.js";
 
 export interface BehaviorReportData {
   repo: string;
@@ -122,6 +123,8 @@ export interface BehaviorReportData {
   mapModel: SystemMapModel;
   /** Compatibility-gated delta vs the previous run's snapshot. Display-only. */
   delta?: ReportDelta;
+  /** Voluntary feedback links (no data is sent unless the user submits the hosted form). Display-only. */
+  feedback?: ReportFeedback;
   viewMeta: {
     risks: { shown: number; scored: number };
     flows: { shown: number; prunedByCaps: number };

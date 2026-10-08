@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Find the behaviors your tests miss. Generate grounded tests that actually run.</strong>
+  <strong>See which code your tests really protect. Prove it by breaking the code on purpose.</strong>
 </p>
 
 <p align="center">
@@ -16,111 +16,147 @@
 
 ---
 
-OrangePro maps every public behavior in your codebase, scores each one by real test evidence, and shows you the structural blind spots before your users find them. Runs locally. Your code never leaves your machine.
+OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Model calls happen only if you add your own key, for optional test generation and suggestions.
 
 ```bash
 npx -y @orangepro/mcp-server@latest start .
 ```
 
-<!-- TODO: Replace with a terminal GIF showing the command running and report opening -->
-
 ---
 
-## Table of Contents
-
+## Contents
 - [What you get](#what-you-get)
-- [Evidence tiers](#evidence-tiers)
+- [Why developers use it](#why-developers-use-it)
 - [Quick start](#quick-start)
+- [Evidence tiers](#evidence-tiers)
+- [How the ranking works](#how-the-ranking-works)
+- [Prove a test](#prove-a-test)
 - [Use with your coding agent](#use-with-your-coding-agent)
-- [How it works](#how-it-works)
+- [Configuration](#configuration)
 - [Language support](#language-support)
-- [Privacy](#privacy)
-- [CLI reference](#cli-reference)
-- [MCP tools](#mcp-tools-18-total)
-- [Platform](#whats-on-the-hosted-platform)
-- [Contributing](#contributing)
+- [Privacy and network use](#privacy-and-network-use)
+- [Feedback](#feedback)
+- [Reference](#reference)
 
 ---
 
 ## What you get
+Every run writes two reports to `.orangepro/`:
 
-One command produces an interactive HTML report:
-
-```bash
-npx -y @orangepro/mcp-server@latest start .
-open .orangepro/behavior-coverage.html
-```
-The report has two modes: **Simple** (integration-level blind spots, plain English) and **Expert** (full behavior list, evidence tiers, flows, system map). Toggle with the pill switch at the top.
+| File | For | What's in it |
+|---|---|---|
+| `short_behavior-coverage.html` | Leads, reviewers, anyone in a hurry | One page: the headline, where to start, the code paths that delete data and their test evidence, the top-ranked items, the tests behind each proof, and how to reproduce the run. Each name links to its line at the analysed commit (GitHub and GitLab). |
+| `behavior-coverage.html` | Developers | The full interactive map: every behavior and its evidence, flows from entry points through services, the ranked list with suggested tests, and the settings used. |
 
 **<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM (5,237 behaviors mapped)</a>**
 
-<img width="895" alt="OrangePro system map — entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42](https://github.com/user-attachments/assets/a4d85b98-4f19-4647-8dd9-db5911574f49" />
+<img width="895" alt="OrangePro system map: entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
 
-*System map — entry lanes (GraphQL, HTTP, Jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
-
+*System map: entry lanes (GraphQL, HTTP, jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
 
 <img width="818" alt="Priority gaps" src="https://github.com/user-attachments/assets/30a512b6-7830-48db-a00f-a616e7176ea8" />
 
-*Priority gaps of another open source Project HONO — top 20 unproven behaviors ranked by blast radius, with generated test drafts.*
+*Priority gaps in the open-source Hono project: unproven behaviors ranked by what they can break.*
 
 ---
 
-## Evidence tiers
-
-Every behavior gets exactly one tier. Nothing is labeled "tested" on faith.
-
-| Tier | Color | What it means |
-|------|-------|---------------|
-| **Dynamically Proven** | 🟢 | A real test kills a targeted mutation of this behavior |
-| **Runtime-covered** | 🟢 | Coverage tool executed this code |
-| **Statically Linked** | 🟡 | A test imports and calls this code — structural link, not proof |
-| **Unconfirmed Candidate** | ⚪ | A similar test file exists — a lead, not evidence |
-| **No Signal** | 🔴 | Nothing tests this behavior |
-
-> **"Dynamically Proven 0" is normal on first run.** Proof requires running tests against targeted mutations. That's the trust model.
+## Why developers use it
+- **It tells you what a test actually checks, not just what it runs.** A test that calls a function isn't necessarily checking it. `opro prove` replaces the function body with a fixed return value in an isolated copy and reruns your own test, unchanged. If the test still passes, it wasn't protecting that function.
+- **It puts consequences first.** Two lists sit above the ranking:
+  - **Can destroy data:** code paths that reach a delete or purge with no proven test. Cache evictions don't count.
+  - **Changing fast:** code that changes often with nothing proving it works.
+- **It's honest about evidence.** A function is "linked" only when a test calls that exact function. A test with a similar name is a lead, never coverage. Tests that only check mocks don't count.
+- **It's repeatable.** Same commit, full git history, same config and same version give the same ranking. Each report records fingerprints, so you can tell when a change in results came from the code and when it came from the tool.
+- **Your coding agent can drive it.** As an MCP server it gives Claude Code, Cursor, Copilot, Codex and others the ranked gaps, the suggested test location and the proof step in one loop.
+- **It's free, local and open source (MIT).** No account, no API key for analysis, and no upload.
 
 ---
 
 ## Quick start
-
 ```bash
 cd /path/to/your/repo
-npm install          # install the repo's own dependencies first
-
+# install the repo's own dependencies first (npm ci, uv sync, go mod download, ...)
 npx -y @orangepro/mcp-server@latest start .
-open .orangepro/behavior-coverage.html
+open .orangepro/short_behavior-coverage.html
 ```
 
-No API key needed. The report shows your system map, evidence tiers, priority gaps, and delta since last run.
+Analysis, ranking and proof need no model key. Test generation is optional and uses your own key (see [Model setup](#reference)).
 
-**Want test generation?** Add a model key (BYOK):
+**Tips for the most accurate run:**
+- **Use a full clone, not a shallow one.** Change history drives part of the ranking, and the report says when history was partial.
+- **Exclude what isn't product code** with `rank_exclude_paths` (see [Configuration](#configuration)).
+- **Rerun after a change.** The detailed report shows what entered, moved up or got resolved since the last run.
 
-```bash
-export ANTHROPIC_API_KEY="..."   # or OPENAI_API_KEY / OLLAMA_BASE_URL
-npx -y @orangepro/mcp-server@latest start .
-```
-
-AI output never changes evidence tiers. Only the mutation-kill oracle can mint Dynamically Proven.
-
-**Output:**
-
+**What's written:**
 ```
 .orangepro/
-├── behavior-coverage.html   ← open this
-├── graph.json               ← deterministic evidence graph
-├── COVERAGE_REPORT.md       ← coverage and gap summary
-└── ai/                      ← candidate flows (when a key is configured)
+├── short_behavior-coverage.html   ← one-page summary
+├── behavior-coverage.html         ← full interactive report
+├── graph.json                     ← the evidence graph (deterministic)
+├── ledger.json                    ← proof certificates
+├── rtm.md                         ← traceability matrix
+└── config.json                    ← optional per-repo settings
 
-orangepro_generated/         ← generated tests; your source files are never touched
+orangepro_generated/               ← generated tests (only with a model key); your files are never edited
 ```
 
-Each rerun shows a **delta banner**: what entered the codebase, what moved up in risk, what got resolved.
+---
+
+## Evidence tiers
+Every behavior gets exactly one tier.
+
+| Tier | What it means |
+|---|---|
+| **Dynamically Proven** | A test passed on the original code and failed at its own assertion when this function was broken in an isolated copy. |
+| **Runtime-covered** | A coverage tool you ran executed this code. |
+| **Statically Linked** | A test calls this exact function. That's a structural link, not proof. |
+| **Name match only** | A test with a similar name exists. That's a lead, not evidence. |
+| **No test found** | Nothing links a test to it. |
+
+**What OrangePro doesn't count, so linked numbers are a floor, not a coverage percentage:**
+- tests that only assert on mocks;
+- calls made over HTTP or from end-to-end suites;
+- in Python, objects that reach a test only through a fixture.
+
+Check the tests before writing new ones for a flagged path.
+
+> **"Dynamically Proven 0" is normal on a first run.** Proof runs your tests, so it happens only for the functions you choose, or within the attempt budget of `opro start`.
+
+---
+
+## How the ranking works
+Each unproven function gets an OrangePro Risk Score, **ORS = P × I × D**:
+- **P**: how likely it is to change. Change history, fan-out, new code and size.
+- **I**: what it can break. Incoming references, entry-point position, data sensitivity, and a floor for paths that reach a delete or purge within two calls.
+- **D**: how hard a break would be to notice. Evidence tier, and whether it runs unattended (jobs and schedulers).
+
+The score sets the order of work. It is not a defect probability. The weights are fixed and no AI model is involved. The report shows the inputs behind every row.
+
+---
+
+## Prove a test
+```bash
+# Python: the mutation value is derived from the function (return annotation or its observed result)
+opro prove-loop --target-symbol 'sym:app/billing/invoices.py#void_invoice' \
+  --test 'tests/test_invoices.py::test_void_marks_invoice_void' --replacement sentinel
+
+# TypeScript / JavaScript: give the inert body to substitute
+opro prove-loop --target-symbol 'sym:src/orders.service.ts#OrdersService.cancel' \
+  --test src/orders.service.spec.ts --replacement 'return null;'
+```
+- **Proven:** the test passes on the original code and fails at its own assertion on the broken copy.
+- **Not proven:** the test still passes on the broken copy, so it doesn't protect that function. That's a finding too.
+- **Unrunnable:** setup failed. This is never counted either way.
+
+**Find weak tests without a model key:**
+```bash
+opro roast .   # passing tests whose targeted mutant still survives
+```
 
 ---
 
 ## Use with your coding agent
-
-OrangePro runs as an MCP server. Add to your client's config:
+OrangePro runs as an MCP server. Add it to your client's config:
 
 ```json
 {
@@ -138,207 +174,139 @@ OrangePro runs as an MCP server. Add to your client's config:
 | Claude Code | `.mcp.json` or `~/.claude.json` |
 | Cursor | `~/.cursor/mcp.json` or Settings → MCP |
 | VS Code / Copilot | MCP settings |
-| Codex / OpenCode | Run `npx -y @orangepro/mcp-server@latest agent --client codex` |
+| Codex / OpenCode / Windsurf | `npx -y @orangepro/mcp-server@latest agent --client codex` prints the setup |
 
-**The workflow:** Tell your agent:
-
-> "Use `orangepro_start`, then `orangepro_generate_tests` with base_ref=main. Write each test to its suggested_path, run it, and report pass/fail."
-
-The agent writes the test, runs it, calls `orangepro_prove`, and the behavior turns Dynamically Proven. One prompt, full loop.
+**A prompt that runs the whole loop:**
+> "Use `orangepro_start`, then `orangepro_find_test_gaps`. For the top gap, write a test at the suggested path, run it, then call `orangepro_prove_loop` and tell me whether it was proven."
 
 ---
 
-## Works with
+## Configuration
+Optional. Put it in `.orangepro/config.json` in the repository, or in `~/.orangepro/config.json` for defaults across repositories. Every setting that changes the ranking is shown in the report.
 
-<p>
-  <strong>Claude Code</strong> · <strong>Cursor</strong> · <strong>GitHub Copilot</strong> · <strong>Codex</strong> · <strong>Windsurf</strong> · <strong>OpenCode</strong> · <strong>VS Code</strong>
-</p>
-
-Any MCP-compatible agent can drive OrangePro. No vendor lock-in.
-
----
-
-## How it works
-
+```json
+{
+  "classification": {
+    "rank_exclude_paths": ["ui/**", "docs/**", "scripts/**"],
+    "test_support_paths": ["internal/testutil/**"],
+    "destructive_sinks": ["archive*"]
+  },
+  "tuning": { "churn_window_days": 180 },
+  "proof": { "python_runner": "auto", "attempt_limit": 20 },
+  "overrides": [
+    { "symbol": "sym:src/legacy/shim.ts#shim", "action": "suppress", "reason": "generated shim, not product code" }
+  ]
+}
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Your Code  │ ──► │  Knowledge   │ ──► │  Evidence   │
-│  (any lang) │     │    Graph     │     │   Tiers     │
-└─────────────┘     └──────────────┘     └─────────────┘
-                           │
-                    ┌──────┴──────┐
-                    ▼             ▼
-             ┌───────────┐  ┌──────────┐
-             │ Gap Report│  │ Generate │
-             │ + Risks   │  │  Tests   │
-             └───────────┘  └──────────┘
-```
-
-| Phase | What happens | Needs a model key? |
-|-------|-------------|-------------------|
-| **Analyze** | AST walk → behaviors, flows, evidence tiers | No |
-| **Score** | Graph readiness score (0–100) | No |
-| **Generate** | Grounded tests for top gaps | Yes (BYOK) |
-| **Prove** | Mutation-kill oracle confirms test breaks if behavior changes | No |
-
-Same code = same score. Deterministic. Always.
+- **`rank_exclude_paths`** removes paths from the ranking. They are still counted as behaviors.
+- **`destructive_sinks`** adds delete-like calls for your codebase.
+- **Overrides** (`suppress`, `pin`, `reclassify`) each require a reason, and the report lists them.
+- **Weights and tiers can't be configured.**
 
 ---
 
 ## Language support
-
-| Language | Static mapping | Generated tests | Dynamic proof |
+| Language | Map and link | Generated tests | Mutation proof |
 |----------|:-:|:-:|:-:|
 | TypeScript / JavaScript | ✓ | ✓ Jest / Vitest / Mocha | ✓ |
-| Python | ✓ | ✓ pytest | ✓ |
+| Python | ✓ | ✓ pytest | ✓ pytest |
 | Go | ✓ | ✓ `*_test.go` | ✓ |
 | Java | ✓ | ✓ JUnit 4/5 | ✓ |
 | Kotlin, Rust, PHP, C#, Ruby, Swift, C, C++ | ✓ | planned | planned |
 
-Static mapping works across many languages via tree-sitter. Dynamic proof is deliberately narrower — each language needs a runner, mutation locator, and sandbox profile.
+Mapping uses tree-sitter. Proof is deliberately narrower: each language needs a runner, a mutation locator and a sandbox profile.
 
 ---
 
-## Highest-value local run
+## Privacy and network use
+- **Nothing about your code or your runs is sent anywhere.** There is no usage telemetry.
+- **Source is read in-process** and never stored or uploaded. Reports and the evidence graph contain metadata, not your source.
+- **Your source files are never edited.** Proofs run in an isolated copy.
+- **Model calls happen only if you configure a key,** and they go directly from your machine to the provider you chose. Keys are read from the environment and never written to disk.
+- **Reports load nothing from the network.** The only outbound links are ones you click.
 
-Use the repository's own setup and test commands first, and keep unit and integration
-coverage in separate artifacts. Then run `opro start`; it performs analysis, ingests
-the artifacts, attempts targeted proof, generates report-visible drafts, and writes the
-final report. A separate `opro analyze` is unnecessary when `opro start` follows it.
+---
+
+## Feedback
+Reports include a **Give feedback** link and a **This looks wrong** link on each finding. Once in a while, after the findings, they also ask whether the report helped.
+- **The links carry nothing about your project.** The form sends only what you review and submit.
+- **You stay anonymous** unless you leave an email.
 
 ```bash
-# 1. Install/build exactly as the repository documents.
-# 2. Run the repository's unit and integration coverage commands separately.
-# 3. Record artifact provenance (example paths and commands):
-mkdir -p .orangepro
-# create .orangepro/coverage-suites.json using the schema below
-
-opro coverage .                    # optional preflight: discover/generate artifacts
-opro start . --proof-limit 5 --generate-limit 20
+opro feedback          # print the link and your settings
+opro feedback off      # stop the "Did this help?" question (links stay)
+ORANGEPRO_FEEDBACK_URL=off   # hide every feedback link
 ```
+
+The question appears at most once every 14 days (`ORANGEPRO_FEEDBACK_COOLDOWN_DAYS`). That preference is stored only on your machine. MCP clients get the link as optional result metadata (`_meta["ai.orangepro/feedback_url"]`), and your agent is never asked to prompt you for feedback.
+
+---
+
+## Reference
+<details>
+<summary><strong>CLI</strong></summary>
+
+```bash
+opro                          # same as opro start .
+opro start . --no-ai --no-auto   # analyze + reports, no model calls, no proof attempts
+opro start --base main        # scope to a branch diff
+opro analyze                  # build the evidence graph and reports
+opro gaps --limit 10          # top unproven behaviors, ranked
+opro prove-loop ...           # mutation proof for one function (see above)
+opro roast .                  # find tests whose mutant survives (no key needed)
+opro doctor --proof           # why top targets aren't proven yet
+opro generate --base main     # tests for what this branch changed (needs a model key)
+opro rtm                      # traceability matrix
+opro export                   # metadata-only evidence pack
+opro coverage                 # find or generate runtime coverage artifacts
+opro feedback [on|off]        # feedback link and invitation setting
+opro mcp                      # run as an MCP server (stdio)
+```
+Add `--json` to any read command for machine output. Run `opro help` for every flag.
+</details>
+
+<details>
+<summary><strong>MCP tools (18)</strong></summary>
+
+| Tool | What it does |
+|------|--------------|
+| `orangepro_start` | Analyze, write both reports, return next actions |
+| `orangepro_analyze_sources` | Build or refresh the evidence graph |
+| `orangepro_find_test_gaps` | Unproven behaviors ranked by ORS |
+| `orangepro_prove_loop` | Setup + mutation proof + report refresh for one behavior |
+| `orangepro_prove` | Mutation proof only |
+| `orangepro_generate_tests` | Grounded tests for gaps (model key required) |
+| `orangepro_changed_impact` | What a diff touches |
+| `orangepro_status` | Workspace state without running anything |
+| `orangepro_doctor` | What evidence to add next |
+| `orangepro_graph_score` | Graph readiness (0–100) |
+| `orangepro_rtm` | Traceability matrix |
+| `orangepro_stats` | Aggregate statistics |
+| `orangepro_record_run` | Record a test run result |
+| `orangepro_explain_test` | Why a test was generated |
+| `orangepro_export_evidence_pack` | Metadata-only evidence pack |
+| `orangepro_update_graph` | Incremental graph update |
+| `orangepro_ai_links` | Weak behavior→code suggestions (optional AI, never evidence) |
+| `orangepro_ai_flows` | Candidate flows (optional AI, never evidence) |
+</details>
+
+<details>
+<summary><strong>Coverage artifacts</strong></summary>
+
+Run your own unit and integration coverage first, then `opro start`. OrangePro ingests Go coverprofiles, lcov, coverage.py XML and JaCoCo XML, and keeps unit, integration and unclassified coverage separate. To label artifacts, add `.orangepro/coverage-suites.json`:
 
 ```json
 {
   "artifacts": {
-    ".orangepro/coverage/unit.coverprofile": {
-      "suite": "unit",
-      "command": "make unit-test-coverage"
-    },
-    ".orangepro/coverage/integration.coverprofile": {
-      "suite": "integration",
-      "command": "make integration-test-coverage"
-    }
+    ".orangepro/coverage/unit.coverprofile": { "suite": "unit", "command": "make unit-test-coverage" },
+    ".orangepro/coverage/integration.coverprofile": { "suite": "integration", "command": "make integration-test-coverage" }
   }
 }
 ```
-
-Without this manifest, OrangePro conservatively infers clear `unit`/`integration` names
-and labels everything else `unclassified`; it never guesses that an aggregate profile is
-unit-only. The report shows unit, integration, their overlap, unclassified coverage, and
-the combined union separately. `--proof-limit` controls dynamic proof attempts (which
-may draft a test for proof); `--generate-limit` independently controls the additional
-report-visible risk-gap drafting lane. A generation run
-also records its terminal status and exact reason, so a compiler/import failure is not
-misreported as a generic dependency problem.
-
----
-
-## Privacy
-
-- **No stored source.** Reads code in-process. Never uploads to an OrangePro server.
-- **No existing-source mutation.** Never edits your source or test files.
-- **Your keys stay yours.** Read from env at call time, never persisted.
-- **BYOK is direct.** Code context goes to the model provider you configure. OrangePro is not in that path.
-
----
-
-<details>
-<summary><strong>CLI reference</strong></summary>
-
-```bash
-opro                          # analyze + report + agent next actions
-opro start --base main        # same, scoped to a branch diff
-opro analyze                  # build the evidence graph
-opro score                    # graph readiness (0–100)
-opro gaps --limit 10          # top 10 untested behaviors
-opro generate --base main     # tests for PR diff
-opro generate --single        # top gap, whole repo
-opro prove                    # mutation-kill oracle
-opro rtm                      # traceability matrix
-opro export                   # metadata-only evidence pack
-opro mcp                      # run as MCP server (stdio)
-opro doctor                   # what evidence to add next
-opro coverage                 # discover/generate artifacts; analyze or start ingests them
-```
-
-Add `--json` to any read command for machine output. Run `opro help` for the full reference.
-
 </details>
 
 <details>
-<summary><strong>MCP tools (18 total)</strong></summary>
-
-| Tool | What it does |
-|------|--------------|
-| `orangepro_start` | One-command setup: analyze + report + next actions |
-| `orangepro_analyze_sources` | Build/refresh the evidence graph |
-| `orangepro_generate_tests` | Generate grounded tests for gaps |
-| `orangepro_prove` | Run mutation-kill oracle on a behavior |
-| `orangepro_prove_loop` | Setup + dynamic proof + report refresh for one behavior |
-| `orangepro_find_test_gaps` | List behaviors with weak/missing tests, ranked by risk |
-| `orangepro_graph_score` | Graph readiness score (0–100) |
-| `orangepro_status` | Workspace state without generating anything |
-| `orangepro_doctor` | Recommend next evidence to improve quality |
-| `orangepro_rtm` | Requirements traceability matrix |
-| `orangepro_stats` | Aggregate statistics |
-| `orangepro_changed_impact` | What a diff touches (requires git + base ref) |
-| `orangepro_record_run` | Record a test run result |
-| `orangepro_explain_test` | Explain why a test was generated |
-| `orangepro_export_evidence_pack` | Export metadata-only evidence pack |
-| `orangepro_update_graph` | Incremental graph update |
-| `orangepro_ai_links` | Weak behavior→symbol suggestions (optional AI) |
-| `orangepro_ai_flows` | Candidate flow discovery (optional AI) |
-
-</details>
-
-<details>
-<summary><strong>PR workflow</strong></summary>
-
-```bash
-opro generate --base main              # tests for what this branch changed
-opro generate --pr 1234                # checks out PR #1234
-opro generate --changed                # current branch diff vs main
-```
-
-Each generated test includes:
-- **Grounding** — the real files, symbols, and existing tests it cites
-- **Run hints** — where to write it, how to run it
-- **Scenario bucket** — what failure mode it targets
-
-If dependencies aren't installed, tests are kept as **Manual tests** (Given/When/Then steps with the blocker named). Install dependencies and re-run to convert them to runnable tests.
-
-</details>
-
-<details>
-<summary><strong>Test categories</strong></summary>
-
-Generation is evidence-gated. A category is produced only when the graph has supporting evidence.
-
-| Category | What it targets |
-|----------|-----------------|
-| Happy path | Primary expected behavior |
-| Validation error | Bad/invalid input handling |
-| Edge case | Boundaries, empty/null, concurrency, retries |
-| Integration flow | Multi-step behavior across services |
-| Security / privacy | Auth, injection, data leakage |
-| Regression | Pinning a previously-broken behavior |
-
-</details>
-
-<details>
-<summary><strong>Model setup (BYOK)</strong></summary>
-
-Analysis, scoring, and proof need no model key. Generation does.
+<summary><strong>Model setup (BYOK, only for generation)</strong></summary>
 
 | Provider | Environment variable |
 |----------|---------------------|
@@ -346,49 +314,37 @@ Analysis, scoring, and proof need no model key. Generation does.
 | Anthropic | `ANTHROPIC_API_KEY` (optional: `ANTHROPIC_MODEL`) |
 | Ollama (local, no key) | `OLLAMA_BASE_URL` (optional: `OLLAMA_MODEL`) |
 
-Auto-detect order: OpenAI → Ollama → Anthropic. Override with `--provider` and `--model`.
-The defaults are `gpt-5.3-codex` for OpenAI and `claude-sonnet-5` for Anthropic.
-
-Run `opro setup` to configure interactively. Keys stay in your environment — never written to graph, config, or artifacts.
-
+Auto-detect order: OpenAI → Ollama → Anthropic. Override with `--provider` and `--model`, or run `opro setup`.
+- **Model output never changes an evidence tier.** Only the mutation proof can mark a behavior Proven.
+- **Generated tests land in `orangepro_generated/`** with the files and existing tests they're grounded on, and where and how to run them.
+- **Generated tests that can't run yet are kept as manual steps,** with the blocker named.
 </details>
 
 <details>
-<summary><strong>AI candidate lanes</strong></summary>
+<summary><strong>PR workflow</strong></summary>
 
-With a provider key, OrangePro stages weak AI behavior→symbol links and AI-suggested candidate flows. These are review/generation worklists, not evidence:
-
-- AI links appear as `AI-linked` suggestions.
-- AI flows are stored separately from deterministic flows.
-- Neither lane changes evidence tiers or denominator counts.
-
-Use them when you want the agent to find likely service-boundary flows faster; ignore them for a deterministic-only report.
-
+```bash
+opro generate --base main     # tests for what this branch changed (read-only git diff)
+opro generate --changed       # current branch vs its base
+opro generate --pr 1234       # checks out PR #1234 (asks first; refuses on a dirty tree)
+```
 </details>
 
 ---
 
-## What's on the hosted platform
-
-This repo is the free local tool. The [OrangePro platform](https://orangepro.ai) adds:
-
-- Persistent knowledge graph across PRs and repos
-- PR/CI policy gates over evidence tiers and risk deltas
-- Jira / Confluence / TestRail / OpenAPI enrichment
-- Cross-repo intelligence and recurring-flow memory
-- Production incident correlation and regression targeting
-- Team dashboards and test lifecycle management
-
----
+## Hosted platform
+This repository is the free local tool. The [OrangePro platform](https://orangepro.ai) adds:
+- a persistent graph across PRs and repositories;
+- CI gates on evidence and risk changes;
+- requirement and incident correlation;
+- team dashboards.
 
 ## Contributing
-
 ```bash
 git clone https://github.com/OrangeproAI/orangepro-mcp.git
 cd orangepro-mcp && npm ci && npm run build
 npm test
 ```
-
 PRs welcome. Please open an issue first for large changes.
 
 ---

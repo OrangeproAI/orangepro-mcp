@@ -3,7 +3,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pingTelemetry } from "./telemetry.js";
 import {
   AnalysisMeta,
   CandidateFlowMeta,
@@ -84,6 +83,8 @@ import { renderVizHtml } from "./viz/html.js";
 import { buildBehaviorReportDataWithGaps, type BehaviorReportBuild, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { renderBehaviorReport } from "./viz/behaviorReportHtml.js";
 import { proofSentinelText, proofTestLocation, renderShortReport, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
+import { claimOutcomeInvitation, reportFeedback } from "./feedback.js";
+import { ORANGEPRO_VERSION } from "./version.js";
 import { renderCoverageReport } from "./pack/coverageReport.js";
 import { confirmedCoverageByLayer } from "./score/coverage.js";
 import { prepareRuntimeCoverage, RuntimeCoveragePrepareResult, type CommandRunner } from "./analyze/coverageArtifacts.js";
@@ -2173,7 +2174,6 @@ export async function opStart(
   opts: StartOptions = {},
   deps: OperationDeps = defaultDeps()
 ): Promise<StartResult> {
-  const startTime = Date.now();
   const providerOpts = startProviderOverride(root, opts);
   const scanRoot = opts.source ? resolve(opts.source) : resolve(root);
   const providerEnv = loadProviderEnv([root, scanRoot], deps.env);
@@ -2567,27 +2567,6 @@ export async function opStart(
   const rtm = opRtm(root, { format: "md", baseRef: opts.baseRef, limit: START_RTM_LIMIT });
   const finalGraph = loadGraph(workspacePaths(root).graphPath);
   const aiLinked = summarizeAiLinks(finalGraph);
-  // --- Telemetry (v2): fire after report is generated, graph is final ---
-  try {
-    const lc: Record<string, number> = {};
-    for (const n of finalGraph.nodes) {
-      if (n.kind === "File" && typeof n.properties.language === "string") {
-        lc[n.properties.language] = (lc[n.properties.language] ?? 0) + 1;
-      }
-    }
-    const topLang = Object.entries(lc).sort((a, b) => b[1] - a[1]);
-    const dominantLang = topLang.length > 0 ? topLang[0][0] : "unknown";
-    const behaviorCount = behaviorNodes(finalGraph).length;
-    pingTelemetry({
-      event: "scan_complete",
-      fileCount: scope.files,
-      language: dominantLang,
-      behaviors: behaviorCount,
-      hasByok: !!(providerEnv.ANTHROPIC_API_KEY || providerEnv.OPENAI_API_KEY || providerEnv.OLLAMA_BASE_URL),
-      reportGenerated: !!coverageHtml,
-      durationMs: Date.now() - startTime,
-    });
-  } catch { /* telemetry must never fail the run */ }
 
   const finalAnalyze: AnalyzeSummary = {
     ...analyze,
@@ -2994,7 +2973,7 @@ export function opBehaviorCoverageHtml(
   root: string,
   outputPath = "orangepro-behavior-coverage.html",
   dynamicProof?: DynamicProofReportInput,
-  options: { persistBaseline?: boolean } = {}
+  options: { persistBaseline?: boolean; feedbackInvite?: boolean } = {}
 ): { behavior_coverage_path: string; short_report_path?: string } {
   const graph = loadGraph(workspacePaths(root).graphPath);
   // Standalone regens have no this-run outcome: fall back to the persisted
@@ -3016,6 +2995,24 @@ export function opBehaviorCoverageHtml(
     if (prev && prev.summary && Array.isArray(prev.riskPaths)) data.delta = computeReportDelta(prev, data);
   } catch {
     // buildBehaviorReportData already provides an explicit first_run state.
+  }
+  // Feedback links are display-only. The "Did this help?" invitation is claimed only
+  // for the final report of a run (an intermediate view is overwritten), at most once
+  // per cooldown window, and the preference lives on this machine only.
+  try {
+    const findings = data.risks.length + (data.worklists?.irreversible?.length ?? 0);
+    const feedback = reportFeedback({
+      frameworkLabel: data.framework,
+      toolVersion: ORANGEPRO_VERSION,
+      analysis: graph.analysis,
+      behaviorTotal: data.summary.total,
+      findings,
+      hasPatch: (data.generatedTotal ?? 0) > 0,
+      invite: options.feedbackInvite ?? (options.persistBaseline === false ? false : () => claimOutcomeInvitation())
+    });
+    if (feedback) data.feedback = feedback;
+  } catch {
+    // feedback links are optional; a report never fails over them
   }
   const html = renderBehaviorReport(data);
   const htmlPath = resolve(root, outputPath);

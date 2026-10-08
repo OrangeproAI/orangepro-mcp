@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
-import { createLocalServer } from "../../src/local/mcp.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createLocalServer, FEEDBACK_META_KEY } from "../../src/local/mcp.js";
 
 describe("local MCP server", () => {
   it("registers dynamic proof separately from static record_run", () => {
@@ -56,5 +59,19 @@ describe("local MCP server", () => {
     expect(aiFlows?.description).toContain("deterministic flow counts");
     expect(Object.keys(aiFlows.inputSchema?.shape ?? {})).toEqual(expect.arrayContaining(["workspace", "apply", "provider", "model"]));
     expect(() => aiFlows.inputSchema?.parse({ provider: "invalid-provider" })).toThrow();
+  });
+
+  it("FB08: a failed tool call carries an optional feedback link in _meta and never asks the model for feedback", async () => {
+    const server = createLocalServer() as unknown as {
+      _registeredTools: Record<string, { description?: string; handler: (input: Record<string, unknown>, extra?: unknown) => Promise<{ isError?: boolean; _meta?: Record<string, unknown> }> }>;
+    };
+    const workspace = mkdtempSync(join(tmpdir(), "opro-mcp-fb-"));
+    const result = await server._registeredTools.orangepro_explain_test.handler({ workspace, generated_test_id: "missing" }, {});
+    expect(result.isError).toBe(true);
+    const url = String(result._meta?.[FEEDBACK_META_KEY] ?? "");
+    expect(url.startsWith("https://orangepro.ai/feedback#")).toBe(true);
+    expect(new URLSearchParams(url.split("#")[1]).get("entry")).toBe("blocked");
+    expect(url).not.toContain(workspace);
+    for (const tool of Object.values(server._registeredTools)) expect(tool.description ?? "").not.toMatch(/feedback/i);
   });
 });

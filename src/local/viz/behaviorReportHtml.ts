@@ -279,24 +279,33 @@ nav.tabs{display:flex;gap:2px;margin:18px 0 0;border-bottom:1px solid var(--bd)}
 .cat-pill{font-size:10px;padding:3px 8px;border-radius:4px;font-weight:600;letter-spacing:.01em;display:inline-flex;align-items:center;gap:4px}
 .cat-pill.cp-drafted{background:var(--obg);border:1px solid var(--obd);color:var(--orange)}
 .cat-pill.cp-open{background:transparent;border:1px dashed var(--bd2);color:var(--faint)}
-/* PAYWALL CTA */
-.paywall{background:linear-gradient(135deg,rgba(240,136,62,.08),rgba(240,136,62,.02));border:1px dashed var(--obd);border-radius:9px;padding:14px 16px;margin-top:14px;text-align:center}
-.paywall-num{font-size:18px;font-weight:750;color:var(--orange);font-variant-numeric:tabular-nums}
-.paywall-txt{font-size:12px;color:var(--muted);margin:4px 0 10px}
-.paywall-btn{display:inline-flex;align-items:center;gap:6px;background:var(--orange);color:#1a0a02;font-size:12px;font-weight:700;padding:7px 14px;border-radius:6px;text-decoration:none;transition:opacity .12s}
-.paywall-btn:hover{opacity:.85}
-
-
-/* PLATFORM CTA: STICKY FOOTER */
-.platform-footer{position:fixed;bottom:0;left:0;right:0;background:linear-gradient(135deg,#1a0a02 0%,#2a1508 100%);border-top:1px solid var(--obd);padding:8px 20px;display:flex;align-items:center;justify-content:center;gap:12px;z-index:999;font-size:12px}
-.platform-footer-text{color:var(--muted);font-size:12px}
-.platform-footer-text b{color:var(--orange);font-weight:700}
-.platform-footer-btn{display:inline-flex;align-items:center;gap:5px;background:var(--orange);color:#1a0a02;font-size:11px;font-weight:700;padding:5px 12px;border-radius:5px;text-decoration:none;transition:opacity .12s;white-space:nowrap}
-.platform-footer-btn:hover{opacity:.85}
-/* PLATFORM CTA: TOP BANNER (inside risk panel) */
-.platform-top-banner{background:linear-gradient(135deg,rgba(240,136,62,.06),rgba(240,136,62,.02));border:1px solid var(--obd);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px}
-.platform-top-banner-text{font-size:12px;color:var(--muted)}
-.platform-top-banner-text b{color:var(--ink)}
+/* NOTE BANDS (generated-output notes; no external calls to action) */
+.paywall{background:var(--s1);border:1px dashed var(--bd2);border-radius:9px;padding:12px 16px;margin-top:14px;text-align:center}
+.paywall-num{font-size:15px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+.paywall-txt{font-size:12px;color:var(--muted);margin:4px 0 0}
+/* REPORT FOOTER: persistent, quiet */
+.platform-footer{position:fixed;bottom:0;left:0;right:0;background:var(--s1);border-top:1px solid var(--bd);padding:7px 20px;display:flex;align-items:center;justify-content:center;gap:16px;z-index:999;font-size:12px;color:var(--muted)}
+.platform-footer a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--bd2)}
+.platform-footer a:hover{color:var(--orange);border-color:var(--orange)}
+.platform-footer .fb-main{color:var(--orange);font-weight:700;border-color:var(--obd)}
+.risk-summary{font-size:12px;color:var(--muted);margin-bottom:12px}
+.risk-summary b{color:var(--ink)}
+/* FEEDBACK */
+.fb-invite{border:1px solid var(--obd);background:var(--obg);border-radius:9px;padding:12px 16px;margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.fb-q{font-size:13px;font-weight:700;color:var(--ink)}
+.fb-answers{display:flex;gap:6px;flex-wrap:wrap}
+.fb-ans{font:650 12px var(--sans);padding:5px 12px;border-radius:6px;border:1px solid var(--obd);background:var(--s1);color:var(--ink);text-decoration:none}
+.fb-ans:hover{border-color:var(--orange);color:var(--orange)}
+.fb-skip{margin-left:auto;font:500 11px var(--sans);background:none;border:0;color:var(--faint);cursor:pointer;text-decoration:underline}
+.fb-sub{flex-basis:100%;font-size:11px;color:var(--faint);margin:0}
+.fb-blocked{border:1px solid var(--bd2);background:var(--s1);border-radius:8px;padding:9px 14px;margin:10px 0 0;font-size:12px;color:var(--muted)}
+.fb-blocked a{color:var(--orange);font-weight:700}
+.fb-wrong{font-size:11px;color:var(--faint);text-decoration:none;border-bottom:1px dotted var(--faint);margin-left:auto}
+.fb-wrong:hover{color:var(--orange);border-color:var(--orange)}
+.fb-note{font-size:11px;color:var(--muted);background:var(--s2);border-radius:6px;padding:6px 10px;margin-top:8px}
+.risk-foot{display:flex;align-items:center;gap:10px;margin-top:8px}
+.wl-row .fb-wrong{margin-left:8px;font-family:var(--sans);font-size:10px;flex-shrink:0;visibility:hidden}
+.wl-row:hover .fb-wrong,.wl-row .fb-wrong:focus{visibility:visible}
 /* Add bottom padding to body so sticky footer doesn't overlap content */
 body{padding-bottom:48px}
 /* === OPTION A: MODE TOGGLE (SEGMENTED PILL) === */
@@ -353,6 +362,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
 
 <section class="kpis" id="kpis"></section>
 <p class="metric-scope" id="metric-scope"></p>
+<div class="fb-blocked" id="fb-blocked" hidden></div>
 
 <div class="delta-hero simple-only" id="delta-hero"></div>
 
@@ -370,7 +380,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
 
 <!-- TAB 1: YOUR CODE — familiar territory -->
 <section class="panel active" id="panel-codebase" role="tabpanel">
-  <p class="bridge">We scanned your repo and found <b id="br-methods">—</b> public methods across <b id="br-services">—</b> services, with <b id="br-tests">—</b> test files. Here's what we're working with.</p>
+  <p class="bridge">Scanned <b id="br-methods">—</b> public methods in <b id="br-services">—</b> services, and <b id="br-tests">—</b> test files.</p>
   <div id="delta-banner"></div>
   <div class="card" id="sysmap-card" hidden>
     <p class="card-lbl">Your system, as the graph sees it — entry lanes flowing into the services they reach. Node size = flow traffic; color = dominant evidence tier; red ring = top-20 risk. Repeatable for the same commit, Git history, configuration, and OrangePro version.</p>
@@ -413,7 +423,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
 
 <!-- TAB 2: BEHAVIORS — bridge from "methods" to "behaviors" -->
 <section class="panel" id="panel-behaviors" role="tabpanel">
-  <p class="bridge">Each card below is a <b>public method</b> in your code that has an observable outcome — we call it a <b>behavior</b>. The color tells you how well it's tested: <span style="color:var(--green)">green</span> = a test proves it breaks if you change it, <span style="color:var(--amber)">amber</span> = a test touches it but doesn't prove breakage, <span style="color:var(--red)">red</span> = nothing tests it.</p>
+  <p class="bridge">Each card is a <b>behavior</b>: a public method with an observable outcome. Color shows the test evidence: <span style="color:var(--green)">green</span>, a test fails when it breaks; <span style="color:var(--amber)">amber</span>, a test calls it but isn't proven to catch a break; <span style="color:var(--red)">red</span>, no test found.</p>
   <div class="beh-layout">
     <aside class="beh-side" id="beh-groups">
       <div class="beh-side-lbl">Search</div>
@@ -428,7 +438,7 @@ body[data-mode="expert"] .simple-only{display:none!important}
 
 <!-- TAB 3: FLOWS — bridge from "methods" to "user journeys" -->
 <section class="panel" id="panel-flows" role="tabpanel">
-  <p class="bridge">A <b>flow</b> is the sequence of methods that execute when a real request hits your system. Each box is a method you already saw in the Behaviors tab — but here they're connected as a call chain. Solid lines = hard-coded calls. Dashed = framework-derived. <span style="color:var(--green)">Green boxes</span> pulse because a test proves they break if mutated.</p>
+  <p class="bridge">A <b>flow</b> is the chain of methods a real request runs through. Solid lines are direct calls; dashed lines are wired by the framework. <span style="color:var(--green)">Green</span> boxes have a test that fails when they break.</p>
   <p class="bridge" id="flow-cap-note" style="font-size:12px;opacity:.75"></p>
   <div id="flow-list"></div>
   <div class="ai-sec" id="ai-sec" hidden>
@@ -440,19 +450,25 @@ body[data-mode="expert"] .simple-only{display:none!important}
 <!-- TAB 4: RISKS — actionable -->
 <section class="panel" id="panel-risks" role="tabpanel">
   <div class="simple-intro simple-only">
-    <h2>Your highest-risk blind spots</h2>
-    <p>These are your highest-risk integration points — where multiple flows converge, where recent changes landed, and where no test proves they hold. Each card includes a generated test you can copy into your repo.</p>
+    <h2>Test these first</h2>
+    <p>Ranked by what each can break, how much code depends on it, and how often it changes. None has a test proven to catch a break.</p>
   </div>
-  <p class="bridge expert-only">This is the <b>priority-gap worklist</b>, ranked by blast radius and test weakness. It is separate from the coverage-status cards above: <b>Reachable · no test signal</b> is one strict coverage bucket, not the number of priority gaps.</p>
+  <p class="bridge expert-only"><b>Priority gaps</b>, ranked by what each can break, how much code depends on it, and how often it changes. This list is separate from the coverage counts above.</p>
   <p class="bridge" id="risk-cap-note" style="font-size:12px;opacity:.75"></p>
   <div class="risk-tools" id="risk-tools"></div>
   <div id="config-disclosure"></div>
   <div id="worklists"></div>
   <div id="risk-list"></div>
+  <div id="fb-invite"></div>
 </section>
 
 </div>
 
+<div class="platform-footer" id="platform-cta-footer">
+  <a id="footer-short" href="short_behavior-coverage.html">One-page summary</a>
+  <a id="footer-feedback" class="fb-main" href="#" target="_blank" rel="noopener" hidden>Give feedback</a>
+  <a href="https://orangepro.ai" target="_blank" rel="noopener">orangepro.ai</a>
+</div>
 <div class="drill-overlay" id="drill">
   <div class="drill-card" role="dialog" aria-modal="true">
     <button class="drill-close" id="drill-close" type="button">&times;</button>
@@ -663,6 +679,25 @@ function scrollToRisk(path){
 })();
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e};
 const esc=s=>String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
+// "This looks wrong" opens the feedback form. The link carries no finding name,
+// code or path; the page notes locally which finding the reader picked.
+function fbWrongLink(path){
+  if(!D.feedback||!D.feedback.finding)return "";
+  return \`<a class="fb-wrong" href="\${esc(D.feedback.finding)}" target="_blank" rel="noopener" data-fb-finding="\${esc(path).replace(/"/g,'&quot;')}" title="Opens the feedback form. This finding's name and code are not sent.">This looks wrong</a>\`;
+}
+function fbWrong(path){const l=fbWrongLink(path);return l?\`<div class="risk-foot">\${l}</div>\`:"";}
+document.addEventListener("click",e=>{
+  const a=e.target.closest&&e.target.closest("a.fb-wrong");
+  if(!a)return;
+  e.stopPropagation();
+  const host=a.closest(".risk-card")||a.closest(".wl-row");
+  if(!host||host.nextElementSibling&&host.nextElementSibling.classList.contains("fb-note")&&!host.classList.contains("risk-card"))return;
+  if(host.classList.contains("risk-card")&&host.querySelector(".fb-note"))return;
+  const note=document.createElement("div");
+  note.className="fb-note";
+  note.textContent="Feedback form opened for \\u201c"+a.getAttribute("data-fb-finding")+"\\u201d. Its name and code are not sent; mention them in your comment only if you want to.";
+  if(host.classList.contains("risk-card"))host.append(note);else host.after(note);
+},true);
 const S=D.summary;
 // === OPTION A: VIEW MODE ===
 const params=new URLSearchParams(location.search);
@@ -944,12 +979,6 @@ if(cf&&cf.flows.length){
   });
 }
 
-// Platform CTA: after flows
-const flowCta=el("div","paywall",
-  \`<div class="paywall-num">\${D.flows.length} flows mapped locally</div>
-   <div class="paywall-txt">Track flow regressions across commits, correlate with production incidents, and set merge gates on OrangePro Platform.</div>
-   <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
-fl.after(flowCta);
 // risks + generated test samples
 const riskList=$("#risk-list"),riskTools=$("#risk-tools");
 if(D.viewMeta){
@@ -965,12 +994,9 @@ const generatedOutputCopy=[
 const generationSummary=D.generatedTotal
   ?\` Generated output: <b>\${generatedOutputCopy}</b>; <b>\${D.shownCount}</b> shown inline across <b>\${generatedRiskCount} of \${D.risks.length}</b> priority flows.\`
   :'';
-// Platform CTA: top banner in risk panel. Keep generated-output totals beside
-// the flow count so a user cannot mistake "5 flows" for "5 generated tests".
-const riskTopBanner=el("div","platform-top-banner",
-  \`<span class="platform-top-banner-text">Local scan shows <b>\${D.risks.length}</b> priority gaps.\${generationSummary} Full ranked list, incident correlation, and CI merge gate on Platform.</span>
-   <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>\`);
-riskList.before(riskTopBanner);
+// Keep generated-output totals beside the gap count so a reader cannot mistake
+// "5 flows" for "5 generated tests".
+if(generationSummary)riskList.before(el("div","risk-summary",\`<b>\${D.risks.length}</b> priority gaps.\${generationSummary}\`));
 let activeRiskFilter=generatedRiskCount?"generated":"all";
 function riskMatchesFilter(r){
   const hasGenerated=Boolean(r.generatedTests&&r.generatedTests.length);
@@ -1024,7 +1050,7 @@ function riskCardHtml(r){
   return \`<div class="risk-rank">#\${r.rank}</div>
      <div class="risk-ep"><span class="v">\${esc(r.verb)}</span> \${esc(r.path)}</div>\${ctxHtml}
      <div class="risk-tags">\${tags}</div>
-     <div class="todo">\${esc(r.todo)}</div>\${testsHtml}\${catHtml}\`;
+     <div class="todo">\${esc(r.todo)}</div>\${testsHtml}\${catHtml}\${fbWrong(r.path)}\`;
 }
 function renderRisks(){
   riskList.innerHTML="";
@@ -1035,12 +1061,10 @@ function renderRisks(){
     riskList.append(el("div","paywall",
       hiddenGeneratedFlows
         ? \`<div class="paywall-num">\${hiddenGeneratedFlows} more flows with generated output</div>
-           <div class="paywall-txt">OrangePro produced \${generatedOutputCopy} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>
-           <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">View all on OrangePro Platform &rarr;</a>\`
+           <div class="paywall-txt">OrangePro produced \${generatedOutputCopy} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Use the “Flows with tests” filter to review them first.</div>\`
         : remainingRiskFlows
-          ? \`<div class="paywall-num">\${remainingRiskFlows} high-risk flows left</div>
-             <div class="paywall-txt">The local MCP produced \${generatedOutputCopy} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Generate the remaining high-risk flow tests on OrangePro Platform.</div>
-             <a class="paywall-btn" href="https://orangepro.ai/get-started" target="_blank">Generate remaining tests on Platform &rarr;</a>\`
+          ? \`<div class="paywall-num">\${remainingRiskFlows} high-risk flows left without a generated test</div>
+             <div class="paywall-txt">OrangePro produced \${generatedOutputCopy} across \${generatedRiskCount} high-risk flow\${generatedRiskCount===1?"":"s"}. Run <code>opro generate</code> to draft tests for the rest.</div>\`
           : \`<div class="paywall-num">All generated tests are shown</div>
              <div class="paywall-txt">OrangePro generated tests for every high-risk flow in this report, and every generated test is visible here.</div>\`));
   }
@@ -1087,15 +1111,15 @@ renderRisks();
   const topPaths=new Set(D.risks.map(r=>r.path));
   const row=(path,meta)=>{
     const inTop=topPaths.has(path);
-    return \`<div class="wl-row" data-path="\${esc(path).replace(/"/g,'&quot;')}" title="\${inTop?'in the ranked list below — click to jump':'ranked, but below the top-20 cut'}"><span class="wl-path">\${esc(path)}</span><span class="wl-meta">\${esc(meta)}</span></div>\`;
+    return \`<div class="wl-row" data-path="\${esc(path).replace(/"/g,'&quot;')}" title="\${inTop?'in the ranked list below — click to jump':'ranked, but below the top-20 cut'}"><span class="wl-path">\${esc(path)}</span><span class="wl-meta">\${esc(meta)}</span>\${fbWrongLink(path)}</div>\`;
   };
   const cf=(W.changeFrontier||[]).map(r=>row(r.path,"changes "+(r.probability>=7?"a lot":r.probability>=4?"often":"some"))).join("")||'<div class="wl-empty">nothing changing fast and unproven</div>';
   const ir=(W.irreversible||[]).map(r=>row(r.path,"→ "+(r.sink||"").split(".").pop()+(r.sameSinkAs?" · same delete as "+r.sameSinkAs:""))).join("")||'<div class="wl-empty">no unproven path reaches a delete</div>';
   host.innerHTML=\`<div class="wl-grid">
-    <div class="wl-card"><p class="wl-title wl-change">Changing fast · unproven</p><p class="wl-sub">Where the code moves most with nothing proving it. The place a bug is most likely to have just arrived.</p>\${cf}</div>
-    <div class="wl-card"><p class="wl-title wl-irrev">Can destroy data · unproven</p><p class="wl-sub">Paths that reach a delete or purge (cache evictions are not counted) with nothing proving they do the right thing. Rarely changing — which is why nobody looks.</p>\${ir}</div>
+    <div class="wl-card"><p class="wl-title wl-change">Changing fast · unproven</p><p class="wl-sub">Where the code changes most and nothing proves it works. A new bug most likely landed here.</p>\${cf}</div>
+    <div class="wl-card"><p class="wl-title wl-irrev">Can destroy data · unproven</p><p class="wl-sub">Paths that reach a delete or purge with nothing proving they do the right thing. Cache evictions don't count. Rarely changed, so rarely reviewed.</p>\${ir}</div>
   </div>\`;
-  host.addEventListener("click",e=>{const r=e.target.closest("[data-path]");if(r&&topPaths.has(r.getAttribute("data-path")))scrollToRisk(r.getAttribute("data-path"));});
+  host.addEventListener("click",e=>{if(e.target.closest(".fb-wrong"))return;const r=e.target.closest("[data-path]");if(r&&topPaths.has(r.getAttribute("data-path")))scrollToRisk(r.getAttribute("data-path"));});
 })();
 // Generated-test drafts are collapsed by default in every view. Keep the
 // control operable by pointer and keyboard; Simple mode must not override it.
@@ -1122,19 +1146,47 @@ const tabs=[...document.querySelectorAll(".tab")];
 tabs.forEach(t=>t.onclick=()=>activateTab(t.dataset.tab));
 // Set initial tab based on mode
 activateTab(viewMode==="simple"?"risks":"codebase");
-// Update platform footer with real numbers
-const pf=document.getElementById("platform-cta-footer");
-if(pf&&D.viewMeta&&D.viewMeta.risks){
-  const rm=D.viewMeta.risks;
-  pf.querySelector(".platform-footer-text").innerHTML=
-    \`Showing top <b>\${rm.shown}</b> of <b>\${rm.scored.toLocaleString()}</b> scored behaviors. Full risk ranking + incident correlation + CI gate on Platform.\`;
-}
+// Footer: the one-page summary sits next to this file as short_<name>.
+(function(){
+  const s=document.getElementById("footer-short");
+  if(!s)return;
+  let me="";
+  try{me=decodeURIComponent((location.pathname||"").split("/").pop()||"");}catch(e){}
+  if(!me||me.indexOf("short_")===0||!/\\.html?$/i.test(me))s.hidden=true;
+  else s.setAttribute("href","short_"+me);
+})();
+// ── Feedback: links only. Nothing is sent from this page; the hosted form sends
+// only what the user reviews and submits there.
+(function(){
+  const F=D.feedback;
+  const foot=document.getElementById("footer-feedback");
+  if(!F){return;}
+  if(foot){foot.href=F.general;foot.hidden=false;}
+  const P=F.prompt;
+  if(P.kind==="blocked"){
+    const b=document.getElementById("fb-blocked");
+    if(b){b.innerHTML=esc(P.question)+' <a href="'+esc(P.answers[0].url)+'" target="_blank" rel="noopener">'+esc(P.answers[0].label)+' &rarr;</a>';b.hidden=false;}
+    return;
+  }
+  let off=false;
+  try{off=localStorage.getItem("orangepro.feedback.invitations")==="off";}catch(e){}
+  const host=document.getElementById("fb-invite");
+  if(!P.expanded||off||!host)return;
+  host.className="fb-invite";
+  host.innerHTML='<span class="fb-q">'+esc(P.question)+'</span><span class="fb-answers">'+
+    P.answers.map(a=>'<a class="fb-ans" href="'+esc(a.url)+'" target="_blank" rel="noopener">'+esc(a.label)+'</a>').join("")+
+    '</span><button class="fb-skip" type="button">Don\\u2019t ask again</button>'+
+    '<p class="fb-sub">Opens a short form in a new tab. Nothing is sent unless you press Submit there. Anonymous unless you add an email.</p>';
+  host.addEventListener("click",e=>{
+    if(e.target.closest(".fb-ans")){const s=host.querySelector(".fb-sub");if(s)s.textContent="The form opened in a new tab. Nothing is sent until you press Submit there.";return;}
+    if(e.target.closest(".fb-skip")){
+      try{localStorage.setItem("orangepro.feedback.invitations","off");}catch(err){}
+      host.innerHTML='<p class="fb-sub">Hidden in this browser. To stop it in every report, run <code>opro feedback off</code>. The footer link stays.</p>';
+    }
+  });
+})();
 })();
 </script>
-<div class="platform-footer" id="platform-cta-footer">
-  <span class="platform-footer-text">Showing top <b>20</b> blind spots. Full risk ranking + incident correlation + CI gate on Platform.</span>
-  <a class="platform-footer-btn" href="https://orangepro.ai/get-started" target="_blank">Unlock Full Analysis &rarr;</a>
-</div>
 </body>
 </html>
 `;

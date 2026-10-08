@@ -66,6 +66,7 @@ import {
 import { runGenerateJob } from "./jobs/runner.js";
 import type { GenerateOptions } from "./types.js";
 import { ORANGEPRO_VERSION } from "./version.js";
+import { feedbackPrefsPath, feedbackUrl, invitationCooldownDays, readFeedbackPrefs, setInvitations } from "./feedback.js";
 
 function out(line = ""): void {
   process.stdout.write(line + "\n");
@@ -169,6 +170,7 @@ Usage:
   opro export [--out orangepro-evidence-pack.json] [--include-generated-bodies] [--graph-html] [--json]
   opro export --format graph-html [--out orangepro-graph.html]   # offline evidence-graph explorer only
   opro mcp
+  opro feedback [on|off|status]   # prints the feedback link; off/on hides/shows the "Did this help?" invitation in reports
 
 The command is also available as \`orangepro-local\`. If \`opro\` is not on your PATH,
 run \`npm link\` once after \`npm run build\`, or invoke it directly with
@@ -176,7 +178,8 @@ run \`npm link\` once after \`npm run build\`, or invoke it directly with
 
 Default exports and graph HTML are metadata-only. Generated test bodies stay local
 unless explicitly exported (--include-generated-bodies); source is read in-process
-for generation but never stored or uploaded. Test generation uses your own model key
+for generation but never stored or uploaded. OrangePro sends no usage data; feedback
+is a link you choose to open, and the form sends nothing until you press Submit. Test generation uses your own model key
 (BYOK). Use a strong current model for real evaluation; cheaper models are fine for
 smoke tests but hallucinate more. With no key, generate returns setup guidance and no
 tests — the offline deterministic stand-in is opt-in only (--provider deterministic or
@@ -1354,6 +1357,35 @@ async function main(): Promise<number> {
       return 0;
     }
 
+    case "feedback": {
+      const action = positionals[0] ?? "status";
+      if (action === "on" || action === "off") {
+        if (!setInvitations(action)) {
+          err(`opro: could not write ${feedbackPrefsPath()}`);
+          return 1;
+        }
+      } else if (action !== "status") {
+        err(`Unknown feedback action: ${action} (use on, off or status)`);
+        return 2;
+      }
+      const prefs = readFeedbackPrefs();
+      const url = feedbackUrl({ entry: "result", context: { toolVersion: ORANGEPRO_VERSION } });
+      const status = {
+        feedback_url: url,
+        invitations: prefs.invitations ?? "on",
+        cooldown_days: invitationCooldownDays(prefs),
+        last_invited_at: prefs.last_invited_at ?? null,
+        preferences_file: feedbackPrefsPath()
+      };
+      if (json) printJson(status);
+      else {
+        out(url ? `Give feedback: ${url}` : "Feedback links are turned off (ORANGEPRO_FEEDBACK_URL=off).");
+        out(`"Did this help?" invitation in reports: ${status.invitations}${status.invitations === "on" ? ` (at most once every ${status.cooldown_days} days)` : ""}`);
+        out("Nothing is sent from your machine. The form sends only what you review and submit.");
+      }
+      return 0;
+    }
+
     default:
       err(`Unknown command: ${command}\n`);
       out(HELP);
@@ -1537,6 +1569,11 @@ main()
     const message = error instanceof Error ? error.message : String(error);
     // JSON consumers get a structured error envelope on stdout; humans get stderr.
     if (process.argv.includes("--json")) out(JSON.stringify({ error: message }, null, 2));
-    else err(`opro: ${message}`);
+    else {
+      err(`opro: ${message}`);
+      // A link only: nothing is opened or sent.
+      const blocked = feedbackUrl({ entry: "blocked", context: { toolVersion: ORANGEPRO_VERSION, runOutcome: "failed" } });
+      if (blocked) err(`If this blocked you, tell us what stopped you: ${blocked}`);
+    }
     process.exitCode = 1;
   });

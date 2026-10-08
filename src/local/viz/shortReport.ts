@@ -238,6 +238,11 @@ const RUN_COMMAND = "npx -y @orangepro/orangepro-mcp start .";
 
 export function renderShortReport(input: ShortReportInput): string {
   const { data } = input;
+  // Feedback links only: nothing is sent from this page. The finding link carries no
+  // name, path or code; the page notes locally which finding the reader picked.
+  const fb = data.feedback;
+  const fbLink = (name: string): string =>
+    fb ? ` <a class="fbwrong" href="${esc(fb.finding)}" target="_blank" rel="noopener" data-finding="${esc(name)}" title="Opens the feedback form. This finding's name and code are not sent.">This looks wrong</a>` : "";
   const s = data.summary;
   const prov = data.provenance;
   const commit = prov.commit ?? "";
@@ -343,7 +348,7 @@ export function renderShortReport(input: ShortReportInput): string {
         provenDeletes.length > 0
           ? `${provenDeletes.length} ${provenDeletes.length === 1 ? "is" : "are"} proven: the test fails when the code breaks (section 03). `
           : "None is proven yet. "
-      }This is missing test protection, not a bug found in the code. Deletes from a cache are not counted.</p>
+      }This is missing test protection, not a bug found in the code. Deletes from a cache are not counted. A test that reaches a path only through a fixture, an HTTP client or an end-to-end run is not linked, so check the tests before writing new ones.</p>
     </div>
     ${legend}
     <div class="tblwrap" style="margin-top:8px"><table class="tbl">
@@ -352,7 +357,7 @@ export function renderShortReport(input: ShortReportInput): string {
 ${deletes
   .map(
     (d) =>
-      `<tr><td>${esc(d.store || "—")}</td><td>${link(d.row.path, d.row.file, d.gap?.id ?? "")}<span class="tiny muted mono fileline">${esc(d.row.file)}</span><span class="tiny muted fileline">Reaches <span class="mono">${esc(d.row.sink)}</span></span></td><td>${pill(d.tier)}</td></tr>`
+      `<tr><td>${esc(d.store || "—")}</td><td>${link(d.row.path, d.row.file, d.gap?.id ?? "")}<span class="tiny muted mono fileline">${esc(d.row.file)}</span><span class="tiny muted fileline">Reaches <span class="mono">${esc(d.row.sink)}</span></span></td><td>${pill(d.tier)}${fbLink(d.row.path)}</td></tr>`
   )
   .join("\n")}
       </tbody>
@@ -376,12 +381,13 @@ ${deletes
         <p class="tiny muted mono fileline">${esc(g?.file ?? "")}</p>
         <ul class="prs">${(g ? facts(g) : []).map((f) => `<li>${esc(f)}</li>`).join("")}${g?.sink_callee ? `<li>Reaches <span class="mono">${breakable(g.sink_callee)}</span></li>` : ""}</ul>
         <p class="finding">${pill(tier)}${g?.sink_callee ? ' <span class="pill pill-muted">Deletes data</span>' : ""}</p>
+        <p class="tiny">${fbLink(r.path).trim()}</p>
       </article>`;
   });
   const rankedRows = data.risks
     .map((r, i) => {
       const g = input.topGaps[i];
-      return `<tr><td class="mono muted">${r.rank}</td><td>${g ? link(r.path, g.file, g.id) : esc(r.path)}<span class="tiny muted mono fileline">${esc(g?.file ?? "")}</span></td><td class="mono">${esc(g?.risk_score ?? "")}</td><td>${pill(tierOf(g, provenIds))}${g?.sink_callee ? ' <span class="pill pill-muted">Deletes data</span>' : ""}</td></tr>`;
+      return `<tr><td class="mono muted">${r.rank}</td><td>${g ? link(r.path, g.file, g.id) : esc(r.path)}<span class="tiny muted mono fileline">${esc(g?.file ?? "")}</span></td><td class="mono">${esc(g?.risk_score ?? "")}</td><td>${pill(tierOf(g, provenIds))}${g?.sink_callee ? ' <span class="pill pill-muted">Deletes data</span>' : ""}${fbLink(r.path)}</td></tr>`;
     })
     .join("\n");
   const rankedSection = data.risks.length === 0
@@ -423,6 +429,16 @@ ${rankedRows}
       </li>`
     )
     .join("\n");
+  // "Did this help?" comes after the findings and proofs, never before them.
+  const fbPrompt = !fb
+    ? ""
+    : fb.prompt.kind === "blocked"
+      ? `  <div class="fbblocked">${esc(fb.prompt.question)} <a href="${esc(fb.prompt.answers[0].url)}" target="_blank" rel="noopener">${esc(fb.prompt.answers[0].label)} &rarr;</a></div>`
+      : fb.prompt.expanded
+        ? `  <div class="fbinvite" id="fbinvite"><span class="fbq">${esc(fb.prompt.question)}</span><span class="fbans">${fb.prompt.answers
+            .map((a) => `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.label)}</a>`)
+            .join("")}</span><button type="button" class="fbskip" data-fb-skip>Don&rsquo;t ask again</button><p class="fbsub">Opens a short form in a new tab. Nothing is sent unless you press Submit there. Anonymous unless you add an email.</p></div>`
+        : "";
   const proofSection = `  <section class="block" aria-labelledby="n3">
     <h2 id="n3"><span class="n">03</span> How existing tests were checked</h2>
     <p class="sub">For a proof, OrangePro runs a test twice: once on the original code, once with the function deliberately broken in an isolated copy.</p>
@@ -572,6 +588,7 @@ ${input.proofs.length > 0 ? `    <ul class="faults">\n${proofItems}\n    </ul>` 
 ${delSection}
 ${rankedSection}
 ${proofSection}
+${fbPrompt}
   <section class="block" aria-labelledby="n4">
     <h2 id="n4"><span class="n">04</span> Still open</h2>
     <ul class="open">
@@ -606,7 +623,7 @@ ${proofSection}
     <p class="sub">This is evidence for deciding where to add tests first. It is not a certification.</p>
   </section>
 </main>
-<p class="foot">Generated by OrangePro ${esc(prov.toolVersion)} from ${esc(repoName)}${short ? ` at ${esc(short)}` : ""}, ${esc(data.scanned)} · <a href="https://orangepro.ai" target="_blank" rel="noopener noreferrer">orangepro.ai</a></p>
+<p class="foot">Generated by OrangePro ${esc(prov.toolVersion)} from ${esc(repoName)}${short ? ` at ${esc(short)}` : ""}, ${esc(data.scanned)}${fb ? ` · <a href="${esc(fb.general)}" target="_blank" rel="noopener">Give feedback</a>` : ""} · <a href="https://orangepro.ai" target="_blank" rel="noopener noreferrer">orangepro.ai</a></p>
 </div>
 <script>
 (function () {
@@ -619,6 +636,27 @@ ${proofSection}
   }
   document.querySelector('[data-download="receipt"]').addEventListener("click", function () { save("evidence-summary.json", DATA.receipt, "application/json"); });
   document.querySelector('[data-download="logs"]').addEventListener("click", function () { save("orangepro-run.txt", DATA.logs, "text/plain"); });
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("a.fbwrong");
+    if (!a) return;
+    var cell = a.parentNode;
+    if (cell.querySelector(".fbnote")) return;
+    var note = document.createElement("span");
+    note.className = "fbnote";
+    note.textContent = "Feedback form opened for \u201c" + a.getAttribute("data-finding") + "\u201d. Its name and code are not sent; mention them in your comment only if you want to.";
+    cell.appendChild(note);
+  });
+  var inv = document.getElementById("fbinvite");
+  if (inv) {
+    try { if (localStorage.getItem("orangepro.feedback.invitations") === "off") inv.remove(); } catch (err) {}
+    inv.addEventListener("click", function (e) {
+      if (e.target.closest("a")) { inv.querySelector(".fbsub").textContent = "The form opened in a new tab. Nothing is sent until you press Submit there."; return; }
+      if (e.target.closest("[data-fb-skip]")) {
+        try { localStorage.setItem("orangepro.feedback.invitations", "off"); } catch (err) {}
+        inv.innerHTML = '<p class="fbsub">Hidden in this browser. To stop it in every report, run <code>opro feedback off</code>. The footer link stays.</p>';
+      }
+    });
+  }
 })();
 </script></body></html>
 `;
@@ -729,6 +767,16 @@ a.code:hover { text-decoration-color:currentColor; }
 .file .fd { display:block; margin-top:2px; font-size:13px; color:var(--muted); }
 .fileic { width:28px; height:28px; border-radius:6px; background:var(--orange-bg); color:var(--orange); display:grid; place-items:center; flex:none; font:700 11px ui-monospace, Menlo, monospace; }
 .foot { margin-top:16px; font-size:12px; color:var(--muted); text-align:center; }
+.fbwrong { font-size:11px; color:var(--muted); white-space:nowrap; margin-left:6px; }
+.fbnote { display:block; margin-top:4px; font-size:11px; color:var(--muted); }
+.fbinvite { margin-top:28px; border:1px solid #fdba74; background:var(--orange-bg); border-radius:8px; padding:12px 16px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.fbq { font-weight:700; font-size:15px; }
+.fbans { display:flex; gap:6px; flex-wrap:wrap; }
+.fbans a { border:1px solid #fdba74; background:#fff; border-radius:6px; padding:4px 12px; font-weight:600; font-size:13px; text-decoration:none; }
+.fbskip { margin-left:auto; border:0; background:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; }
+.fbsub { flex-basis:100%; margin:0; font-size:12px; color:var(--muted); }
+.fbblocked { margin-top:28px; border:1px solid var(--line); background:var(--card); border-radius:8px; padding:10px 14px; font-size:14px; }
+.fbblocked a { color:var(--orange); font-weight:700; }
 @media (max-width:760px) {
   .sheet { padding:18px; }
   h1 { font-size:22px; }

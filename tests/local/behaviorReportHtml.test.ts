@@ -232,7 +232,7 @@ describe("renderBehaviorReport", () => {
 
     // Flow section scaffolding + bridge copy that explains hard vs framework-derived hops.
     expect(html).toContain('id="flow-list"');
-    expect(html).toContain("Solid lines = hard-coded calls");
+    expect(html).toContain("Solid lines are direct calls; dashed lines are wired by the framework.");
     expect(html).toContain("framework-derived");
     // The one composed flow and each of its hops reach the page via the embedded DATA.
     expect(data.flows).toHaveLength(1);
@@ -598,12 +598,34 @@ describe("renderBehaviorReport — v6 behavior-report redesign (display-only)", 
     expect(html).toContain("No generated tests");
     expect(html).toContain("shown inline across");
     expect(html).not.toContain('generatedRiskCount+"/"+D.risks.length');
-    expect(html).toContain("high-risk flows left");
-    expect(html).toContain("Generate remaining tests on Platform");
+    expect(html).toContain("high-risk flows left without a generated test");
+    expect(html).toContain("Run <code>opro generate</code> to draft tests for the rest.");
+    expect(html).not.toContain("Generate remaining tests on Platform");
     expect(html).not.toContain("0 more tests generated");
     // Category strip shows only the real attached concerns — nothing locked/fabricated.
     expect(withTests!.applicableCategories).toContain("contract"); // derived, not attached-echo
     expect(withTests!.generatedCategories).toEqual(["integration_flow"]); // draft target, never a coverage claim
+  });
+
+  it("has no upgrade calls to action; feedback links come only from report data", () => {
+    const data = buildBehaviorReportData(graph(), EMPTY_LEDGER, { repoRoot: "/tmp/orders-api" });
+    const plain = renderBehaviorReport(data);
+    expect(plain).not.toContain("orangepro.ai/get-started");
+    expect(plain).not.toContain("Unlock Full Analysis");
+    expect(plain).toContain('id="footer-feedback"');
+    expect(plain).toContain("if(!F){return;}");
+    const withFeedback = renderBehaviorReport({
+      ...data,
+      feedback: {
+        general: "https://orangepro.ai/feedback#sv=1&entry=result",
+        finding: "https://orangepro.ai/feedback#sv=1&entry=finding",
+        prompt: { kind: "result", expanded: true, question: "Did this help you decide what to test?", answers: [{ label: "Yes", url: "https://orangepro.ai/feedback#sv=1&entry=result&answer=yes" }] }
+      }
+    });
+    expect(withFeedback).toContain("https://orangepro.ai/feedback#sv=1&entry=finding");
+    expect(withFeedback).toContain("Did this help you decide what to test?");
+    expect(withFeedback).toContain("This looks wrong");
+    expect(withFeedback).toContain("orangepro.feedback.invitations");
   });
 
   it("keeps generated-test drafts collapsible in Simple and Expert views", () => {

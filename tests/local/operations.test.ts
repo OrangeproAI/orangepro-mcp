@@ -179,6 +179,33 @@ describe("operations round trip", () => {
     expect(short).not.toContain("someone");
     expect(short).toContain('href="report.html"');
     expect(readFileSync(result.behavior_coverage_path, "utf8")).not.toContain("short_report.html");
+    // An intermediate view (no baseline) never uses up the feedback invitation.
+    expect(short).toContain(">Give feedback</a>");
+    expect(short).not.toContain("Did this help you decide what to test?");
+  });
+
+  it("shows the feedback invitation on the first final report only, then stays quiet during the cooldown", () => {
+    const outputRoot = makeTempDir();
+    const sourceRoot = makeTempDir();
+    writeFixture(sourceRoot);
+    const previous = process.env.ORANGEPRO_FEEDBACK_PREFS;
+    process.env.ORANGEPRO_FEEDBACK_PREFS = join(makeTempDir(), "feedback-prefs.json");
+    try {
+      opInit(outputRoot, deps);
+      opAnalyze(outputRoot, { source: sourceRoot, suppressProgress: true }, deps);
+      const first = opBehaviorCoverageHtml(outputRoot, "report.html");
+      const firstHtml = readFileSync(first.behavior_coverage_path, "utf8");
+      expect(firstHtml).toContain('"expanded":true');
+      expect(firstHtml).toContain("https://orangepro.ai/feedback#sv=1");
+      expect(firstHtml).not.toContain(sourceRoot);
+      const second = opBehaviorCoverageHtml(outputRoot, "report.html");
+      expect(readFileSync(second.behavior_coverage_path, "utf8")).toContain('"expanded":false');
+      const prefs = JSON.parse(readFileSync(process.env.ORANGEPRO_FEEDBACK_PREFS, "utf8")) as Record<string, unknown>;
+      expect(Object.keys(prefs)).toEqual(["last_invited_at"]);
+    } finally {
+      if (previous === undefined) delete process.env.ORANGEPRO_FEEDBACK_PREFS;
+      else process.env.ORANGEPRO_FEEDBACK_PREFS = previous;
+    }
   });
 
   it("init → analyze → status → score → export produces a valid pack", () => {

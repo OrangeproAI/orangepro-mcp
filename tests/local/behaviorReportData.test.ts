@@ -696,6 +696,59 @@ describe("short report reads the same build as the detailed report", () => {
   });
 });
 
+describe("short report feedback links (FB01-FB04)", () => {
+  const render = async (feedback?: import("../../src/local/feedback.js").ReportFeedback) => {
+    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
+    const g = graph();
+    const low = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
+    low.properties = { ...low.properties, external_callees: ["this.store.deleteExpired"] };
+    g.nodes = [...g.nodes, low];
+    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    return renderShortReport({
+      data: { ...build.data, ...(feedback ? { feedback } : {}) }, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal,
+      proofs: [], lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
+    });
+  };
+  const result = {
+    general: "https://orangepro.ai/feedback#sv=1&entry=result",
+    finding: "https://orangepro.ai/feedback#sv=1&entry=finding",
+    prompt: { kind: "result" as const, expanded: true, question: "Did this help you decide what to test?", answers: [{ label: "Yes", url: "https://orangepro.ai/feedback#sv=1&entry=result&answer=yes" }, { label: "No", url: "https://orangepro.ai/feedback#sv=1&entry=result&answer=no" }] }
+  };
+
+  it("adds a footer link, an invitation after the findings and a dispute link on each finding", async () => {
+    const html = await render(result);
+    expect(html).toContain(">Give feedback</a>");
+    expect(html).toContain("Did this help you decide what to test?");
+    expect(html).toContain("Nothing is sent unless you press Submit there.");
+    expect(html).toContain('data-finding="Gc.sweep"');
+    expect(html.indexOf("Did this help")).toBeGreaterThan(html.indexOf('aria-labelledby="n1"'));
+    // The dispute link carries nothing about the finding.
+    expect(html).toContain('href="https://orangepro.ai/feedback#sv=1&amp;entry=finding"');
+    expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=/i);
+  });
+
+  it("keeps the invitation out during the cooldown but the links stay", async () => {
+    const html = await render({ ...result, prompt: { ...result.prompt, expanded: false } });
+    expect(html).not.toContain("Did this help you decide what to test?");
+    expect(html).toContain(">Give feedback</a>");
+    expect(html).toContain("This looks wrong");
+  });
+
+  it("a blocked run asks what stopped it, never the completed-empty question", async () => {
+    const html = await render({ general: result.general, finding: result.finding, prompt: { kind: "blocked", expanded: false, question: "Part of the repository was not analysed. What stopped you from completing this?", answers: [{ label: "Tell us", url: "https://orangepro.ai/feedback#sv=1&entry=blocked" }] } });
+    expect(html).toContain("What stopped you from completing this?");
+    expect(html).not.toContain("Expected a gap we didn&#39;t find?");
+    expect(html).not.toContain("Expected a gap we didn't find?");
+  });
+
+  it("without feedback data there are no feedback links", async () => {
+    const html = await render(undefined);
+    expect(html).not.toContain("Give feedback");
+    expect(html).not.toContain("This looks wrong");
+  });
+});
+
 describe("short report keeps proven delete paths in its count", () => {
   it("a proven destructive path leaves the worklist but stays in the summary's delete count", async () => {
     const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");

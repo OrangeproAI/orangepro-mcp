@@ -29,6 +29,7 @@ import { runnableRunHintsFor, AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT } from "./g
 import { preloadTreeSitter } from "./analyze/treeSitter/engine.js";
 import { treeSitterLanguages } from "./analyze/treeSitter/languages.js";
 import { redactSecrets } from "./util/redact.js";
+import { feedbackUrl } from "./feedback.js";
 
 interface ToolTextResponse {
   content: Array<{ type: "text"; text: string }>;
@@ -40,9 +41,23 @@ function asText(payload: unknown): ToolTextResponse {
   return { content: [{ type: "text", text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2) }] };
 }
 
+/**
+ * Optional, documented result metadata: a feedback link the client may show. Clients
+ * that ignore `_meta` keep the existing result. The link carries no project data and
+ * opens the hosted form only if the user chooses it; nothing is sent from here.
+ */
+export const FEEDBACK_META_KEY = "ai.orangepro/feedback_url";
+
+function withFeedback(response: ToolTextResponse, url: string | null): ToolTextResponse {
+  return url ? { ...response, _meta: { [FEEDBACK_META_KEY]: url } } : response;
+}
+
 function asError(error: unknown): ToolTextResponse {
   const message = redactSecrets(error instanceof Error ? error.message : String(error));
-  return { content: [{ type: "text", text: `OrangePro local error: ${message}` }], isError: true };
+  return withFeedback(
+    { content: [{ type: "text", text: `OrangePro local error: ${message}` }], isError: true },
+    feedbackUrl({ entry: "blocked", context: { toolVersion: ORANGEPRO_VERSION, runOutcome: "failed" } })
+  );
 }
 
 const Workspace = {
@@ -84,7 +99,7 @@ export function createLocalServer(): McpServer {
     async (input) => {
       try {
         await preloadTreeSitter(treeSitterLanguages());
-        return asText(
+        return withFeedback(asText(
           await opStart(root(input.workspace), {
             source: input.source,
             baseRef: input.base_ref,
@@ -98,7 +113,7 @@ export function createLocalServer(): McpServer {
             model: input.model,
             promptVersion: input.prompt_version
           })
-        );
+        ), feedbackUrl({ entry: "result", context: { toolVersion: ORANGEPRO_VERSION } }));
       } catch (error) {
         return asError(error);
       }

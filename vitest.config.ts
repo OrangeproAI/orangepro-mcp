@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defineConfig, configDefaults } from "vitest/config";
 
 // Test fixtures and generated OrangePro artifacts are DATA read from disk by
@@ -7,6 +9,9 @@ import { defineConfig, configDefaults } from "vitest/config";
 // `.orangepro/`). Keep vitest's defaults otherwise.
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**"]
+    exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**"],
+    // Reports record when the feedback invitation was last shown. Keep test runs
+    // out of the developer's own ~/.orangepro preferences.
+    env: { ORANGEPRO_FEEDBACK_PREFS: join(tmpdir(), `orangepro-vitest-feedback-prefs-${process.pid}.json`) }
   }
 });
