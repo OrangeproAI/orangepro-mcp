@@ -33,6 +33,25 @@ describe("extractCalls — raw (caller, callee) pairs", () => {
     expect(c?.callee).toBe("build");
   });
 
+  it("marks static calls on a module-level built-in Map/Set as in-memory collections", () => {
+    const src = [
+      "const failed = new Set<string>();",
+      "export const sessions: Map<string, number> = new Map();",
+      "let seen = new WeakMap() as WeakMap<object, number>;",
+      "const store = createStore();",
+      "function forget(k: string) { failed.delete(k); sessions.delete(k); seen.delete({}); store.delete(k); }"
+    ].join("\n");
+    const byQualifier = new Map(calls(src).filter((c) => c.via === "static").map((c) => [c.qualifier, c.inMemoryCollection === true]));
+    expect(Object.fromEntries(byQualifier)).toEqual({ failed: true, sessions: true, seen: true, store: false });
+  });
+
+  it("does not treat a file's own Map/Set class as the built-in collection", () => {
+    const imported = calls("import { Map } from \"./geo\";\nconst tiles = new Map();\nfunction drop() { tiles.delete(1); }").find((c) => c.qualifier === "tiles");
+    expect(imported?.inMemoryCollection).toBeUndefined();
+    const declared = calls("class Set { delete() {} }\nconst rows = new Set();\nfunction drop() { rows.delete(); }").find((c) => c.qualifier === "rows");
+    expect(declared?.inMemoryCollection).toBeUndefined();
+  });
+
   it("drops calls with no enclosing named symbol (module scope)", () => {
     expect(pairs("doSideEffect();\n(function(){ alsoCalled(); })();")).toEqual([]);
   });

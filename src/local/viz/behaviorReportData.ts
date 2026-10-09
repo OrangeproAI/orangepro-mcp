@@ -51,7 +51,8 @@ export interface BehaviorReportData {
     reachableUntested: number;
     noSignal: number;
   };
-  proofGuidance: { state: "proven" | "attempted" | "not_started"; title: string; body: string; action: string };
+  /** `attempted`: targets this run tried to prove, when known. */
+  proofGuidance: { state: "proven" | "attempted" | "not_started"; title: string; body: string; action: string; attempted?: number };
   pipeline: Array<{ key: string; label: string; pr: string; on: "1" | "partial" | "0" }>;
   scan: {
     services: Array<[name: string, behaviorCount: number]>;
@@ -416,7 +417,8 @@ function proofGuidance(
         state: "attempted",
         title: "Proof not run: test environment could not be started (see ledger)",
         body: "Proof not run: test environment could not be started (see ledger)",
-        action: HANDOFF_ACTION
+        action: HANDOFF_ACTION,
+        attempted: dyn.attempted
       };
     }
     const allBlocked = dyn.needsSetup.length > 0 && dyn.needsSetup.length >= dyn.attempted;
@@ -426,7 +428,8 @@ function proofGuidance(
         state: "attempted",
         title: `0 Dynamically Proven — top ${dyn.attempted} attempted, all setup-blocked`,
         body: `Dynamic proof attempted ${dyn.attempted} target${plural}; none reached a green baseline. Most common block: ${dom.label} (${dom.count}/${dom.total} actual attempts). This is a test-environment/setup gap, not a static-test failure — the Statically Linked signals are still shown.`,
-        action: nextStepFor(dom) ?? HANDOFF_ACTION
+        action: nextStepFor(dom) ?? HANDOFF_ACTION,
+        attempted: dyn.attempted
       };
     }
     const because = dom ? ` Blocked because: ${dom.label} (${dom.count}/${dom.total}).` : "";
@@ -434,7 +437,8 @@ function proofGuidance(
       state: "attempted",
       title: `0 Dynamically Proven — top ${dyn.attempted} attempted, 0 closed`,
       body: `OrangePro mapped this repo statically. Dynamic proof is a targeted verification pass: it runs existing or generated tests, mutates the exact behavior, and promotes only tests that fail at an assertion. This run attempted the top ${dyn.attempted} eligible behavior${plural} and closed 0.${because} Static test signals stay Statically Linked.`,
-      action: nextStepFor(dom) ?? HANDOFF_ACTION
+      action: nextStepFor(dom) ?? HANDOFF_ACTION,
+      attempted: dyn.attempted
     };
   }
 

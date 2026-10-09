@@ -294,12 +294,24 @@ export function renderShortReport(input: ShortReportInput): string {
   const rankOf = new Map(data.risks.map((r, i) => [input.topGaps[i]?.id ?? "", r.rank]));
   const deleteIds = new Set(input.deleteGaps.map((g) => g.id));
 
+  // Sections are numbered by what this report shows, so an absent section leaves no gap.
+  const sectionOrder = [nDel > 0 ? "deletes" : "", data.risks.length > 0 ? "ranked" : "", "proofs", "open", "ran", "files"].filter(Boolean);
+  const sec = (key: string): string => String(sectionOrder.indexOf(key) + 1).padStart(2, "0");
+
+  // How many delete paths lack a linked test, phrased so "0 of 1" and "1 of 1" never appear.
+  const unlinkedSentence = (scope: string): string => {
+    if (nDel === 1 && !capped) {
+      return unlinked.length === 0 ? "The one code path that deletes data has a test linked to it." : "The one code path that deletes data has no test linked to it.";
+    }
+    if (unlinked.length === 0) return `Every one of ${scope} has a test linked to it.`;
+    if (unlinked.length === nDel) return `None of ${scope} has a test linked to it.`;
+    return `${unlinked.length} of ${scope} ${unlinked.length === 1 ? "has no test linked to it" : "have no test linked to them"}.`;
+  };
+
   // ---- headline ----
   const headline = nDel > 0
-    ? unlinked.length > 0
-      ? `${fmt(s.total)} ${noun} mapped. ${unlinked.length} of ${capped ? `the ${nDel} highest-ranked` : nDel} code paths that delete data have no test linked to them.`
-      : `${fmt(s.total)} ${noun} mapped. Every ranked code path that deletes data has a linked test.`
-    : `${fmt(s.total)} ${noun} mapped. ${fmt(s.associated)} are linked to a test and ${fmt(s.proven)} are proven.`;
+    ? `${fmt(s.total)} ${noun} mapped. ${unlinkedSentence(capped ? `the ${nDel} highest-ranked code paths that delete data` : `the ${nDel} code paths that delete data`)}`
+    : `${fmt(s.total)} ${noun} mapped. ${fmt(s.associated)} ${s.associated === 1 ? "is" : "are"} linked to a test and ${fmt(s.proven)} ${s.proven === 1 ? "is" : "are"} proven.`;
 
   // ---- where to start ----
   const actions: string[] = [];
@@ -329,7 +341,7 @@ export function renderShortReport(input: ShortReportInput): string {
   }
   actions.push(
     `<li><strong>Then confirm the tests catch breakage.</strong> A linked test is not yet proof. A proof run breaks the function in an isolated copy and checks that the test fails${
-      input.proofs.length > 0 ? `, as shown for ${input.proofs.length} ${input.proofs.length === 1 ? "function" : "functions"} in section 03` : ""
+      input.proofs.length > 0 ? `, as shown for ${input.proofs.length} ${input.proofs.length === 1 ? "function" : "functions"} in section ${sec("proofs")}` : ""
     }.</li>`
   );
 
@@ -341,13 +353,13 @@ export function renderShortReport(input: ShortReportInput): string {
   const delSection = nDel === 0
     ? ""
     : `  <section class="block" aria-labelledby="n1">
-    <h2 id="n1"><span class="n">01</span> Code paths that delete data</h2>
+    <h2 id="n1"><span class="n">${sec("deletes")}</span> Code paths that delete data</h2>
     <div class="callout">
-      <p class="big">${unlinked.length} of ${esc(delScope)} have no test linked to them.</p>
-      <p>${linkedDeletes.length > 0 ? `${linkedDeletes.length} ${linkedDeletes.length === 1 ? "has a test that calls it" : "have a test that calls them"} directly. ` : ""}${
+      <p class="big">${esc(unlinkedSentence(delScope))}</p>
+      <p>${linkedDeletes.length > 0 && (unlinked.length > 0 || provenDeletes.length > 0) ? `${linkedDeletes.length} ${linkedDeletes.length === 1 ? "has a test that calls it" : "have a test that calls them"} directly. ` : ""}${
         provenDeletes.length > 0
-          ? `${provenDeletes.length} ${provenDeletes.length === 1 ? "is" : "are"} proven: the test fails when the code breaks (section 03). `
-          : "None is proven yet. "
+          ? `${provenDeletes.length} ${provenDeletes.length === 1 ? "is" : "are"} proven: the test fails when the code breaks (section ${sec("proofs")}). `
+          : nDel === 1 ? "It is not proven yet. " : "None is proven yet. "
       }This is missing test protection, not a bug found in the code. Deletes from a cache are not counted. A test that reaches a path only through a fixture, an HTTP client or an end-to-end run is not linked, so check the tests before writing new ones.</p>
     </div>
     ${legend}
@@ -393,7 +405,7 @@ ${deletes
   const rankedSection = data.risks.length === 0
     ? ""
     : `  <section class="block" aria-labelledby="n2">
-    <h2 id="n2"><span class="n">02</span> The highest-ranked items without test evidence</h2>
+    <h2 id="n2"><span class="n">${sec("ranked")}</span> The highest-ranked items without test evidence</h2>
     <p class="sub">The score sets the order of work: how much code depends on it, how often it changes, and what it can break. It is not a defect probability.</p>
     <div class="grid3">
 ${cards.join("\n")}
@@ -439,15 +451,19 @@ ${rankedRows}
             .map((a) => `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.label)}</a>`)
             .join("")}</span><button type="button" class="fbskip" data-fb-skip>Don&rsquo;t ask again</button><p class="fbsub">Opens a short form in a new tab. Nothing is sent unless you press Submit there. Anonymous unless you add an email.</p></div>`
         : "";
+  // Plain wording for a run with no proof yet; the detailed report keeps the full guidance.
+  const tried = data.proofGuidance.state === "attempted" ? data.proofGuidance.attempted ?? 0 : 0;
+  const noProofText = tried > 0
+    ? `Nothing is proven yet. This run made ${fmt(tried)} proof ${tried === 1 ? "attempt" : "attempts"} with linked tests, and in none did the test both pass on the original code and fail at its own assertion when the function was broken. <span class="mono">opro doctor --proof</span> shows why.`
+    : `Nothing is proven yet: no proof ran in this analysis. Run <span class="mono">opro prove-loop</span> on a function with a linked test, or ask your coding agent to prove one through the OrangePro MCP.`;
   const proofSection = `  <section class="block" aria-labelledby="n3">
-    <h2 id="n3"><span class="n">03</span> How existing tests were checked</h2>
+    <h2 id="n3"><span class="n">${sec("proofs")}</span> How existing tests were checked</h2>
     <p class="sub">For a proof, OrangePro runs a test twice: once on the original code, once with the function deliberately broken in an isolated copy.</p>
     <div class="grid2">
       <div class="proof"><span class="ic" style="background:var(--ok-bg);color:var(--ok)">${TICK}</span><div><p class="t">Passes on the original code</p><p class="s">The test is green as the project ships it.</p></div></div>
       <div class="proof"><span class="ic" style="background:var(--orange-bg);color:var(--orange)">${CROSS}</span><div><p class="t">Fails when the function is broken</p><p class="s">At the test&#39;s own assertion, with the function running for real (not mocked).</p></div></div>
     </div>
-${input.proofs.length > 0 ? `    <ul class="faults">\n${proofItems}\n    </ul>` : `    <p class="counts">${esc(data.proofGuidance.title)}. ${esc(data.proofGuidance.body)}</p>`}
-    <p class="counts">Proven: ${fmt(s.proven)}.</p>
+${input.proofs.length > 0 ? `    <ul class="faults">\n${proofItems}\n    </ul>\n    <p class="counts">Proven: ${fmt(s.proven)}.</p>` : `    <p class="counts">${noProofText}</p>`}
   </section>
 `;
 
@@ -457,7 +473,12 @@ ${input.proofs.length > 0 ? `    <ul class="faults">\n${proofItems}\n    </ul>` 
     "Calls made over HTTP in end-to-end tests are not linked to the handlers they reach.",
     "&ldquo;Name match only&rdquo; is a lead from similar names, not a link."
   ];
-  if (nDel > provenDeletes.length) open.push(`${nDel - provenDeletes.length} of the ${nDel} delete paths listed ${nDel - provenDeletes.length === 1 ? "has" : "have"} not been proven. That is the natural next step.`);
+  const unprovenDeletes = nDel - provenDeletes.length;
+  if (unprovenDeletes > 0) {
+    open.push(
+      `${nDel === 1 ? "The delete path listed has not been proven." : unprovenDeletes === nDel ? `None of the ${nDel} delete paths listed has been proven.` : `${unprovenDeletes} of the ${nDel} delete paths listed ${unprovenDeletes === 1 ? "has" : "have"} not been proven.`} That is the natural next step.`
+    );
+  }
   if (prov.churnState && prov.churnState !== "complete") open.push("Change history was not read in full, so the ranking is provisional.");
 
   // ---- section 05: what ran ----
@@ -573,7 +594,7 @@ ${input.proofs.length > 0 ? `    <ul class="faults">\n${proofItems}\n    </ul>` 
     <div class="stat"><p class="k">Dynamically proven</p><p class="v">${fmt(s.proven)}</p><p class="d">Test fails when the code breaks</p></div>
     ${
       nDel > 0
-        ? `<div class="stat"><p class="k">Delete paths with no linked test</p><p class="v">${unlinked.length} of ${nDel}</p><p class="d">${capped ? `Top ${nDel} of ${fmt(allFound)} found; section 01` : "Listed in section 01"}</p></div>`
+        ? `<div class="stat"><p class="k">Delete paths with no linked test</p><p class="v">${unlinked.length} of ${nDel}</p><p class="d">${capped ? `Top ${nDel} of ${fmt(allFound)} found; section ${sec("deletes")}` : `Listed in section ${sec("deletes")}`}</p></div>`
         : `<div class="stat"><p class="k">No test found</p><p class="v">${fmt(s.none)}</p><p class="d">No test refers to them</p></div>`
     }
   </section>
@@ -590,7 +611,7 @@ ${rankedSection}
 ${proofSection}
 ${fbPrompt}
   <section class="block" aria-labelledby="n4">
-    <h2 id="n4"><span class="n">04</span> Still open</h2>
+    <h2 id="n4"><span class="n">${sec("open")}</span> Still open</h2>
     <ul class="open">
       ${open.map((o) => `<li>${o}</li>`).join("\n      ")}
     </ul>
@@ -601,7 +622,7 @@ ${fbPrompt}
   </section>
 
   <section class="block" aria-labelledby="n5">
-    <h2 id="n5"><span class="n">05</span> What ran, and who did each step</h2>
+    <h2 id="n5"><span class="n">${sec("ran")}</span> What ran, and who did each step</h2>
     <ol class="steps">
       ${steps
         .map(
@@ -613,7 +634,7 @@ ${fbPrompt}
   </section>
 
   <section class="block" aria-labelledby="n6">
-    <h2 id="n6"><span class="n">06</span> What you get back</h2>
+    <h2 id="n6"><span class="n">${sec("files")}</span> What you get back</h2>
     <div class="files">
       <a class="file" href="${esc(input.detailedHref)}"><span class="fileic">&lt;/&gt;</span><span><span class="fn mono">${esc(input.detailedHref)}</span><span class="fd">The detailed interactive report: every ${esc(nounInfo.singular)}, flows, ranking and settings.</span></span></a>
       <button type="button" class="file" data-download="receipt"><span class="fileic">{ }</span><span><span class="fn mono">evidence-summary.json ${DL}</span><span class="fd">Commit, scope, counts, delete paths, ranking and proofs.</span></span></button>

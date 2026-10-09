@@ -658,6 +658,45 @@ describe("dynamic proof spike", () => {
     expect(result.mutant.assertionFailure).toBe(true);
   });
 
+  describe("when more than one runner is installed", () => {
+    const mochaFixture = path.join(root, "tests/local/__fixtures__/dynamic-proof/mocha-like");
+    const mochaCopy = (pkg: Record<string, unknown>): string => {
+      const repo = path.join(mkdtempSync(path.join(tmpdir(), "opro-dynamic-two-runners-")), "repo");
+      cpSync(mochaFixture, repo, { recursive: true });
+      writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "two-runners", private: true, type: "module", ...pkg }));
+      return repo;
+    };
+    const autoMocha = (repo: string) => {
+      const run = spawnSync(process.execPath, [
+        script, "--root", repo, "--test", "test/cart.test.js", "--target", "src/cart.service.js",
+        "--method", "total", "--replacement", "return -1;", "--mocha-bin", mochaBin, "--vitest-bin", vitestBin, "--json"
+      ], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      return JSON.parse(run.stdout) as { runner: string; status: string; proven: boolean };
+    };
+
+    it("follows the test file's own vitest import", () => {
+      const repo = path.join(mkdtempSync(path.join(tmpdir(), "opro-dynamic-two-runners-")), "repo");
+      cpSync(fixtureRoot, repo, { recursive: true });
+      writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "two-runners", private: true, devDependencies: { vitest: "*", mocha: "*" } }));
+      const result = runSpikeWithRoot(repo, "order.real.test.ts", sentinelReturn, "src/order.service.ts", []);
+      expect(result.runner).toBe("vitest");
+      expect(result.status).toBe("proven");
+    });
+
+    it("falls back to the runner named in the test script", () => {
+      const result = autoMocha(mochaCopy({ devDependencies: { mocha: "*", vitest: "*" }, scripts: { test: "mocha test/*.test.js" } }));
+      expect(result.runner).toBe("mocha");
+      expect(result.status).toBe("proven");
+      expect(result.proven).toBe(true);
+    });
+
+    it("stays unknown when nothing points to one runner", () => {
+      const result = autoMocha(mochaCopy({ devDependencies: { mocha: "*", vitest: "*" }, scripts: { test: "node run-tests.js" } }));
+      expect(result.runner).toBe("unknown");
+      expect(result.proven).toBe(false);
+    });
+  });
+
   it("keeps Mocha mutant-only non-assertion failures out of Proven", () => {
     const repo = path.join(root, "tests/local/__fixtures__/dynamic-proof/mocha-like");
     const run = spawnSync(process.execPath, [

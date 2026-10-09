@@ -357,3 +357,20 @@ describe("call graph — exact-resolved CALLS edges (Layer 1, PR 1)", () => {
     expect(frameworkDerivedEdges(root)).toEqual([]);
   });
 });
+
+describe("retained external callees skip module-level built-in collections", () => {
+  it("does not retain Set/Map deletes as external surfaces, but keeps an unresolved store", () => {
+    const root = repo({
+      "src/engine.ts": [
+        "const failed = new Set<string>();",
+        "const store = openStore();",
+        "export function retry(language: string) { failed.delete(language); }",
+        "export function purge(id: string) { store.delete(id); }"
+      ].join("\n")
+    });
+    const graph = analyzeRepo(root, { readContent: true });
+    const callees = (name: string) => graph.nodes.find((n) => n.external_id === `sym:src/engine.ts#${name}`)?.properties?.external_callees;
+    expect(callees("retry")).toBeUndefined();
+    expect(callees("purge")).toEqual(["store.delete"]);
+  });
+});

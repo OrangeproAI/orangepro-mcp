@@ -37,6 +37,56 @@ export interface RawCall {
   receiverVar?: string;
   /** Go only: the receiver's base type name (`task`). Lets `t.m()` resolve to `task.m` deterministically. */
   receiverType?: string;
+  /**
+   * For `static`: the qualifier is a module-level built-in Map/Set/WeakMap/WeakSet
+   * (`const seen = new Set()`), so `seen.delete(k)` removes an entry from process
+   * memory. It is not an external surface and never stored data.
+   */
+  inMemoryCollection?: boolean;
+}
+
+/** Built-in in-memory collections. Their `delete`/`clear` never touch stored data. */
+const IN_MEMORY_COLLECTION_TYPES = new Set(["Map", "Set", "WeakMap", "WeakSet", "ReadonlyMap", "ReadonlySet"]);
+
+function unwrapExpression(expr: ts.Expression): ts.Expression {
+  let e = expr;
+  while (ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isTypeAssertionExpression(e)) e = e.expression;
+  return e;
+}
+
+/**
+ * Module-level bindings that hold a built-in collection: declared with a
+ * `Map`/`Set`/`WeakMap`/`WeakSet` type, or initialised with `new Map(…)` and the
+ * like. A file that declares or imports its own `Map`/`Set` keeps those names out,
+ * because the constructor is then not the built-in.
+ */
+function moduleCollectionBindings(sf: ts.SourceFile): Set<string> {
+  const ownNames = new Set<string>();
+  ts.forEachChild(sf, (node) => {
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause;
+      if (clause?.name) ownNames.add(clause.name.text);
+      const named = clause?.namedBindings;
+      if (named && ts.isNamespaceImport(named)) ownNames.add(named.name.text);
+      if (named && ts.isNamedImports(named)) for (const el of named.elements) ownNames.add(el.name.text);
+    } else if ((ts.isClassDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) && node.name) {
+      ownNames.add(node.name.text);
+    }
+  });
+  const builtin = (name: string): boolean => IN_MEMORY_COLLECTION_TYPES.has(name) && !ownNames.has(name);
+  const out = new Set<string>();
+  ts.forEachChild(sf, (node) => {
+    if (!ts.isVariableStatement(node)) return;
+    for (const decl of node.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name)) continue;
+      const type = decl.type;
+      const typed = Boolean(type && ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) && builtin(type.typeName.text));
+      const init = decl.initializer ? unwrapExpression(decl.initializer) : undefined;
+      const constructed = Boolean(init && ts.isNewExpression(init) && ts.isIdentifier(init.expression) && builtin(init.expression.text));
+      if (typed || constructed) out.add(decl.name.text);
+    }
+  });
+  return out;
 }
 
 export interface MedusaGeneratedService {
@@ -358,6 +408,7 @@ export function extractCalls(content: string, tsx: boolean): RawCall[] {
   const out: RawCall[] = [];
   let capped = false;
   const injectedFieldsByClass = collectInjectedFieldsByClass(sf);
+  const moduleCollections = moduleCollectionBindings(sf);
 
   // `thisExact` = `this` currently refers to the lexical class instance, so a
   // `this.member()` resolves exactly to that class's member. True only inside a
@@ -389,7 +440,8 @@ export function extractCalls(content: string, tsx: boolean): RawCall[] {
         if (injectedType) out.push({ caller, callee: e.name.text, via: "injected", qualifier: field, injectedType });
       } else if (ts.isIdentifier(e.expression)) {
         if (shadowed.has(e.expression.text)) return; // a local shadows the qualifier object
-        out.push({ caller, callee: e.name.text, via: "static", qualifier: e.expression.text });
+        const qualifier = e.expression.text;
+        out.push({ caller, callee: e.name.text, via: "static", qualifier, ...(moduleCollections.has(qualifier) ? { inMemoryCollection: true } : {}) });
       }
     }
   };

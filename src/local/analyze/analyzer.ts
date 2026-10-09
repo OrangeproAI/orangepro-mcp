@@ -1539,8 +1539,10 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             if (externalRuntimeBindings?.has(c.qualifier)) {
               recordImportedStaticCallee(callerId, `${c.qualifier}.${c.callee}`);
             }
-            // A non-imported (local/param) qualifier is NOT anchored — no edge.
-            if (!ns && !qImport) recordExternalCallee(callerId, `${c.qualifier}.${c.callee}`); // round two: retain by name
+            // A non-imported (local/param) qualifier is NOT anchored — no edge. A
+            // module-level built-in Map/Set is process memory, not an external
+            // surface, so its `delete`/`clear` is not retained.
+            if (!ns && !qImport && !c.inMemoryCollection) recordExternalCallee(callerId, `${c.qualifier}.${c.callee}`); // round two: retain by name
             // Retain the callee NAME as a fact on the caller (Fix B): `t.adminClient.
             // DeleteWorkflowExecution` is invisible as an edge (external interface) but
             // is exactly the kind of sink risk scoring must be able to see. Names only —

@@ -48,15 +48,17 @@ Every run writes two reports to `.orangepro/`:
 | `short_behavior-coverage.html` | Leads, reviewers, anyone in a hurry | One page: the headline, where to start, the code paths that delete data and their test evidence, the top-ranked items, the tests behind each proof, and how to reproduce the run. Each name links to its line at the analysed commit (GitHub and GitLab). |
 | `behavior-coverage.html` | Developers | The full interactive map: every behavior and its evidence, flows from entry points through services, the ranked list with suggested tests, and the settings used. |
 
+### The one-page summary
+<img width="880" alt="OrangePro one-page summary of its own repository: 60 functions mapped, 45 linked to a test, 1 proven; the three highest-ranked items without test evidence; and the proof for OrangeProClient.get" src="https://github.com/OrangeproAI/orangepro-mcp/raw/main/docs/images/short-report.png" />
+
+*OrangePro run on its own repository at commit `3cc5c19`, with no AI model. The proof at the bottom replaced `OrangeProClient.get` with a fixed return value in an isolated copy, and the project's own test, unchanged, failed at its assertion.*
+
+### The detailed report
 **<a href="https://orangeproai.github.io/orangepro-mcp/twenty-crm-behavior-coverage.html" target="_blank">→ Live example: Twenty CRM (5,237 behaviors mapped)</a>**
 
 <img width="895" alt="OrangePro system map: entry lanes, services, evidence tiers" src="https://github.com/user-attachments/assets/1ceba779-e0ec-4ec1-99ce-001bc3589b42" />
 
 *System map: entry lanes (GraphQL, HTTP, jobs) flowing into services, sized by traffic, colored by evidence tier, red-ringed by risk.*
-
-<img width="818" alt="Priority gaps" src="https://github.com/user-attachments/assets/30a512b6-7830-48db-a00f-a616e7176ea8" />
-
-*Priority gaps in the open-source Hono project: unproven behaviors ranked by what they can break.*
 
 ---
 

@@ -1719,7 +1719,45 @@ function detectRunner(root, args) {
     hasVitest ? "vitest" : null,
     hasMocha ? "mocha" : null
   ].filter(Boolean);
-  return detected.length === 1 ? detected[0] : "unknown";
+  if (detected.length === 1) {
+    return detected[0];
+  }
+  return detected.length > 1 ? preferredRunner(detected, root, args, [pkg, workspacePkg]) : "unknown";
+}
+
+const RUNNER_CONFIG_FILES_BY_RUNNER = {
+  jest: ["jest.config.js", "jest.config.cjs", "jest.config.mjs", "jest.config.ts", "jest.config.json"],
+  vitest: ["vitest.config.js", "vitest.config.cjs", "vitest.config.mjs", "vitest.config.ts", "vitest.workspace.ts", "vitest.workspace.js"],
+  mocha: [".mocharc.js", ".mocharc.cjs", ".mocharc.mjs", ".mocharc.json", ".mocharc.yml", ".mocharc.yaml", "mocha.opts"]
+};
+
+const RUNNER_TEST_IMPORT_RE = {
+  vitest: /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["']vitest["']/,
+  jest: /(?:\bfrom\s*|\brequire\s*\(\s*)["']@jest\/globals["']/,
+  mocha: /(?:\bfrom\s*|\brequire\s*\(\s*)["']mocha["']/
+};
+
+// More than one runner is installed (for example vitest for the project and mocha
+// for fixtures). Choose by the evidence closest to the test: the test file's own
+// import, then a runner config file, then the `test` script. A choice is made only
+// when exactly one detected runner matches; otherwise the runner stays unknown.
+function preferredRunner(detected, root, args, pkgs) {
+  const only = (matches) => {
+    const hits = detected.filter(matches);
+    return hits.length === 1 ? hits[0] : null;
+  };
+  let testText = "";
+  try {
+    testText = args.testAbs ? readFileSync(args.testAbs, "utf8") : "";
+  } catch {
+    testText = "";
+  }
+  const roots = [root, args.workspaceRoot].filter(Boolean);
+  const testScripts = pkgs.map(pkg => (typeof pkg?.scripts?.test === "string" ? pkg.scripts.test : "")).join("\n");
+  return only(runner => RUNNER_TEST_IMPORT_RE[runner].test(testText))
+    ?? only(runner => roots.some(dir => hasAnyFile(dir, RUNNER_CONFIG_FILES_BY_RUNNER[runner])))
+    ?? only(runner => new RegExp(`(?:^|[\\s/&;|("'])${runner}(?:$|[\\s"';&|)])`).test(testScripts))
+    ?? "unknown";
 }
 
 function assertRunnerBin(runner, binPath) {
@@ -2305,7 +2343,7 @@ function main() {
   const replacementBody = buildReplacementBody(args.replacement, args.replacementMode);
   const testEnv = parseTestEnv(args.testEnv);
   const workspaceRoot = detectWorkspaceRoot(root);
-  const runner = detectRunner(root, { ...args, workspaceRoot });
+  const runner = detectRunner(root, { ...args, workspaceRoot, testAbs });
   const vitestBin = args.vitestBin ? path.resolve(args.vitestBin) : defaultVitestBin(root, workspaceRoot);
   const jestBin = args.jestBin ? path.resolve(args.jestBin) : defaultJestBin(root, workspaceRoot);
   const mochaBin = args.mochaBin ? path.resolve(args.mochaBin) : defaultMochaBin(root, workspaceRoot);

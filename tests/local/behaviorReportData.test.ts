@@ -669,7 +669,13 @@ describe("short report reads the same build as the detailed report", () => {
 
     const offline = renderShortReport({ ...common, repoWeb: null });
     expect(offline).toContain(`${build.data.summary.total.toLocaleString("en-US")} functions mapped.`);
-    expect(offline).toContain(`${build.data.worklists.irreversible.length} code paths that delete data`);
+    const deletes = build.data.worklists.irreversible.length;
+    expect(offline).toContain(deletes === 1 ? "The one code path that deletes data has no test linked to it." : `${deletes} code paths that delete data`);
+    expect(offline).not.toMatch(/\b0 of |\b1 of the 1\b/);
+    // No proof yet: plain wording, not the detailed report's internal terms.
+    expect(offline).toContain("Nothing is proven yet: no proof ran in this analysis.");
+    expect(offline).not.toContain("Dynamically Proven \u2014");
+    expect(offline).not.toContain("Statically Linked");
     expect(offline).not.toContain("<img src=x>");
     expect(offline).toContain("Gc.<wbr>sweep&lt;img src=x&gt;");
     expect(offline).not.toMatch(/<script[^>]+src=|<link[^>]+href=/i);
@@ -772,7 +778,7 @@ describe("short report keeps proven delete paths in its count", () => {
       proofs: [{ symbolId: "sym:src/store/gc.ts#Gc.sweep", title: "Gc.sweep", file: "src/store/gc.ts" }],
       lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
     });
-    expect(html).toContain("1 of 2 code paths that delete data have no test linked to them.");
+    expect(html).toContain("1 of the 2 code paths that delete data has no test linked to it.");
     expect(html).toContain("1 is proven: the test fails when the code breaks");
     expect(html).toContain("Archive store");
   });
