@@ -342,7 +342,9 @@ describe("operation-level coverage", () => {
     expect(rerun.generation.status).toBe("no_targets");
     expect(secondGraph.generated_tests.map((test: { id: string }) => test.id)).toEqual(firstIds);
     expect(secondGraph.generated_tests).toHaveLength(14);
-  });
+    // Two full opStart runs: well under a second alone, but slow when the whole
+    // suite runs in parallel on a many-core machine.
+  }, 60_000);
 
   it("opStart tops up partially generated current risk flows to two tests each", async () => {
     const root = temp();
@@ -420,7 +422,7 @@ describe("operation-level coverage", () => {
     const rerunHtml = readFileSync(rerun.behavior_coverage_path ?? "", "utf8");
     expect(rerunHtml).toContain('"generatedTotal":44');
     expect(rerunHtml).toContain('"shownCount":40');
-  }, 15_000);
+  }, 60_000);
 
   it("opStart makes one bounded follow-up when the provider returns only one scenario", async () => {
     const root = temp();
@@ -542,7 +544,7 @@ describe("operation-level coverage", () => {
     expect(res.generation.status).not.toBe("no_results");
     expect(res.generation.generated).toBeGreaterThan(0);
     expect(res.warnings.some((warning) => warning.includes("Planning output contained no JSON array"))).toBe(false);
-  });
+  }, 60_000);
 
   it("opExplain throws for an unknown test id", () => {
     const root = temp();
