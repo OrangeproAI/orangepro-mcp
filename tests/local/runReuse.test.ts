@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,6 +37,32 @@ describe("run key", () => {
     expect(edited).not.toBe(clean.key);
     writeFileSync(join(root, "src", "b.ts"), "export const b = 1;\n");
     expect(codeKey(root)!.key).not.toBe(edited);
+  });
+
+  it("sees edits when the folder is reached through a symlink (macOS /var → /private/var)", () => {
+    const root = repo();
+    const linkParent = mkdtempSync(join(tmpdir(), "opro-reuse-link-"));
+    dirs.push(linkParent);
+    const link = join(linkParent, "repo");
+    symlinkSync(root, link, "dir");
+    const clean = codeKey(link)!.key;
+    writeFileSync(join(root, "src", "a.ts"), "export const a = 2;\n");
+    expect(codeKey(link)!.key).not.toBe(clean);
+    expect(codeKey(link)!.key).toBe(codeKey(root)!.key);
+  });
+
+  it("covers only the scanned sub-folder and its own outputs stay out", () => {
+    const root = repo();
+    mkdirSync(join(root, "other"));
+    const sub = join(root, "src");
+    const clean = codeKey(sub)!.key;
+    writeFileSync(join(root, "other", "x.ts"), "export const x = 1;\n");
+    expect(codeKey(sub)!.key).toBe(clean);
+    mkdirSync(join(sub, ".orangepro"));
+    writeFileSync(join(sub, ".orangepro", "graph.json"), "{}");
+    expect(codeKey(sub)!.key).toBe(clean);
+    writeFileSync(join(sub, "a.ts"), "export const a = 3;\n");
+    expect(codeKey(sub)!.key).not.toBe(clean);
   });
 
   it("is null outside git, so a plain folder always runs in full", () => {

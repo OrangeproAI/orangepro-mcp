@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { coverageArtifactPathsForReuse } from "./analyze/coverage.js";
 
 /**
@@ -67,15 +67,21 @@ function git(cwd: string, args: string[]): string | null {
   }
 }
 
-/** HEAD plus every changed or untracked file under `scanRoot`, by content. Null outside git. */
+/**
+ * HEAD plus every changed or untracked file under `scanRoot`, by content. Null outside git.
+ * Paths are matched in git's own terms (the scan root's prefix inside the repository),
+ * never by comparing absolute paths: git reports the real path, and a scan root reached
+ * through a symlink (macOS /var → /private/var, a linked home folder) would otherwise hide
+ * every edit.
+ */
 export function codeKey(scanRoot: string): { key: string; commit: string } | null {
   const top = git(scanRoot, ["rev-parse", "--show-toplevel"])?.trim();
   const head = git(scanRoot, ["rev-parse", "HEAD"])?.trim();
-  if (!top || !head) return null;
-  const status = git(top, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const prefix = git(scanRoot, ["rev-parse", "--show-prefix"])?.trim();
+  if (!top || !head || prefix === undefined) return null;
+  const status = git(scanRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]);
   if (status === null) return null;
-  const scanAbs = resolve(scanRoot);
-  const ownOutputs = join(scanAbs, ".orangepro") + sep;
+  const ownOutputs = `${prefix}.orangepro/`;
   const entries: string[] = [];
   const parts = status.split("\0").filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
@@ -84,10 +90,8 @@ export function codeKey(scanRoot: string): { key: string; commit: string } | nul
     const rel = entry.slice(3);
     // A rename lists its source as the next NUL-separated field.
     if (code[0] === "R" || code[0] === "C") i += 1;
-    const abs = resolve(top, rel);
-    if (abs !== scanAbs && !abs.startsWith(scanAbs + sep)) continue;
-    if (abs.startsWith(ownOutputs)) continue;
-    entries.push(`${code} ${rel} ${fileDigest(abs)}`);
+    if (!rel.startsWith(prefix) || rel.startsWith(ownOutputs)) continue;
+    entries.push(`${code} ${rel} ${fileDigest(join(top, rel))}`);
   }
   entries.sort();
   return { key: sha(`${head}\n${entries.join("\n")}`), commit: head };
