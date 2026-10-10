@@ -79,7 +79,7 @@ export function createLocalServer(): McpServer {
     {
       title: "Start OrangePro",
       description:
-        "One-command local setup for a repo or PR: analyze sources, auto-apply weak AI candidate links and candidate flows when a real BYOK provider is configured, write behavior-coverage.html + rtm.md, summarize changed/gap targets, and return agent next actions. AI lanes stay separate and never affect Proven coverage.",
+        "One-command local setup for a repo or PR: analyze sources, auto-apply weak AI candidate links and candidate flows when a real BYOK provider is configured, write behavior-coverage.html (detailed report), short_behavior-coverage.html (summary), tests.csv + rtm.md, summarize changed/gap targets, and return agent next actions. When nothing changed since the last run it returns at once with unchanged_since and reuses the reports (fresh=true forces a full run). AI lanes stay separate and never affect Proven coverage.",
       inputSchema: {
         ...Workspace,
         source: z.string().optional().describe("Source path to analyze. Defaults to workspace."),
@@ -92,7 +92,8 @@ export function createLocalServer(): McpServer {
         ai_all: z.boolean().optional().describe("Run AI weak-linking over all deterministic behavior nodes instead of gaps-only."),
         provider: z.enum(["openai", "ollama", "anthropic"]).optional().describe("BYOK provider override for the AI passes."),
         model: z.string().optional().describe("Model name override."),
-        prompt_version: z.enum(["v2", "v5"]).optional().describe("Opt-in generation strategy for the auto-prove generation lane. Default v2/deterministic; v5 uses batched two-phase generation. The prove/mint gate is unchanged either way.")
+        prompt_version: z.enum(["v2", "v5"]).optional().describe("Opt-in generation strategy for the auto-prove generation lane. Default v2/deterministic; v5 uses batched two-phase generation. The prove/mint gate is unchanged either way."),
+        fresh: z.boolean().optional().describe("Run in full even when nothing changed since the last run. By default an unchanged repository returns at once with unchanged_since and the reports of the last run.")
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
     },
@@ -101,6 +102,7 @@ export function createLocalServer(): McpServer {
         await preloadTreeSitter(treeSitterLanguages());
         return withFeedback(asText(
           await opStart(root(input.workspace), {
+            fresh: input.fresh,
             source: input.source,
             baseRef: input.base_ref,
             includeMarkdown: input.include_markdown,

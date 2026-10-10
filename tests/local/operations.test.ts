@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -151,10 +151,9 @@ describe("operations round trip", () => {
     const result = opBehaviorCoverageHtml(outputRoot, "source-root-report.html", undefined, { persistBaseline: false });
     const html = readFileSync(result.behavior_coverage_path, "utf8");
 
-    expect(html).toContain(`\"source\":\"${sourceRoot.split("/").pop()}\"`);
-    expect(html).toContain('\"history\":\"full\"');
-    expect(html).toContain('\"churn\":\"available\"');
-    expect(html).not.toContain(`\"source\":\"${outputRoot.split("/").pop()}\"`);
+    // Change history comes from the analysed source checkout, not the output folder.
+    expect(html).toContain('"history":{"state":"full","commits":1,"days":180,"complete":true}');
+    expect(html).not.toContain(`"name":"${outputRoot.split("/").pop()}"`);
   });
 
   it("writes the short summary next to the detailed report, linking code only through a credential-free known host", () => {
@@ -178,7 +177,9 @@ describe("operations round trip", () => {
     expect(short).not.toContain("tok3n-value");
     expect(short).not.toContain("someone");
     expect(short).toContain('href="report.html"');
-    expect(readFileSync(result.behavior_coverage_path, "utf8")).not.toContain("short_report.html");
+    const detailed = readFileSync(result.behavior_coverage_path, "utf8");
+    expect(detailed).toContain('href="short_report.html"');
+    expect(detailed).not.toContain("tok3n-value");
     // An intermediate view (no baseline) never uses up the feedback invitation.
     expect(short).toContain(">Give feedback</a>");
     expect(short).not.toContain("Did this help you decide what to test?");
@@ -289,29 +290,47 @@ describe("start orchestration", () => {
     expect(res.auto_prove).toMatchObject({ status: "disabled", attempted: 0, proven: 0 });
   });
 
-  it("compares the final report with the previous completed start run", async () => {
+  it("reuses an unchanged run, and says what changed when the code did (R14 §5)", async () => {
     const W = makeTempDir();
     writeStartFixture(W);
-    await opStart(W, { source: W, ai: false, noAuto: true }, deps);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: W, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    git("add", "-A");
+    git("commit", "-qm", "init");
+    const opts = { source: W, ai: false, noAuto: true };
+    const dataPath = join(W, ".orangepro", "report-data.json");
 
-    const baselinePath = join(W, ".orangepro", "report-baseline.json");
-    const first = JSON.parse(readFileSync(baselinePath, "utf8")) as { summary: { total: number } };
+    const first = await opStart(W, opts, deps);
+    expect(first.reuse).toMatchObject({ status: "full", reason: "first_run" });
+    const firstModel = JSON.parse(readFileSync(dataPath, "utf8")) as { counts: { mapped: number }; since: { kind: string } };
+    expect(firstModel.since.kind).toBe("first");
+    expect(existsSync(join(W, ".orangepro", "tests.csv"))).toBe(true);
+
+    const graphPath = join(W, ".orangepro", "graph.json");
+    const graphWritten = statSync(graphPath).mtimeMs;
+    const second = await opStart(W, opts, deps);
+    expect(second.reuse).toMatchObject({ status: "reused", rerendered: false });
+    expect(second.unchanged_since).toBeTruthy();
+    expect(second.next_actions[0]).toContain("Nothing changed since this report was made");
+    expect(statSync(graphPath).mtimeMs).toBe(graphWritten);
+    expect(readFileSync(join(W, ".orangepro", "short_behavior-coverage.html"), "utf8")).toContain("Checked again");
+
+    const fresh = await opStart(W, { ...opts, fresh: true }, deps);
+    expect(fresh.reuse).toMatchObject({ status: "full", reason: "fresh" });
+
     const servicePath = join(W, "service.ts");
-    writeFileSync(
-      servicePath,
-      `${readFileSync(servicePath, "utf8")}\nexport function refundOrder(id: string): boolean {\n  return Boolean(id);\n}\n`,
-      "utf8"
-    );
+    writeFileSync(servicePath, `${readFileSync(servicePath, "utf8")}\nexport function refundOrder(id: string): boolean {\n  return Boolean(id);\n}\n`, "utf8");
+    const third = await opStart(W, opts, deps);
+    expect(third.reuse).toMatchObject({ status: "full", reason: "code_changed" });
+    const thirdModel = JSON.parse(readFileSync(dataPath, "utf8")) as { counts: { mapped: number }; since: { text: string } };
+    expect(thirdModel.counts.mapped).toBe(firstModel.counts.mapped + 1);
+    expect(thirdModel.since.text).toContain("(your code changed)");
 
-    const second = await opStart(W, { source: W, ai: false, noAuto: true }, deps);
-    const html = readFileSync(second.behavior_coverage_path ?? "", "utf8");
-    const finalBaseline = JSON.parse(readFileSync(baselinePath, "utf8")) as { summary: { total: number } };
-
-    expect(finalBaseline.summary.total).toBe(first.summary.total + 1);
-    expect(html).toContain('"comparisonState":"repository_changed"');
-    expect(html).toContain('"changed":false');
-    expect(html).toContain('"totalDelta":0');
-    expect(html).toContain("Comparison withheld");
+    // A different start option is a different input.
+    const noLimit = await opStart(W, { ...opts, generateLimit: 3 }, deps);
+    expect(noLimit.reuse).toMatchObject({ status: "full", reason: "inputs_changed" });
   });
 
   it("auto-applies AI candidate links when a provider is configured without changing deterministic RTM status", async () => {

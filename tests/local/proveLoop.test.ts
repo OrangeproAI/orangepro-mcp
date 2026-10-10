@@ -227,9 +227,9 @@ describe("opProveLoop", () => {
     const proof = asProof(res);
     expect(proof.behavior_coverage_path).toBeDefined();
     const html = readFileSync(proof.behavior_coverage_path as string, "utf8");
-    // The embedded report data flips to static+dynamic with a proven tally once the cert closes.
-    expect(html).toContain('"analysisKind":"static+dynamic"');
-    expect(html).toContain('"proven":1');
+    // The embedded report data lists the proof and counts it once the cert closes.
+    expect(html).toContain(`"proofs":[{"id":${JSON.stringify(TARGET)}`);
+    expect(html).toContain('"proven":1}');
   });
 
   it("bar5: cert shape identical to a direct opDynamicProof call (no setup)", () => {

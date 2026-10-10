@@ -55,7 +55,7 @@ import { enrichFromContent } from "./enrich/index.js";
 import { scoreGraph } from "./score/score.js";
 import { doctorGraph } from "./score/doctor.js";
 import { findGaps } from "./gaps/gaps.js";
-import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint } from "./score/risk.js";
+import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint, withRankingCache } from "./score/risk.js";
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
@@ -80,9 +80,15 @@ import { changedImpact } from "./freshness/changed.js";
 import { explainTest } from "./explain/explain.js";
 import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
-import { buildBehaviorReportDataWithGaps, type BehaviorReportBuild, computeReportDelta, reportBaselineOf, type ReportBaseline, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
-import { renderBehaviorReport } from "./viz/behaviorReportHtml.js";
-import { proofSentinelText, proofTestLocation, renderShortReport, repoWebFromRemote, shortReportPath, type ShortReportProof } from "./viz/shortReport.js";
+import { buildBehaviorReportDataWithGaps, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
+import { denominatorNoun, proofTestLocation, repoWebFromRemote, shortReportPath, type RepoWeb } from "./viz/shortReport.js";
+import { buildReportModel, isReportModel, REPORT_DATA_FILE, REPORT_DATA_VERSION, REPORT_RENDERER_VERSION, worklistRanking, type ProofRow, type ReportModel } from "./viz/reportModel.js";
+import { checkedText, renderSummaryReport } from "./viz/summaryReport.js";
+import { renderDetailedReport } from "./viz/detailedReport.js";
+import { testsCsv, TESTS_CSV_FILE } from "./viz/testsExport.js";
+import { computeRunKey, decideReuse, readRunKey, writeRunKey, type ReuseDecision, type RunKeyParts } from "./runReuse.js";
+import { ORS_VERSION } from "./score/risk.js";
+import { ANALYZER_VERSION } from "./provenance.js";
 import { claimOutcomeInvitation, reportFeedback } from "./feedback.js";
 import { ORANGEPRO_VERSION } from "./version.js";
 import { renderCoverageReport } from "./pack/coverageReport.js";
@@ -361,6 +367,8 @@ export interface StartOptions extends ProviderOverride {
   noAuto?: boolean;
   /** Opt-in v5 batched generation for the auto-prove generation lane. Default (undefined) → v2/deterministic, unchanged. */
   promptVersion?: "v2" | "v5";
+  /** --fresh: run in full even when nothing changed since the last run (R14 §5). */
+  fresh?: boolean;
 }
 
 export interface StartAiResult {
@@ -398,6 +406,21 @@ export interface StartResult {
   agent_workflow: string[];
   grounding_contract: string[];
   warnings: string[];
+  /** Set when nothing changed since the last run and its reports were reused (R14 §5). */
+  unchanged_since?: string;
+  /** Whether this run reused the last one, and why not when it ran in full. */
+  reuse?: StartReuseSummary;
+}
+
+export interface StartReuseSummary {
+  status: "reused" | "full";
+  /** Why the run was full: fresh, not_git, first_run, missing_outputs, code_changed, inputs_changed, analysis_changed, generation_pending. */
+  reason?: string;
+  /** When the reused reports were produced. */
+  unchanged_since?: string;
+  checked_at?: string;
+  /** The reports were re-rendered with a newer renderer from the saved data. */
+  rerendered?: boolean;
 }
 
 export interface StartGenerationResult {
@@ -2177,6 +2200,15 @@ export async function opStart(
   const providerOpts = startProviderOverride(root, opts);
   const scanRoot = opts.source ? resolve(opts.source) : resolve(root);
   const providerEnv = loadProviderEnv([root, scanRoot], deps.env);
+  // R14 §5: when nothing that decides the result changed since the last full run,
+  // re-render its reports from the saved data instead of analysing again.
+  const reuseInput = startRunKeyInput(root, scanRoot, opts, providerOpts, providerEnv, deps);
+  const reuseCheck = startReuseDecision(root, opts, reuseInput);
+  if (reuseCheck.decision.kind === "reuse") {
+    const reused = reuseStart(root, reuseCheck.decision, deps);
+    if (reused) return reused;
+  }
+  const runReason = reuseCheck.decision.kind === "full" ? reuseCheck.decision.reason : "missing_outputs";
   // `start` writes advisory/intermediate views before the final report. Keep
   // those helpers from advancing report-baseline.json mid-run.
   const providerDeps = { ...deps, env: providerEnv, suppressBehaviorReportRefresh: true };
@@ -2353,8 +2385,9 @@ export async function opStart(
         tests.push(test);
         generatedTestsByTarget.set(targetId, tests);
       }
-      const rankedGenerationGaps = rankPriorityGaps(graphForGeneration, {
-        repoRoot: root,
+      // Draft for the same functions the reports give test slots to (R14 Amendment A1).
+      const rankedGenerationGaps = worklistRanking(graphForGeneration, {
+        repoRoot: graphForGeneration.workspace.root,
         limit: generationLimit,
         provenIds: provenSymbolIds(graphForGeneration, loadLedger(root))
       });
@@ -2544,6 +2577,7 @@ export async function opStart(
   }
 
   let coverageHtml: string | undefined = staticSnapshot.behaviorCoveragePath;
+  let finalReportWritten = false;
   try {
     reportProgress("artifacts: writing behavior coverage view", { current: 7, total: 8 });
     // Forward THIS-RUN dynamic-proof outcome so the report can name the dominant setup/runnability
@@ -2558,7 +2592,8 @@ export async function opStart(
         .filter((a) => !a.deduped)
         .map((a) => ({ category: a.category, reason: a.reason }))
     };
-    coverageHtml = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, dynForReport).behavior_coverage_path;
+    coverageHtml = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, dynForReport, { runReason }).behavior_coverage_path;
+    finalReportWritten = true;
   } catch (error) {
     warnings.push(`behavior coverage view not written: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -2625,7 +2660,7 @@ export async function opStart(
   if (aiFlows.status === "applied") nextActions.push("Review the AI-suggested flows section in the behavior report; these are candidate chains to verify, not evidence.");
   if (aiFlows.status === "failed") nextActions.push(`AI candidate flows failed but deterministic artifacts are ready: ${aiFlows.reason}`);
 
-  return {
+  const result: StartResult = {
     scope,
     analyze: finalAnalyze,
     ai_links: aiLinks,
@@ -2642,8 +2677,143 @@ export async function opStart(
     next_actions: nextActions,
     agent_workflow: AGENT_RUN_WORKFLOW,
     grounding_contract: GROUNDING_CONTRACT,
-    warnings
+    warnings,
+    reuse: { status: "full", reason: runReason }
   };
+  if (finalReportWritten) saveStartForReuse(root, reuseInput, result, deps);
+  return result;
+}
+
+// ── Reuse an unchanged run (R14 §5) ──
+
+const LAST_START_FILE = "last-start.json";
+const LAST_START_SCHEMA = 1;
+/** Versions that change findings for the same code; a change forces a full run. */
+const START_ANALYSIS_VERSIONS = [ANALYZER_VERSION, ORS_VERSION, PROOF_ORACLE_VERSION, LOCAL_GRAPH_SCHEMA_VERSION, `report-data.v${REPORT_DATA_VERSION}`];
+
+type RunKeyInput = Parameters<typeof computeRunKey>[0];
+
+function startRunKeyInput(root: string, scanRoot: string, opts: StartOptions, providerOpts: ProviderOverride, providerEnv: NodeJS.ProcessEnv, deps: OperationDeps): RunKeyInput {
+  // Only the options that change what start produces; never a key or a secret.
+  const flags: Record<string, unknown> = {
+    source: opts.source ? resolve(opts.source) : undefined,
+    baseRef: opts.baseRef,
+    includeMarkdown: opts.includeMarkdown,
+    generateCoverage: opts.generateCoverage,
+    ai: opts.ai,
+    aiAll: opts.aiAll,
+    aiFlows: opts.aiFlows,
+    autoLimit: opts.autoLimit,
+    proofLimit: opts.proofLimit,
+    generateLimit: opts.generateLimit,
+    noAuto: opts.noAuto,
+    promptVersion: opts.promptVersion,
+    provider: providerOpts.provider,
+    model: providerOpts.model
+  };
+  const providerConfigured =
+    deps.aiProvider !== undefined ||
+    resolveProviderConfig(providerEnv, providerOpts) !== null ||
+    /^(1|true|yes)$/i.test(String(providerEnv.ORANGEPRO_ALLOW_DETERMINISTIC ?? ""));
+  return {
+    root,
+    scanRoot,
+    flags,
+    providerConfigured,
+    env: providerEnv,
+    analysisVersions: START_ANALYSIS_VERSIONS,
+    renderer: REPORT_RENDERER_VERSION,
+    tool: ORANGEPRO_VERSION
+  };
+}
+
+interface LastStart {
+  schema: typeof LAST_START_SCHEMA;
+  result: StartResult;
+}
+
+function readLastStart(workspaceDir: string): LastStart | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(workspaceDir, LAST_START_FILE), "utf8")) as Partial<LastStart>;
+    return parsed.schema === LAST_START_SCHEMA && parsed.result && typeof parsed.result === "object" ? (parsed as LastStart) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A drafting failure the provider may not repeat (no credits, rate limit) is retried. */
+function startGenerationPending(generation: StartGenerationResult | undefined): boolean {
+  if (!generation) return false;
+  if (generation.status === "failed") return true;
+  return /\b429\b|credit|quota|rate.?limit|timed? ?out|ECONN|network/i.test(generation.reason ?? "");
+}
+
+function startReuseDecision(root: string, opts: StartOptions, input: RunKeyInput): { decision: ReuseDecision; current: RunKeyParts | null } {
+  const workspaceDir = join(root, WORKSPACE_DIR);
+  let current: RunKeyParts | null = null;
+  try {
+    current = opts.fresh ? null : computeRunKey(input);
+  } catch {
+    current = null;
+  }
+  const previous = readRunKey(workspaceDir);
+  const last = readLastStart(workspaceDir);
+  const outputsPresent =
+    last !== null &&
+    graphExists(root) &&
+    existsSync(join(workspaceDir, "behavior-coverage.html")) &&
+    readReportModel(join(workspaceDir, REPORT_DATA_FILE)) !== null;
+  const decision = decideReuse({
+    previous,
+    current,
+    ...(opts.fresh ? { fresh: true } : {}),
+    outputsPresent,
+    generationPending: startGenerationPending(last?.result.generation)
+  });
+  return { decision, current };
+}
+
+function reuseStart(root: string, decision: Extract<ReuseDecision, { kind: "reuse" }>, deps: OperationDeps): StartResult | null {
+  const workspaceDir = join(root, WORKSPACE_DIR);
+  const last = readLastStart(workspaceDir);
+  if (!last) return null;
+  const now = deps.clock();
+  const previousGeneratedAt = decision.previous.generated_at;
+  let rendered: ReturnType<typeof rerenderSavedReports>;
+  try {
+    rendered = rerenderSavedReports(root, `${WORKSPACE_DIR}/behavior-coverage.html`, { at: now, previousGeneratedAt, rerendered: decision.rerender });
+  } catch {
+    return null;
+  }
+  if (!rendered) return null;
+  try {
+    writeRunKey(workspaceDir, { ...decision.previous, renderer: REPORT_RENDERER_VERSION, tool: ORANGEPRO_VERSION, checked_at: now });
+  } catch {
+    // the next run checks again
+  }
+  const line = rendered.model.checked?.text ?? `Nothing changed since the report of ${previousGeneratedAt}.`;
+  reportProgress("start: nothing changed since the last run; reports reused (use --fresh to run in full)", { current: 8, total: 8 });
+  return {
+    ...last.result,
+    behavior_coverage_path: rendered.behavior_coverage_path,
+    next_actions: [`${line} No analysis, proof or model call ran. Run with --fresh to analyse again anyway.`, ...last.result.next_actions],
+    unchanged_since: previousGeneratedAt,
+    reuse: { status: "reused", unchanged_since: previousGeneratedAt, checked_at: now, rerendered: decision.rerender }
+  };
+}
+
+/** After a full run: the key of what it saw (after its own writes) and its result. */
+function saveStartForReuse(root: string, input: RunKeyInput, result: StartResult, deps: OperationDeps): void {
+  const workspaceDir = join(root, WORKSPACE_DIR);
+  try {
+    const parts = computeRunKey(input);
+    if (!parts) return;
+    const generatedAt = readReportModel(join(workspaceDir, REPORT_DATA_FILE))?.generatedAt ?? deps.clock();
+    writeFileAtomic(join(workspaceDir, LAST_START_FILE), `${JSON.stringify({ schema: LAST_START_SCHEMA, result })}\n`);
+    writeRunKey(workspaceDir, { ...parts, schema: 1, generated_at: generatedAt, checked_at: generatedAt });
+  } catch {
+    // reuse is an optimisation; a run never fails over it
+  }
 }
 
 const NO_PROVIDER_MESSAGE =
@@ -2968,13 +3138,29 @@ export function opGraphHtml(root: string, outputPath = "orangepro-graph.html"): 
   return { graph_html_path: htmlPath };
 }
 
-/** Write the self-contained offline behavior-coverage view (deterministic, metadata only). */
+/**
+ * Write both reports, the tests spreadsheet and the saved report data (R14).
+ *
+ * The detailed report (`outputPath`) and the one-page summary next to it
+ * (`short_<name>`) render from one ReportModel. The model is saved as
+ * `.orangepro/report-data.json` on a final write, so the next run can compare with
+ * it ("since the last report") or, when nothing changed, re-render from it without
+ * analysing anything. `.orangepro/tests.csv` holds every test slot.
+ */
 export function opBehaviorCoverageHtml(
   root: string,
   outputPath = "orangepro-behavior-coverage.html",
   dynamicProof?: DynamicProofReportInput,
-  options: { persistBaseline?: boolean; feedbackInvite?: boolean } = {}
-): { behavior_coverage_path: string; short_report_path?: string } {
+  options: ReportWriteOptions = {}
+): ReportWriteResult {
+  // The report data and the worklist rank the same graph several times; rank it once.
+  return withRankingCache(() => writeBehaviorReports(root, outputPath, dynamicProof, options));
+}
+
+interface ReportWriteOptions { persistBaseline?: boolean; feedbackInvite?: boolean; runReason?: string }
+interface ReportWriteResult { behavior_coverage_path: string; short_report_path?: string; tests_csv_path?: string; report_data_path?: string }
+
+function writeBehaviorReports(root: string, outputPath: string, dynamicProof: DynamicProofReportInput | undefined, options: ReportWriteOptions): ReportWriteResult {
   const graph = loadGraph(workspacePaths(root).graphPath);
   // Standalone regens have no this-run outcome: fall back to the persisted
   // proof-attempts sidecar ONLY when it anchors to the current graph+commit
@@ -2986,16 +3172,6 @@ export function opBehaviorCoverageHtml(
   const ledger = loadLedger(root);
   const build = buildBehaviorReportDataWithGaps(graph, ledger, { repoRoot: graph.workspace.root, dynamicProof: dyn });
   const data = build.data;
-  // Delta-since-last-run: best-effort read of the previous snapshot; a missing
-  // or unreadable baseline means first run (banner hidden). Display-only —
-  // the delta never touches tiers, ranks, or counts.
-  const baselinePath = resolve(root, `${WORKSPACE_DIR}/report-baseline.json`);
-  try {
-    const prev = JSON.parse(readFileSync(baselinePath, "utf8")) as ReportBaseline;
-    if (prev && prev.summary && Array.isArray(prev.riskPaths)) data.delta = computeReportDelta(prev, data);
-  } catch {
-    // buildBehaviorReportData already provides an explicit first_run state.
-  }
   // Feedback links are display-only. The "Did this help?" invitation is claimed only
   // for the final report of a run (an intermediate view is overwritten), at most once
   // per cooldown window, and the preference lives on this machine only.
@@ -3014,50 +3190,142 @@ export function opBehaviorCoverageHtml(
   } catch {
     // feedback links are optional; a report never fails over them
   }
-  const html = renderBehaviorReport(data);
   const htmlPath = resolve(root, outputPath);
-  writeFileSync(htmlPath, html, "utf8");
-  // The short summary reads the same data and ranking rows; it never changes the
-  // detailed report. A failure here must not fail the run.
-  let shortPath: string | undefined;
-  try {
-    shortPath = shortReportPath(htmlPath);
-    writeFileSync(shortPath, renderShortReport(shortReportInput(graph, ledger, build, htmlPath)), "utf8");
-  } catch {
-    shortPath = undefined;
-  }
+  const summaryPath = shortReportPath(htmlPath);
+  const workspaceDir = resolve(root, WORKSPACE_DIR);
+  mkdirSync(workspaceDir, { recursive: true });
+  const dataPath = join(workspaceDir, REPORT_DATA_FILE);
+  const csvPath = join(workspaceDir, TESTS_CSV_FILE);
+  const ctx = reportContext(graph, ledger);
+  const model = buildReportModel({
+    graph,
+    ledger,
+    build,
+    repoRoot: graph.workspace.root,
+    repoWeb: ctx.repoWeb,
+    noun: denominatorNoun(ctx.kinds),
+    proofs: ctx.proofs,
+    ...(dyn ? { dynamicProof: dyn } : {}),
+    generationShortfall: generationShortfall(root),
+    ...(data.feedback ? { feedback: data.feedback } : {}),
+    previous: readReportModel(dataPath),
+    ...(options.runReason ? { runReason: options.runReason } : {}),
+    generatedAt: new Date().toISOString(),
+    links: { detailed: basename(htmlPath), summary: basename(summaryPath), csv: relative(dirname(htmlPath), csvPath).split(sep).join("/") }
+  });
+  const written = writeReports(model, htmlPath, summaryPath, csvPath);
+  let savedData = false;
   if (options.persistBaseline !== false) {
     try {
-      writeFileSync(baselinePath, JSON.stringify(reportBaselineOf(data, new Date().toISOString())), "utf8");
+      writeFileAtomic(dataPath, `${JSON.stringify(model)}\n`);
+      savedData = true;
     } catch {
-      // baseline write is advisory
+      // the saved data only enables "since" lines and reuse; a report never fails over it
     }
   }
-  return { behavior_coverage_path: htmlPath, ...(shortPath ? { short_report_path: shortPath } : {}) };
+  return {
+    behavior_coverage_path: htmlPath,
+    ...(written.summary ? { short_report_path: summaryPath } : {}),
+    ...(written.csv ? { tests_csv_path: csvPath } : {}),
+    ...(savedData ? { report_data_path: dataPath } : {})
+  };
 }
 
-/** Inputs for the short summary: line numbers, proof records and the repository web link. */
-function shortReportInput(graph: LocalGraph, ledger: Ledger, build: BehaviorReportBuild, htmlPath: string): Parameters<typeof renderShortReport>[0] {
+/** Both reports and the CSV from one model. Only the detailed report may fail the call. */
+function writeReports(model: ReportModel, htmlPath: string, summaryPath: string, csvPath: string): { summary: boolean; csv: boolean } {
+  const csv = testsCsv(model.worklist, { repository: model.repo.name, commit: model.repo.commit, toolVersion: model.tool, generatedAt: model.generatedAt });
+  let csvOk = true;
+  try {
+    writeFileSync(csvPath, csv, "utf8");
+  } catch {
+    csvOk = false;
+  }
+  writeFileSync(htmlPath, renderDetailedReport({ model, csv }), "utf8");
+  let summaryOk = true;
+  try {
+    writeFileSync(summaryPath, renderSummaryReport(model), "utf8");
+  } catch {
+    summaryOk = false;
+  }
+  return { summary: summaryOk, csv: csvOk };
+}
+
+export function readReportModel(dataPath: string): ReportModel | null {
+  try {
+    const parsed = JSON.parse(readFileSync(dataPath, "utf8")) as unknown;
+    return isReportModel(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-render both reports from the saved data with a "checked again" line (R14 §5).
+ * Null when there is no saved data of the current version.
+ */
+export function rerenderSavedReports(
+  root: string,
+  outputPath: string,
+  checked: { at: string; previousGeneratedAt: string; rerendered: boolean }
+): { behavior_coverage_path: string; short_report_path: string; tests_csv_path: string; model: ReportModel } | null {
+  const workspaceDir = resolve(root, WORKSPACE_DIR);
+  const dataPath = join(workspaceDir, REPORT_DATA_FILE);
+  const saved = readReportModel(dataPath);
+  if (!saved) return null;
+  const model: ReportModel = { ...saved, checked: { at: checked.at, text: checkedText(checked.previousGeneratedAt, checked.at, checked.rerendered, ORANGEPRO_VERSION) } };
+  const htmlPath = resolve(root, outputPath);
+  const summaryPath = shortReportPath(htmlPath);
+  const csvPath = join(workspaceDir, TESTS_CSV_FILE);
+  writeReports(model, htmlPath, summaryPath, csvPath);
+  try {
+    writeFileAtomic(dataPath, `${JSON.stringify(model)}\n`);
+  } catch {
+    // advisory
+  }
+  return { behavior_coverage_path: htmlPath, short_report_path: summaryPath, tests_csv_path: csvPath, model };
+}
+
+/** Per target: the last reason test drafting fell short, from the latest start's diagnostics. */
+function generationShortfall(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  try {
+    const diag = JSON.parse(readFileSync(join(root, WORKSPACE_DIR, "generation-diagnostics.json"), "utf8")) as {
+      flows?: Array<{ target_symbol_external_id?: string; remaining_shortfall?: number; attempts?: Array<{ missing_evidence?: Array<{ reason?: string }>; warnings?: string[] }> }>;
+    };
+    for (const flow of diag.flows ?? []) {
+      if (!flow.target_symbol_external_id || !(Number(flow.remaining_shortfall) > 0)) continue;
+      let reason: string | undefined;
+      for (const attempt of flow.attempts ?? []) {
+        const r = attempt.missing_evidence?.find((m) => m.reason)?.reason ?? attempt.warnings?.find(Boolean);
+        if (r) reason = r;
+      }
+      if (reason) out.set(flow.target_symbol_external_id, reason);
+    }
+  } catch {
+    // no diagnostics: the slot says "not drafted yet"
+  }
+  return out;
+}
+
+/** Proof records, the repository web link and the denominator kinds for the reports. */
+function reportContext(graph: LocalGraph, ledger: Ledger): { proofs: ProofRow[]; repoWeb: RepoWeb | null; kinds: { functionLike: number; classes: number; total: number } } {
   const nodes = new Map(graph.nodes.map((n) => [n.external_id, n]));
-  const lineOf = (id: string): number | undefined => {
-    const line = nodes.get(id)?.properties.start_line;
-    return typeof line === "number" && line > 0 ? line : undefined;
-  };
-  const proofs: ShortReportProof[] = [];
+  const proofs: ProofRow[] = [];
   const repoFiles = Object.keys(graph.manifest?.files ?? {});
   for (const [symbolId, record] of provenLedgerRecords(graph, ledger)) {
     const node = nodes.get(symbolId);
     const cert = record.dynamic_proof;
-    const command = cert?.command ?? "";
     // Name the test by its repository path; the runner recorded it relative to its project.
-    const test = proofTestLocation(cert?.test_path, command, repoFiles);
+    const test = proofTestLocation(cert?.test_path, cert?.command ?? "", repoFiles);
+    const line = node?.properties.start_line;
     proofs.push({
-      symbolId,
+      id: symbolId,
       title: node?.title ?? symbolId.split("#").pop() ?? symbolId,
       file: typeof node?.properties.file === "string" ? node.properties.file : symbolId.replace(/^sym:/, "").split("#")[0] ?? "",
-      ...(proofSentinelText(cert?.sentinel) ? { sentinel: proofSentinelText(cert?.sentinel) } : {}),
-      ...test,
-      generated: Boolean(record.provider || record.model)
+      ...(typeof line === "number" && line > 0 ? { line } : {}),
+      // Go records the test as a run pattern (^TestName$); show the name.
+      test: (test.testId ?? test.testPath ?? "").replace(/^\^/, "").replace(/\$$/, ""),
+      ...(test.testPath && test.testPathResolved ? { testPath: test.testPath } : {})
     });
   }
   proofs.sort((a, b) => a.file.localeCompare(b.file) || a.title.localeCompare(b.title));
@@ -3074,20 +3342,9 @@ function shortReportInput(graph: LocalGraph, ledger: Ledger, build: BehaviorRepo
     remote = null;
   }
   return {
-    data: build.data,
-    topGaps: build.topGaps,
-    deleteGaps: build.deleteGaps,
-    deleteTotal: build.deleteTotal,
-    provenDeleteGaps: build.provenDeleteGaps,
     proofs,
-    lineOf,
     repoWeb: repoWebFromRemote(remote),
-    detailedHref: basename(htmlPath),
-    kinds: {
-      functionLike,
-      classes: denominator.filter((n) => n.properties.symbol_kind === "class").length,
-      total: denominator.length
-    }
+    kinds: { functionLike, classes: denominator.filter((n) => n.properties.symbol_kind === "class").length, total: denominator.length }
   };
 }
 

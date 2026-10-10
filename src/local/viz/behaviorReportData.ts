@@ -1318,6 +1318,12 @@ export interface BehaviorReportBuild {
    * delete paths needs them to keep its denominator whole. Empty when nothing is proven.
    */
   provenDeleteGaps: RiskGap[];
+  /** Every ranked path that reaches a destructive call, before the display cap. */
+  deletePaths: RiskGap[];
+  /** The RTM rows the summary counts come from (one per denominator behavior, plus proven extras). */
+  rows: RtmRow[];
+  /** Function id → set of proven ids used by every ranking in this build. */
+  provenIds: Set<string>;
 }
 
 export function buildBehaviorReportDataWithGaps(graph: LocalGraph, ledger: Ledger, opts: BehaviorReportDataOptions = {}): BehaviorReportBuild {
@@ -1441,5 +1447,5 @@ export function buildBehaviorReportDataWithGaps(graph: LocalGraph, ledger: Ledge
     ? []
     : rankRiskGaps(graph, { repoRoot, limit: Number.MAX_SAFE_INTEGER, provenIds: new Set(), includeAssociated: true })
         .filter((r) => r.sink_callee && provenIds.has(r.id));
-  return { data, topGaps: riskGaps, deleteGaps, deleteTotal: sinkRanked.length, provenDeleteGaps };
+  return { data, topGaps: riskGaps, deleteGaps, deleteTotal: sinkRanked.length, provenDeleteGaps, deletePaths: sinkRanked, rows, provenIds };
 }

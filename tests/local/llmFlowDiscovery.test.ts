@@ -26,8 +26,9 @@ import { buildPack } from "../../src/local/pack/exporter.js";
 import { buildRtm } from "../../src/local/rtm.js";
 import { rankRiskGaps } from "../../src/local/score/risk.js";
 import type { ModelCompletionRequest, ModelProvider, ScoreResult } from "../../src/local/types.js";
-import { buildBehaviorReportData } from "../../src/local/viz/behaviorReportData.js";
-import { renderBehaviorReport } from "../../src/local/viz/behaviorReportHtml.js";
+import { buildBehaviorReportData, buildBehaviorReportDataWithGaps } from "../../src/local/viz/behaviorReportData.js";
+import { buildReportModel } from "../../src/local/viz/reportModel.js";
+import { renderDetailedReport } from "../../src/local/viz/detailedReport.js";
 import { buildVizPayload } from "../../src/local/viz/payload.js";
 import { opInit } from "../../src/local/operations.js";
 import { loadGraph, saveGraph, workspacePaths } from "../../src/local/workspace.js";
@@ -805,23 +806,31 @@ describe("behavior report — AI-suggested section", () => {
     expect(data.flows.every((f) => f.flow_tier === "hard: reachable" || f.flow_tier === "framework-derived: reachable")).toBe(true);
   });
 
-  it("renders candidate-flow dynamic content when present and omits it when absent", () => {
-    const g = withCandidates(nestGraph("/tmp/users-api"));
-    const html = renderBehaviorReport(buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/tmp/users-api" }));
-    expect(html).toContain("AI-suggested flows — plausible paths, not proven");
-    expect(html).toContain("User signup chain");
-    expect(html).toContain('"proposed":3');
-    expect(html).toContain('"accepted":1');
+  const renderReport = (g: LocalGraph): string => {
+    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/tmp/users-api" });
+    const model = buildReportModel({
+      graph: g, ledger: EMPTY_LEDGER, build, repoRoot: "/tmp/users-api", repoWeb: null,
+      noun: { plural: "functions", singular: "function", title: "Functions mapped" }, proofs: [],
+      generatedAt: "2026-07-02T00:00:00.000Z", links: { detailed: "behavior-coverage.html", summary: "short_behavior-coverage.html", csv: "tests.csv" }
+    });
+    return renderDetailedReport({ model, csv: "" });
+  };
 
-    const htmlNone = renderBehaviorReport(buildBehaviorReportData(nestGraph("/tmp/users-api"), EMPTY_LEDGER, { repoRoot: "/tmp/users-api" }));
-    expect(htmlNone).toContain('"candidateFlows":null');
+  it("renders candidate flows as paths to verify when present and omits them when absent", () => {
+    const html = renderReport(withCandidates(nestGraph("/tmp/users-api")));
+    expect(html).toContain("paths to verify, not evidence");
+    expect(html).toContain("User signup chain");
+    expect(html).toContain("A model proposed 3 and 1 passed the check against known code.");
+
+    const htmlNone = renderReport(nestGraph("/tmp/users-api"));
+    expect(htmlNone).not.toContain("AI-suggested flows");
     expect(htmlNone).not.toContain("User signup chain");
   });
 
   it("never embeds raw HTML from model-derived candidate strings", () => {
     const g = withCandidates(nestGraph("/tmp/users-api"));
     g.analysis!.candidate_flows!.flows[0].title = "<img src=x onerror=alert(1)>";
-    const html = renderBehaviorReport(buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/tmp/users-api" }));
+    const html = renderReport(g);
     expect(html).not.toContain("<img src=x");
   });
 });

@@ -154,6 +154,26 @@ function artifactCandidates(root: string, files: FileRecord[]): ArtifactCandidat
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/**
+ * Coverage files a run would ingest, found without the scanned file list: the
+ * well-known names, nested coverage/ directories and .orangepro/coverage. Used to
+ * tell whether coverage input changed since the last run (R14 reuse); tracked
+ * coverage files are covered by git status instead.
+ */
+export function coverageArtifactPathsForReuse(root: string): string[] {
+  const out = new Set<string>();
+  for (const rel of RUNTIME_COVERAGE_CANDIDATES) if (existsSync(path.join(root, rel))) out.add(rel);
+  for (const candidate of discoverNestedCoverageArtifacts(root)) out.add(candidate.path);
+  try {
+    for (const entry of readdirSync(path.join(root, ".orangepro/coverage"), { withFileTypes: true })) {
+      if (entry.isFile() && coverageFormatForPath(`.orangepro/coverage/${entry.name}`)) out.add(`.orangepro/coverage/${entry.name}`);
+    }
+  } catch {
+    /* no generated coverage dir */
+  }
+  return [...out].sort();
+}
+
 function discoverNestedCoverageArtifacts(root: string): ArtifactCandidate[] {
   const out: Array<Pick<ArtifactCandidate, "path" | "format">> = [];
   const addLcov = (rel: string): void => {

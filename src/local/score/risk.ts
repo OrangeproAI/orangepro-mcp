@@ -9,7 +9,13 @@ import { hashString } from "../util/hash.js";
 import { builtInRankExclusion } from "./rankEligibility.js";
 
 /** Explicit scorer identity. Formula changes require a new value. */
-export const ORS_VERSION = "orangepro.ors.stable_population.v2" as const;
+export const ORS_VERSION = "orangepro.ors.stable_population.v3" as const;
+
+/**
+ * How hard a break would be to notice, from the strongest evidence a function has.
+ * `runtime`: a coverage run executed it (v3: detectable like a linked test).
+ */
+export type DetectionTier = "associated" | "runtime" | "candidate" | "none";
 
 export interface RiskGap {
   id: string;
@@ -40,7 +46,7 @@ export interface RiskGap {
   sink_owner?: string;
   scheduled_entry?: boolean;
   /** Evidence tier behind D: associated | candidate | none. */
-  detection_tier?: "associated" | "candidate" | "none";
+  detection_tier?: DetectionTier;
   /** Structural context used by the model. */
   fan_out?: number;
   route_weight?: number;
@@ -48,7 +54,7 @@ export interface RiskGap {
   flow_position?: number;
   complexity_proxy?: number;
   is_new_code?: boolean;
-  integration_signal?: "associated" | "candidate" | "none";
+  integration_signal?: DetectionTier;
 }
 
 export interface RiskInputHealth {
@@ -164,6 +170,7 @@ function confirmedBehaviorIds(graph: LocalGraph, provenIds?: Set<string>): Set<s
 export const GIT_CHURN_MAX_COMMITS = 20_000;
 export const GIT_CHURN_TIMEOUT_MS = 300_000;
 const GIT_FIRST_COMMIT_BATCH = 200;
+const GIT_FIRST_COMMIT_TIMEOUT_MS = 60_000;
 
 export interface RiskChurnMetadata {
   state: "complete" | "partial" | "unavailable";
@@ -403,9 +410,16 @@ function gitChurn(root: string | undefined, files: string[], window: string, hea
 
 /** Preserve the released ORS `is_new_code` input. This is separate from the
  * recent-churn window because a file's first add may predate that window. */
-function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<string, number> {
+// History below a commit never changes, so a lookup is cached per commit and file set.
+const firstCommitCache = new Map<string, Map<string, number>>();
+
+function gitFirstCommitBatch(root: string | undefined, files: string[], commit?: string | null): Map<string, number> {
+  const cacheKey = root && commit ? `${root}\0${commit}\0${hashString(files.join("\n"))}` : null;
+  const cached = cacheKey ? firstCommitCache.get(cacheKey) : undefined;
+  if (cached) return cached;
   const out = new Map<string, number>();
   if (!root || files.length === 0) return out;
+  let complete = true;
   for (let i = 0; i < files.length; i += GIT_FIRST_COMMIT_BATCH) {
     const batch = files.slice(i, i + GIT_FIRST_COMMIT_BATCH);
     try {
@@ -416,8 +430,10 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
           cwd: root,
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
-          timeout: 4_000,
-          maxBuffer: 2_000_000
+          // A long history on a busy machine can take seconds per batch; a timeout
+          // drops the batch silently, so it must be rare or ranks change with load.
+          timeout: GIT_FIRST_COMMIT_TIMEOUT_MS,
+          maxBuffer: 8_000_000
         }
       );
       let currentTs = 0;
@@ -436,8 +452,11 @@ function gitFirstCommitBatch(root: string | undefined, files: string[]): Map<str
       }
     } catch {
       // Preserve the released fail-closed behavior for this optional ORS signal.
+      complete = false;
     }
   }
+  // Cache only a complete lookup, so a timed-out batch is retried by the next ranking.
+  if (cacheKey && complete) firstCommitCache.set(cacheKey, out);
   return out;
 }
 
@@ -606,6 +625,9 @@ function normalizeScores(values: number[]): number[] {
 const DETECTION_MAP: Record<string, number> = {
   proven: 1,
   associated: 5,
+  // A coverage run executed it: an existing test run would see a break as readily as
+  // a linked test (v3). Not proof: it can still fail to assert on the result.
+  runtime: 5,
   // A lexical/Jaccard candidate is a lead, not evidence — detection stays hard.
   candidate: 8,
   none: 10
@@ -681,7 +703,7 @@ function computeRawORS(
   incomingRefs: number,
   gitChurn: number,
   fanOut: number,
-  detectionTier: "associated" | "candidate" | "none",
+  detectionTier: DetectionTier,
   firstCommitTs: number,
   nowSec: number,
   signals: RiskSignals = { reachesDestructiveSink: false, scheduledEntry: false }
@@ -699,7 +721,7 @@ function computeRawORS(
   const rawI = incomingRefs * 0.3 + routeWeight * 0.3 + flowPosition * 0.2 + dataSensitivity * 0.2;
   // Silence lowers detectability: an unproven behavior that runs on a timer or a
   // queue fails where no request surfaces it (Fix C, signal 2). Proven stays proven.
-  const silentFactor = signals.scheduledEntry && detectionTier !== "associated" ? 1.25 : 1;
+  const silentFactor = signals.scheduledEntry && (detectionTier === "candidate" || detectionTier === "none") ? 1.25 : 1;
   const d = DETECTION_MAP[detectionTier] * silentFactor;
   return { p: rawP, i: rawI, d, reachesDestructiveSink: signals.reachesDestructiveSink, scheduledEntry: signals.scheduledEntry, sensitivityIgnored: signals.sensitivityIgnored, sensitivityOverride: signals.sensitivityOverride };
 }
@@ -731,7 +753,7 @@ function candidateSignalIds(graph: LocalGraph, candidateIds: Set<string>): Set<s
   return ids;
 }
 
-export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): RiskGap[] {
+function rankRiskGapsUncached(graph: LocalGraph, opts: RiskGapOptions = {}): RiskGap[] {
   const limit = opts.limit ?? 20;
   const repoRoot = opts.repoRoot ?? graph.workspace.root;
   const confirmed = opts.includeAssociated
@@ -785,7 +807,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const churnResult = gitChurn(repoRoot, files, churnWindow, inputHealth);
   const churn = churnResult.values;
   const churnAvailable = churnResult.state === "complete";
-  const firstCommitTs = churnAvailable ? gitFirstCommitBatch(repoRoot, files) : new Map<string, number>();
+  const firstCommitTs = churnAvailable ? gitFirstCommitBatch(repoRoot, files, inputHealth.commit) : new Map<string, number>();
   const commitMs = Date.parse(inputHealth.commitDate ?? "");
   const graphMs = Date.parse(graph.updated_at || graph.created_at || "");
   const nowSec = Math.floor((Number.isFinite(commitMs) ? commitMs : Number.isFinite(graphMs) ? graphMs : 0) / 1000);
@@ -932,8 +954,11 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
   const candidateLinked = candidateSignalIds(graph, symbolIds);
-  const detectionFor = (id: string): "associated" | "candidate" | "none" =>
-    staticLinked.has(id) ? "associated" : candidateLinked.has(id) ? "candidate" : "none";
+  // Runtime first, matching the evidence order every report uses (Proven > Runtime-covered
+  // > Statically Linked): both detect a break equally (D 5), the label is the stronger fact.
+  const runtimeCovered = new Set(graph.nodes.filter((n) => symbolIds.has(n.external_id) && n.properties?.runtime_covered === true).map((n) => n.external_id));
+  const detectionFor = (id: string): DetectionTier =>
+    runtimeCovered.has(id) ? "runtime" : staticLinked.has(id) ? "associated" : candidateLinked.has(id) ? "candidate" : "none";
   // R7 ranking-only hygiene happens AFTER the stable ORS normalization population is
   // chosen. These declaration/delegate exclusions therefore remove only worklist
   // slots: they never change graph facts, denominator membership, evidence, or a
@@ -1052,6 +1077,7 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
       if (is_new_code) reasons.push("new code (< 30 days)");
       if (disconnected) reasons.push("no callers and no callees — structurally disconnected, score dampened");
       if (detectionTier === "candidate") reasons.push("lexical candidate test match only — unconfirmed");
+      if (detectionTier === "runtime") reasons.push("a coverage run executes it — a break is detectable, but no test is proven to catch it");
       // Reason chips for the two consequence signals — a reader can disagree with the
       // weight without doubting the fact, and the fact is what's shown.
       if (raw.reachesDestructiveSink) reasons.push("reaches a destructive external call (delete/purge) within 2 hops — impact floored at 5");
@@ -1089,6 +1115,14 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
     })
     .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id));
 
+  return selectRanked(ranked, pinnedIds, opts, limit);
+}
+
+/**
+ * The list a caller asked for from a full ranking: the true global top `limit`, or
+ * with maxPerFile a diversified portfolio. Pinned rows are always kept.
+ */
+function selectRanked(ranked: RiskGap[], pinnedIds: ReadonlySet<string>, opts: RiskGapOptions, limit: number): RiskGap[] {
   // The default API is the true global ranking because reports call this list
   // "top risks". Callers may explicitly request a diversified portfolio, but
   // that presentation policy must never silently redefine rank.
@@ -1139,6 +1173,39 @@ export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): Risk
   return withPins(surfaced
     .sort((a, b) => b.risk_score - a.risk_score || b.incoming_refs - a.incoming_refs || b.git_churn - a.git_churn || a.id.localeCompare(b.id))
     .slice(0, limit));
+}
+
+// One report build ranks the same graph several times with different limits and caps.
+// Inside withRankingCache the full ranking is computed once per graph object and input
+// set, then each caller's selection is taken from it. Outside it nothing is cached, so a
+// long-lived process never sees a stale ranking.
+let rankingCache: WeakMap<LocalGraph, Map<string, RiskGap[]>> | null = null;
+
+export function withRankingCache<T>(fn: () => T): T {
+  const outer = rankingCache;
+  rankingCache = outer ?? new WeakMap();
+  try {
+    return fn();
+  } finally {
+    rankingCache = outer;
+  }
+}
+
+export function rankRiskGaps(graph: LocalGraph, opts: RiskGapOptions = {}): RiskGap[] {
+  if (!rankingCache || opts.legacy) return rankRiskGapsUncached(graph, opts);
+  const key = JSON.stringify([opts.repoRoot ?? graph.workspace.root, Boolean(opts.includeAssociated), [...(opts.provenIds ?? [])].sort(), opts.churnWindow ?? null]);
+  let perGraph = rankingCache.get(graph);
+  if (!perGraph) {
+    perGraph = new Map();
+    rankingCache.set(graph, perGraph);
+  }
+  let full = perGraph.get(key);
+  if (!full) {
+    full = rankRiskGapsUncached(graph, { ...opts, limit: Number.MAX_SAFE_INTEGER, maxPerFile: undefined, maxPerTitle: undefined });
+    perGraph.set(key, full);
+  }
+  const pinned = new Set(full.filter((r) => r.override?.action === "pin").map((r) => r.id));
+  return selectRanked(full, pinned, opts, opts.limit ?? 20);
 }
 
 /**

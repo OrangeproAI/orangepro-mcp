@@ -642,79 +642,137 @@ describe("ranking-only exclusion disclosure (R8.6)", () => {
   });
 });
 
-describe("short report reads the same build as the detailed report", () => {
+const NOUN = { plural: "functions", singular: "function", title: "Functions mapped" };
+const LINKS = { detailed: "behavior-coverage.html", summary: "short_behavior-coverage.html", csv: "tests.csv" };
+const NO_GIT = "/definitely/not/a/git/repo";
+
+async function reportModelOf(
+  g: LocalGraph,
+  ledger: Ledger = EMPTY_LEDGER,
+  extra: Partial<import("../../src/local/viz/reportModel.js").ReportModelInput> = {}
+) {
+  const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
+  const { buildReportModel } = await import("../../src/local/viz/reportModel.js");
+  const build = buildBehaviorReportDataWithGaps(g, ledger, { repoRoot: NO_GIT });
+  const data = extra.feedback ? { ...build.data, feedback: extra.feedback } : build.data;
+  return buildReportModel({
+    graph: g,
+    ledger,
+    build: { ...build, data },
+    repoRoot: NO_GIT,
+    repoWeb: null,
+    noun: NOUN,
+    proofs: [],
+    generatedAt: "2026-10-09T03:00:00.000Z",
+    links: LINKS,
+    ...extra
+  });
+}
+
+function withDelete(g: LocalGraph, id = "sym:src/store/gc.ts#Gc.sweep", title = "Gc.sweep", callee = "this.store.deleteExpired"): LocalGraph {
+  const low = codeSymbol(id, title, "src/store/gc.ts");
+  low.properties = { ...low.properties, external_callees: [callee], start_line: 7 };
+  g.nodes = [...g.nodes, low];
+  return g;
+}
+
+describe("both reports read one report model", () => {
   it("exposing the ranking rows changes nothing in the report data", async () => {
     const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
-    const g = graph();
-    const low = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
-    low.properties = { ...low.properties, external_callees: ["this.store.deleteExpired"] };
-    g.nodes = [...g.nodes, low];
-    const plain = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
-    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    const g = withDelete(graph());
+    const plain = buildBehaviorReportData(g, EMPTY_LEDGER, { repoRoot: NO_GIT });
+    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: NO_GIT });
     expect(build.data).toEqual(plain);
     expect(build.topGaps.map((r) => r.title)).toEqual(plain.risks.map((r) => r.path.replace(/^[^:]+: /, "")));
     expect(build.deleteGaps.map((r) => r.title)).toEqual(plain.worklists.irreversible.map((r) => r.path));
     expect(build.deleteTotal).toBeGreaterThanOrEqual(build.deleteGaps.length);
   });
 
-  it("renders counts from the data, escapes names, and stays offline", async () => {
-    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
-    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
-    const g = graph();
-    const evil = codeSymbol("sym:src/store/gc.ts#Gc.sweep<img src=x>", "Gc.sweep<img src=x>", "src/store/gc.ts");
-    evil.properties = { ...evil.properties, external_callees: ["this.store.deleteExpired"], start_line: 7 };
-    g.nodes = [...g.nodes, evil];
-    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
-    const common = { data: build.data, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal, proofs: [], lineOf: (id: string) => (id.includes("Gc.sweep") ? 7 : undefined), detailedHref: "behavior-coverage.html" };
-
-    const offline = renderShortReport({ ...common, repoWeb: null });
-    expect(offline).toContain(`${build.data.summary.total.toLocaleString("en-US")} functions mapped.`);
-    const deletes = build.data.worklists.irreversible.length;
-    expect(offline).toContain(deletes === 1 ? "The one code path that deletes data has no test linked to it." : `${deletes} code paths that delete data`);
-    expect(offline).not.toMatch(/\b0 of |\b1 of the 1\b/);
-    // No proof yet: plain wording, not the detailed report's internal terms.
-    expect(offline).toContain("Nothing is proven yet: no proof ran in this analysis.");
-    expect(offline).not.toContain("Dynamically Proven \u2014");
-    expect(offline).not.toContain("Statically Linked");
-    expect(offline).not.toContain("<img src=x>");
-    expect(offline).toContain("Gc.<wbr>sweep&lt;img src=x&gt;");
-    expect(offline).not.toMatch(/<script[^>]+src=|<link[^>]+href=/i);
-    expect(offline).not.toContain("/blob/");
-    expect(offline).toContain('href="behavior-coverage.html"');
+  it("renders from the model, escapes names, stays offline and is byte-stable", async () => {
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    const g = withDelete(graph(), "sym:src/store/gc.ts#Gc.sweep<img src=x>", "Gc.sweep<img src=x>");
+    const model = await reportModelOf(g);
+    const summary = renderSummaryReport(model);
+    const detailed = renderDetailedReport({ model, csv: "ID\r\n" });
+    for (const html of [summary, detailed]) {
+      expect(html).not.toContain("<img src=x>");
+      expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=|@import|url\(http/i);
+    }
+    expect(summary).not.toContain("/blob/");
+    expect(detailed).toContain('"repo":{"name":"repo","web":null,"commit":null}');
+    expect(summary).toContain("Gc.<wbr>sweep&lt;img src=x&gt;");
+    expect(summary).toContain('href="behavior-coverage.html"');
+    expect(summary).toContain(`${model.counts.mapped.toLocaleString("en-US")}</dd>`);
+    expect(summary).toContain("Nothing is proven yet");
+    // The same data gives the same bytes, also after a save and reload.
+    const reloaded = JSON.parse(JSON.stringify(model));
+    expect(renderSummaryReport(reloaded)).toBe(summary);
+    expect(renderDetailedReport({ model: reloaded, csv: "ID\r\n" })).toBe(detailed);
 
     // A commit and a known host are both required before any code link is written.
-    const linked = renderShortReport({ ...common, data: { ...build.data, provenance: { ...build.data.provenance, commit: "abc1234def" } }, repoWeb: { base: "https://github.com/acme/orders-api", host: "github" } });
-    expect(linked).toContain("https://github.com/acme/orders-api/blob/abc1234def/src/store/gc.ts#L7");
+    const linked = renderSummaryReport({ ...model, repo: { ...model.repo, commit: "abc1234def", web: { base: "https://github.com/acme/orders-api", host: "github" } } });
+    const top = model.worklist[0]!;
+    expect(linked).toContain(`https://github.com/acme/orders-api/blob/abc1234def/${top.file}`);
+  });
+
+  it("gives every top function a verb, a reason and two test slots", async () => {
+    const g = withDelete(graph());
+    g.analysis = { ...(g.analysis ?? {}), start_generation: { status: "no_provider", requested: 20, generated: 0, runnable: 0, drafts: 0, blockers: {} } } as LocalGraph["analysis"];
+    const model = await reportModelOf(g);
+    expect(model.worklist.length).toBeGreaterThan(0);
+    for (const item of model.worklist.slice(0, model.slotRows)) {
+      expect(["prove", "check", "write"]).toContain(item.verb);
+      expect(item.reason.length).toBeGreaterThan(0);
+      expect(item.slots).toHaveLength(2);
+      expect(item.slots!.every((s) => s.state === "not_drafted" && /model key/.test(s.reason ?? ""))).toBe(true);
+    }
+    expect(model.top.prove + model.top.check + model.top.write).toBe(model.slotRows);
+    expect(model.tests).toMatchObject({ drafted: 0, notDrafted: model.slotRows * 2 });
+    // The hard-linked handler joins the worklist as a Prove row (Amendment A1).
+    expect(model.worklist.find((w) => w.title === "OrdersController.create")?.verb).toBe("prove");
+  });
+
+  it("says what changed since the last report, and that nothing did", async () => {
+    const { checkedText } = await import("../../src/local/viz/summaryReport.js");
+    const first = await reportModelOf(withDelete(graph()));
+    expect(first.since.kind).toBe("first");
+    const second = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { previous: first, runReason: "code_changed" });
+    expect(second.since.text).toBe(`Since the report of 2026-10-09 (your code changed): no change in the top ${second.slotRows} or in what is proven.`);
+    const moved = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { previous: { ...first, worklist: [] }, runReason: "analysis_changed" });
+    expect(moved.since.kind).toBe("analysis_changed");
+    expect(moved.since.text).toContain("Your code did not change; OrangePro's analysis did");
+    expect(checkedText("2026-10-09T03:00:00.000Z", "2026-10-10T08:15:00.000Z", false, "0.2.58")).toBe(
+      "Checked again 10 Oct 2026, 08:15 UTC. Nothing changed since this report was made on 9 Oct 2026, 03:00 UTC."
+    );
   });
 
   it("names the test behind each proof", async () => {
-    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
-    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
-    const build = buildBehaviorReportDataWithGaps(graph(), EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
-    const html = renderShortReport({
-      data: build.data, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal,
-      proofs: [{ symbolId: "sym:src/orders.service.ts#OrdersService.create", title: "OrdersService.create", file: "src/orders.service.ts", sentinel: "return 0", testPath: "tests/test_orders.py", testId: "tests/test_orders.py::test_create" }],
-      lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    const model = await reportModelOf(graph(), EMPTY_LEDGER, {
+      proofs: [{ id: "sym:src/orders.service.ts#OrdersService.create", title: "OrdersService.create", file: "src/orders.service.ts", test: "tests/test_orders.py::test_create" }]
     });
-    expect(html).toContain("tests/test_orders.py::test_create");
-    expect(html).toContain("<code>return 0</code>");
-    expect(html).toContain("the project&#39;s own test, unchanged");
+    const detailed = renderDetailedReport({ model, csv: "" });
+    expect(detailed).toContain("tests/test_orders.py::test_create</span> passed on the original code and failed at its own assertion");
+    expect(renderSummaryReport({ ...model, counts: { ...model.counts, proven: 1 } })).toContain("1 function is already done: a test fails when it breaks.");
+  });
+
+  it("links the tests spreadsheet from the detailed report", async () => {
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    const model = await reportModelOf(withDelete(graph()));
+    const html = renderDetailedReport({ model, csv: "\uFEFFID,Title\r\nx,\"a,b\"\r\n" });
+    expect(html).toContain("Export tests (CSV)");
+    expect(html).toContain('<script type="application/json" id="tests-csv">"\uFEFFID,Title\\r\\nx,\\"a,b\\"\\r\\n"</script>');
   });
 });
 
-describe("short report feedback links (FB01-FB04)", () => {
+describe("report feedback links (FB01-FB04)", () => {
   const render = async (feedback?: import("../../src/local/feedback.js").ReportFeedback) => {
-    const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
-    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
-    const g = graph();
-    const low = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
-    low.properties = { ...low.properties, external_callees: ["this.store.deleteExpired"] };
-    g.nodes = [...g.nodes, low];
-    const build = buildBehaviorReportDataWithGaps(g, EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
-    return renderShortReport({
-      data: { ...build.data, ...(feedback ? { feedback } : {}) }, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal,
-      proofs: [], lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
-    });
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    const model = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, feedback ? { feedback } : {});
+    return { summary: renderSummaryReport(model), detailed: renderDetailedReport({ model, csv: "" }) };
   };
   const result = {
     general: "https://orangepro.ai/feedback#sv=1&entry=result",
@@ -723,42 +781,45 @@ describe("short report feedback links (FB01-FB04)", () => {
   };
 
   it("adds a footer link, an invitation after the findings and a dispute link on each finding", async () => {
-    const html = await render(result);
-    expect(html).toContain(">Give feedback</a>");
-    expect(html).toContain("Did this help you decide what to test?");
-    expect(html).toContain("Nothing is sent unless you press Submit there.");
-    expect(html).toContain('data-finding="Gc.sweep"');
-    expect(html.indexOf("Did this help")).toBeGreaterThan(html.indexOf('aria-labelledby="n1"'));
+    const { summary, detailed } = await render(result);
+    for (const html of [summary, detailed]) {
+      expect(html).toContain(">Give feedback</a>");
+      expect(html).toContain("Did this help you decide what to test?");
+      expect(html).toContain("Nothing is sent unless you press Submit there.");
+      expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=/i);
+    }
+    expect(summary).toMatch(/data-finding="[^"]+"/);
+    expect(summary.indexOf("Did this help")).toBeGreaterThan(summary.indexOf('id="top-h"'));
     // The dispute link carries nothing about the finding.
-    expect(html).toContain('href="https://orangepro.ai/feedback#sv=1&amp;entry=finding"');
-    expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+href=/i);
+    expect(summary).toContain('href="https://orangepro.ai/feedback#sv=1&amp;entry=finding"');
+    expect(detailed).toContain('"finding":"https://orangepro.ai/feedback#sv=1&entry=finding"');
   });
 
   it("keeps the invitation out during the cooldown but the links stay", async () => {
-    const html = await render({ ...result, prompt: { ...result.prompt, expanded: false } });
-    expect(html).not.toContain("Did this help you decide what to test?");
-    expect(html).toContain(">Give feedback</a>");
-    expect(html).toContain("This looks wrong");
+    const { summary } = await render({ ...result, prompt: { ...result.prompt, expanded: false } });
+    expect(summary).not.toContain("Did this help you decide what to test?");
+    expect(summary).toContain(">Give feedback</a>");
+    expect(summary).toContain("This looks wrong");
   });
 
   it("a blocked run asks what stopped it, never the completed-empty question", async () => {
-    const html = await render({ general: result.general, finding: result.finding, prompt: { kind: "blocked", expanded: false, question: "Part of the repository was not analysed. What stopped you from completing this?", answers: [{ label: "Tell us", url: "https://orangepro.ai/feedback#sv=1&entry=blocked" }] } });
-    expect(html).toContain("What stopped you from completing this?");
-    expect(html).not.toContain("Expected a gap we didn&#39;t find?");
-    expect(html).not.toContain("Expected a gap we didn't find?");
+    const { summary } = await render({ general: result.general, finding: result.finding, prompt: { kind: "blocked", expanded: false, question: "Part of the repository was not analysed. What stopped you from completing this?", answers: [{ label: "Tell us", url: "https://orangepro.ai/feedback#sv=1&entry=blocked" }] } });
+    expect(summary).toContain("What stopped you from completing this?");
+    expect(summary).not.toContain("Expected a gap we didn&#39;t find?");
   });
 
   it("without feedback data there are no feedback links", async () => {
-    const html = await render(undefined);
-    expect(html).not.toContain("Give feedback");
-    expect(html).not.toContain("This looks wrong");
+    const { summary, detailed } = await render(undefined);
+    for (const html of [summary, detailed]) {
+      expect(html).not.toContain("Give feedback");
+      expect(html).not.toContain("orangepro.ai/feedback");
+    }
   });
 });
 
-describe("short report keeps proven delete paths in its count", () => {
-  it("a proven destructive path leaves the worklist but stays in the summary's delete count", async () => {
+describe("report keeps proven delete paths in its count", () => {
+  it("a proven destructive path leaves the worklist but stays in the delete count", async () => {
     const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
-    const { renderShortReport } = await import("../../src/local/viz/shortReport.js");
     const g = graph();
     const sweep = codeSymbol("sym:src/store/gc.ts#Gc.sweep", "Gc.sweep", "src/store/gc.ts");
     sweep.properties = { ...sweep.properties, external_callees: ["this.archiveStore.deleteExpired"] };
@@ -768,24 +829,18 @@ describe("short report keeps proven delete paths in its count", () => {
     g.manifest.files["src/store/gc.ts"] = { hash: "sha256:gc-v1", size: 64, kind: "code" };
     const ledger = dynamicLedger("sym:src/store/gc.ts#Gc.sweep", g);
 
-    const build = buildBehaviorReportDataWithGaps(g, ledger, { repoRoot: "/definitely/not/a/git/repo" });
-    // The detailed worklist is unchanged: only the unproven path is listed there.
+    const build = buildBehaviorReportDataWithGaps(g, ledger, { repoRoot: NO_GIT });
     expect(build.data.worklists.irreversible.map((r) => r.path)).toEqual(["Purger.run"]);
     expect(build.provenDeleteGaps.map((r) => r.title)).toEqual(["Gc.sweep"]);
-
-    const html = renderShortReport({
-      data: build.data, topGaps: build.topGaps, deleteGaps: build.deleteGaps, deleteTotal: build.deleteTotal, provenDeleteGaps: build.provenDeleteGaps,
-      proofs: [{ symbolId: "sym:src/store/gc.ts#Gc.sweep", title: "Gc.sweep", file: "src/store/gc.ts" }],
-      lineOf: () => undefined, repoWeb: null, detailedHref: "behavior-coverage.html"
-    });
-    expect(html).toContain("1 of the 2 code paths that delete data has no test linked to it.");
-    expect(html).toContain("1 is proven: the test fails when the code breaks");
-    expect(html).toContain("Archive store");
+    const model = await reportModelOf(g, ledger);
+    expect(model.counts.deletePaths).toBe(2);
+    expect(model.worklist.map((w) => w.title)).not.toContain("Gc.sweep");
+    expect(model.worklist.find((w) => w.title === "Purger.run")?.deletes?.store).toBe("Archive store");
   });
 
   it("does no extra ranking work when nothing is proven", async () => {
     const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
-    const build = buildBehaviorReportDataWithGaps(graph(), EMPTY_LEDGER, { repoRoot: "/definitely/not/a/git/repo" });
+    const build = buildBehaviorReportDataWithGaps(graph(), EMPTY_LEDGER, { repoRoot: NO_GIT });
     expect(build.provenDeleteGaps).toEqual([]);
   });
 });

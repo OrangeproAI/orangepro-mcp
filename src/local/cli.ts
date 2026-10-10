@@ -126,7 +126,9 @@ const HELP = `opro — OrangePro (local-first, BYOK, metadata-only artifacts)
 
 Usage:
   opro                                       # one-command start: analyze, optional AI links + flows, report, RTM, agent handoff
-  opro start [path] [--base <ref>] [--no-ai] [--no-ai-flows] [--generate-coverage] [--proof-limit 5] [--generate-limit 20] [--prompt-version v5] [--json]
+  opro start [path] [--base <ref>] [--no-ai] [--no-ai-flows] [--generate-coverage] [--proof-limit 5] [--generate-limit 20] [--prompt-version v5] [--fresh] [--json]
+    # writes .orangepro/behavior-coverage.html (detailed), short_behavior-coverage.html (summary) and tests.csv;
+    # when nothing changed since the last run, reuses its reports at once (--fresh runs in full anyway)
   opro roast [path] [--limit 5] [--json]     # keyless: find passing tests whose targeted mutant still survives
   opro init
   opro setup                                 # interactive: choose a default model provider + model (saved locally)
@@ -261,13 +263,22 @@ async function main(): Promise<number> {
           noAuto: asBool(flags["no-auto"], false),
           promptVersion: flags["prompt-version"] === "v5" ? "v5" : undefined,
           provider: typeof flags.provider === "string" ? flags.provider : undefined,
-          model: typeof flags.model === "string" ? flags.model : undefined
+          model: typeof flags.model === "string" ? flags.model : undefined,
+          fresh: asBool(flags.fresh, false)
         });
       } finally {
         clearProgress();
       }
       if (json) printJson(res);
-      else {
+      else if (res.reuse?.status === "reused") {
+        out("OrangePro start: nothing changed since the last run.");
+        out(`  ${res.next_actions[0] ?? ""}`);
+        if (res.behavior_coverage_path) {
+          out(`  detailed report: ${res.behavior_coverage_path}`);
+          if (existsSync(shortReportPath(res.behavior_coverage_path))) out(`  short summary:   ${shortReportPath(res.behavior_coverage_path)}`);
+        }
+        out("  To analyse again anyway: opro start --fresh");
+      } else {
         out("OrangePro start complete.");
         out(`  graph:          ${res.analyze.graph_path}`);
         if (res.behavior_coverage_path) {

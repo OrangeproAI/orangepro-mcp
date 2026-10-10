@@ -61,11 +61,11 @@ describe("artifact identity", () => {
 
     expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v10");
     expect(PROOF_ORACLE_VERSION).toBe("orangepro.targeted_mutation_oracle.v3");
-    expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v2");
+    expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v3");
     expect(identity).toMatchObject({
       analyzer_version: "orangepro.analyzer.v10",
       oracle_version: "orangepro.targeted_mutation_oracle.v3",
-      ors_version: "orangepro.ors.stable_population.v2"
+      ors_version: "orangepro.ors.stable_population.v3"
     });
   });
 

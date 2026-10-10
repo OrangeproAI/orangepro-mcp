@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCandidateEdge, makeEdge, makeNode } from "../../src/local/graph/factories.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION, LocalGraph } from "../../src/local/graph/ontology.js";
-import { configDisclosureFor, inspectRiskInputHealth, namesCache, ORS_VERSION, rankPriorityGaps, rankRiskGaps } from "../../src/local/score/risk.js";
+import { configDisclosureFor, inspectRiskInputHealth, namesCache, ORS_VERSION, rankPriorityGaps, rankRiskGaps, withRankingCache } from "../../src/local/score/risk.js";
 import { builtInRankExclusion } from "../../src/local/score/rankEligibility.js";
 
 const dirs: string[] = [];
@@ -162,7 +162,7 @@ describe("rankRiskGaps", () => {
     const after = rankRiskGaps(g, { limit: 10, repoRoot: "" });
     const afterA = after.find((row) => row.id === a.external_id);
 
-    expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v2");
+    expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v3");
     expect(afterA?.risk_score).toBe(beforeA?.risk_score);
     expect(afterA?.probability).toBe(beforeA?.probability);
     expect(afterA?.impact).toBe(beforeA?.impact);
@@ -1088,5 +1088,39 @@ describe("config warnings reach EVERY ranking entry point, in both usage pattern
     const { opAnalyze } = await import("../../src/local/operations.js");
     const repo = makeRepo();
     expect(() => opAnalyze(repo, {})).toThrow(/Unreadable .*config\.json.*JSON does not allow \/\/ comments/);
+  });
+});
+
+describe("runtime evidence in the ranking (ORS v3, R14 §2)", () => {
+  it("a coverage run lowers detection difficulty to that of a linked test, and moves nothing else", () => {
+    const g = graph();
+    const ran = symbol("sym:src/core/ran.ts#ran", "ran", "src/core/ran.ts");
+    const other = symbol("sym:src/core/other.ts#other", "other", "src/core/other.ts");
+    g.nodes = [ran, other];
+    const before = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    ran.properties = { ...ran.properties, runtime_covered: true };
+    const after = rankRiskGaps(g, { limit: 10, repoRoot: "" });
+    const row = after.find((r) => r.id === ran.external_id)!;
+    expect(row.detection_tier).toBe("runtime");
+    expect(row.detection_difficulty).toBe(5);
+    expect(row.reasons).toContain("a coverage run executes it — a break is detectable, but no test is proven to catch it");
+    expect(row.risk_score).toBeLessThan(before.find((r) => r.id === ran.external_id)!.risk_score);
+    expect(after.find((r) => r.id === other.external_id)).toEqual(before.find((r) => r.id === other.external_id));
+  });
+});
+
+describe("withRankingCache", () => {
+  it("gives every caller the same rows it would get without the cache", () => {
+    const g = graph();
+    g.nodes = Array.from({ length: 12 }, (_, i) => symbol(`sym:src/f${i % 4}.ts#f${i}`, i % 5 === 0 ? "main" : `f${i}`, `src/f${i % 4}.ts`));
+    g.edges = [edge("sym:src/f0.ts#f0", "sym:src/f1.ts#f1", "CALLS"), edge("sym:src/f2.ts#f2", "sym:src/f1.ts#f1", "CALLS")];
+    const asks = [
+      { limit: 3, repoRoot: "" },
+      { limit: 20, repoRoot: "", maxPerFile: 1, maxPerTitle: 1 },
+      { limit: 5, repoRoot: "", includeAssociated: true, maxPerFile: 2 }
+    ];
+    const plain = asks.map((o) => rankRiskGaps(g, o));
+    const cached = withRankingCache(() => asks.map((o) => rankRiskGaps(g, o)));
+    expect(cached).toEqual(plain);
   });
 });

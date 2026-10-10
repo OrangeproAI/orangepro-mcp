@@ -187,6 +187,14 @@ afterEach(() => {
   }
 });
 
+
+/** The report data embedded in the detailed report. */
+function reportModelIn(html: string): import("../../src/local/viz/reportModel.js").ReportModel {
+  const m = /<script type="application\/json" id="report-data">([\s\S]*?)<\/script>/.exec(html);
+  if (!m) throw new Error("no report data in the page");
+  return JSON.parse(m[1]!);
+}
+
 describe("operation-level coverage", () => {
   it("opDoctor returns prioritized recommendations and status", () => {
     const root = temp();
@@ -246,9 +254,12 @@ describe("operation-level coverage", () => {
     const htmlPath = join(root, ".orangepro", "behavior-coverage.html");
     expect(existsSync(htmlPath)).toBe(true);
     const html = readFileSync(htmlPath, "utf8");
-    expect(html).toContain(`"generatedTotal":${gen.generated_tests.length}`);
+    const model = reportModelIn(html);
+    const card = model.worklist.find((w) => w.id === "sym:src/payments/card.ts#saveCard");
+    expect(card?.slots?.filter((slot) => slot.state !== "not_drafted")).toHaveLength(gen.generated_tests.length);
     // Title AND body of the targeted test appear in the embedded report data.
-    expect(html).toContain(gen.generated_tests[0].title.slice(0, 20));
+    // The slot shows the scenario; the function name is already the row's title.
+    expect(html).toContain(gen.generated_tests[0].title.split(" — ").pop()!.slice(0, 20));
     const bodyFragment = gen.generated_tests[0].body.split("\n").find((l) => l.trim().length > 8) ?? "";
     expect(bodyFragment.length).toBeGreaterThan(8);
     expect(html).toContain(JSON.stringify(bodyFragment).slice(1, -1).slice(0, 30));
@@ -314,11 +325,9 @@ describe("operation-level coverage", () => {
     });
 
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
-    expect(html).toContain('"generatedTotal":14');
-    expect(html).toContain('"shownCount":14');
+    expect(reportModelIn(html).tests).toMatchObject({ drafted: 14, status: "completed" });
     expect(html).toContain("behavior0 preserves observable output");
     expect(html).toContain("behavior6 preserves observable output");
-    expect(html).toContain('"generationOutcome":{"status":"completed"');
 
     const firstGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
     expect(firstGraph.generation_runs).toHaveLength(7);
@@ -382,8 +391,8 @@ describe("operation-level coverage", () => {
     const seededGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
     expect(seededGraph.generated_tests).toHaveLength(30);
     const seededHtml = readFileSync(join(root, ".orangepro", "behavior-coverage.html"), "utf8");
-    expect(seededHtml).toContain('"generatedTotal":30');
-    expect(Number(/"shownCount":(\d+)/.exec(seededHtml)?.[1])).toBe(26);
+    // Two slots per top-20 function: 2 + 8×1 + 8×2 drafted, the rest still open.
+    expect(reportModelIn(seededHtml).tests).toMatchObject({ drafted: 26, notDrafted: 14 });
 
     const topUpProvider = new StartV5Provider();
     const res = await opStart(
@@ -405,8 +414,7 @@ describe("operation-level coverage", () => {
       )).toHaveLength(2);
     }
     const finalHtml = readFileSync(res.behavior_coverage_path ?? "", "utf8");
-    expect(finalHtml).toContain('"generatedTotal":44');
-    expect(finalHtml).toContain('"shownCount":40');
+    expect(reportModelIn(finalHtml).tests).toMatchObject({ drafted: 40, notDrafted: 0 });
 
     const persistedIds = finalGraph.generated_tests.map((test: { id: string }) => test.id);
     const rerunProvider = new StartV5Provider();
@@ -420,8 +428,7 @@ describe("operation-level coverage", () => {
     const rerunGraph = JSON.parse(readFileSync(join(root, ".orangepro", "graph.json"), "utf8"));
     expect(rerunGraph.generated_tests.map((test: { id: string }) => test.id)).toEqual(persistedIds);
     const rerunHtml = readFileSync(rerun.behavior_coverage_path ?? "", "utf8");
-    expect(rerunHtml).toContain('"generatedTotal":44');
-    expect(rerunHtml).toContain('"shownCount":40');
+    expect(reportModelIn(rerunHtml).tests).toMatchObject({ drafted: 40, notDrafted: 0 });
   }, 60_000);
 
   it("opStart makes one bounded follow-up when the provider returns only one scenario", async () => {
@@ -448,8 +455,7 @@ describe("operation-level coverage", () => {
     const titleSet = new Set(graph.generated_tests.map((test: { title: string }) => test.title));
     expect(titleSet.size).toBe(4);
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
-    expect(html).toContain('"generatedTotal":4');
-    expect(html).toContain('"shownCount":4');
+    expect(reportModelIn(html).tests.drafted).toBe(4);
   });
 
   it("opStart retries a priority flow when its first planning call returns no accepted scenario", async () => {
@@ -513,7 +519,7 @@ describe("operation-level coverage", () => {
     )).toBe(true);
     expect(JSON.stringify(diagnostics)).not.toContain("Find missing test scenarios");
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
-    expect(html).toContain('"shownCount":4');
+    expect(reportModelIn(html).tests.drafted).toBe(4);
   });
 
   it("opStart reports the exact no-provider terminal generation reason", async () => {
@@ -527,8 +533,9 @@ describe("operation-level coverage", () => {
     expect(res.generation.reason).toContain("No model provider configured");
     expect(res.generation.reason).toContain('provider="deterministic"');
     const html = readFileSync(res.behavior_coverage_path ?? "", "utf8");
-    expect(html).toContain('"generationOutcome":{"status":"no_provider"');
-    expect(html).toContain("No model provider configured");
+    const model = reportModelIn(html);
+    expect(model.tests).toMatchObject({ drafted: 0, status: "no_provider" });
+    expect(model.worklist[0]?.slots?.[0]?.reason).toBe("Add a model key to draft two tests for this function.");
   });
 
   it("opStart deterministic mode uses the compatible scaffold and emits drafts", async () => {

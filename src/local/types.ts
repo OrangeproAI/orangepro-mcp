@@ -95,7 +95,7 @@ export interface RiskGapItem {
   flow_position?: number;
   complexity_proxy?: number;
   is_new_code?: boolean;
-  integration_signal?: "associated" | "candidate" | "none";
+  integration_signal?: "associated" | "runtime" | "candidate" | "none";
 }
 
 export interface GapsResult {
