@@ -24,7 +24,8 @@ function repo(): string {
 
 const env = { ORANGEPRO_USER_CONFIG: "/definitely/not/here.json" } as NodeJS.ProcessEnv;
 
-describe("run key", () => {
+// Each case runs git a dozen times; allow for a busy machine running the whole suite.
+describe("run key", { timeout: 30_000 }, () => {
   it("changes with an edit or a new file, but not with OrangePro's own outputs", () => {
     const root = repo();
     const clean = codeKey(root)!;

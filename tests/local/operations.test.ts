@@ -331,7 +331,8 @@ describe("start orchestration", () => {
     // A different start option is a different input.
     const noLimit = await opStart(W, { ...opts, generateLimit: 3 }, deps);
     expect(noLimit.reuse).toMatchObject({ status: "full", reason: "inputs_changed" });
-  });
+    // Five start runs: a few seconds alone, much slower when the whole suite runs in parallel.
+  }, 60_000);
 
   it("auto-applies AI candidate links when a provider is configured without changing deterministic RTM status", async () => {
     const W = makeTempDir();
