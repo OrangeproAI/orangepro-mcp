@@ -20,8 +20,22 @@
 //   - `this.dep.bar()` → an injected field whose type is explicit in the class
 
 import ts from "typescript";
+import { findExportShapes, parseErrorCount, type ExistingSymbol, type ExportShape } from "./exportShapes.js";
 
 export type CallVia = "free" | "this" | "static" | "injected";
+
+/**
+ * Functions an export shape made visible that take caller identity: a member
+ * assigned onto a prototype or onto the exported object, an inline function of
+ * the exported object literal, and the unnamed default export. Without this
+ * their calls have no enclosing named symbol and are dropped.
+ */
+export interface ShapeCallers {
+  /** Emitted symbol names of those functions. */
+  names: ReadonlySet<string>;
+  /** What the declaration-based rules emit for the file (decides whether a prototype owner is exported). */
+  existing: ReadonlyMap<string, ExistingSymbol>;
+}
 
 export interface RawCall {
   /** Structural name of the nearest enclosing named symbol: `foo` | `X` | `Class.method`. */
@@ -43,6 +57,12 @@ export interface RawCall {
    * memory. It is not an external surface and never stored data.
    */
   inMemoryCollection?: boolean;
+  /**
+   * For `this`: the caller is an inline function of the exported object literal,
+   * so `this.name()` names a SIBLING property of that literal (bare name), not
+   * `Class.name`.
+   */
+  sibling?: boolean;
 }
 
 /** Built-in in-memory collections. Their `delete`/`clear` never touch stored data. */
@@ -397,7 +417,7 @@ export function extractMedusaGeneratedServices(content: string, tsx: boolean): M
  * anonymous closures (callbacks, `useEffect(() => …)`) inherit their enclosing
  * named scope. Calls at module scope (no enclosing named symbol) are dropped.
  */
-export function extractCalls(content: string, tsx: boolean): RawCall[] {
+export function extractCalls(content: string, tsx: boolean, shapeCallers?: ShapeCallers): RawCall[] {
   const sf = ts.createSourceFile(
     tsx ? "calls.tsx" : "calls.ts",
     content,
@@ -409,6 +429,28 @@ export function extractCalls(content: string, tsx: boolean): RawCall[] {
   let capped = false;
   const injectedFieldsByClass = collectInjectedFieldsByClass(sf);
   const moduleCollections = moduleCollectionBindings(sf);
+  // Export-shape callers, bound by POSITION (the function node), never by name:
+  // a literal property `list` is not a module binding, so only its own node may
+  // speak as `list`.
+  const shapeByNode = new Map<ts.Node, ExportShape>();
+  const siblingCallers = new Set<string>();
+  // Only from a parse without errors: this grammar is chosen by file extension, and a
+  // failed parse (JSX in a `.js` file) mis-reads where functions end. No identity then —
+  // the shape's calls stay dropped, as before, rather than being read from a broken tree.
+  if (shapeCallers && shapeCallers.names.size > 0 && parseErrorCount(sf) === 0) {
+    let shapes: ExportShape[] = [];
+    try {
+      shapes = findExportShapes(sf, shapeCallers.existing).shapes;
+    } catch {
+      shapes = [];
+    }
+    for (const shape of shapes) {
+      if (!shapeCallers.names.has(shape.name)) continue;
+      if (shape.form !== "member" && shape.form !== "prototype" && shape.form !== "literal_inline" && shape.form !== "unnamed_default") continue;
+      shapeByNode.set(shape.node, shape);
+      if (shape.form === "literal_inline") siblingCallers.add(shape.name);
+    }
+  }
 
   // `thisExact` = `this` currently refers to the lexical class instance, so a
   // `this.member()` resolves exactly to that class's member. True only inside a
@@ -427,7 +469,7 @@ export function extractCalls(content: string, tsx: boolean): RawCall[] {
     } else if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.name)) {
       if (e.expression.kind === ts.SyntaxKind.ThisKeyword) {
         if (!thisExact) return; // `this` was rebound by a non-arrow function — not exact
-        out.push({ caller, callee: e.name.text, via: "this" });
+        out.push({ caller, callee: e.name.text, via: "this", ...(siblingCallers.has(caller) ? { sibling: true } : {}) });
       } else if (
         ts.isPropertyAccessExpression(e.expression) &&
         e.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
@@ -463,6 +505,14 @@ export function extractCalls(content: string, tsx: boolean): RawCall[] {
   const walk = (node: ts.Node, caller: string | null, shadowed: ReadonlySet<string>, thisExact: boolean, topLevel: boolean): void => {
     if (capped) return;
 
+    const shape = shapeByNode.get(node);
+    if (shape && isFunctionLike(node)) {
+      // A member written as `function` (or a method) owns `this`; an arrow member
+      // and the unnamed default do not, so their `this.x()` is never exact.
+      const ownsThis = !ts.isArrowFunction(node) && shape.form !== "unnamed_default";
+      if (node.body) walk(node.body, shape.name, extend(shadowed, node), ownsThis, false);
+      return;
+    }
     if (ts.isModuleDeclaration(node)) {
       // namespace/module N { … } — a non-emitting boundary. Drop its calls.
       if (node.body) ts.forEachChild(node.body, (x) => walk(x, null, shadowed, false, false));

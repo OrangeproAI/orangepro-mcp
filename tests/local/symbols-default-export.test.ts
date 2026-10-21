@@ -47,9 +47,9 @@ describe("collectTsJsExports — default-export subjects (Finding 1)", () => {
   });
 
   describe("conservative — never invents behavior", () => {
-    it("anonymous default is not recorded", () => {
-      expect(names("export default function () { return 1; }\n")).toEqual([]);
-      expect(names("export default () => null;\n")).toEqual([]);
+    it("an unnamed default export is recorded as `default`", () => {
+      expect(names("export default function () { return 1; }\n")).toEqual(["default"]);
+      expect(names("export default () => null;\n")).toEqual(["default"]);
     });
     it("a non-callable value default (plain object/config) is not recorded", () => {
       expect(names("const config = { a: 1 };\nexport default config;\n")).toEqual([]);

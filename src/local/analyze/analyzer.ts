@@ -26,11 +26,13 @@ import {
 } from "./classify.js";
 import { classifyTestLayer } from "./testLayer.js";
 import { detectFromPackageJson, detectFrameworksFromManifest, detectManifestPackage, frameworkFromConfig } from "./frameworks.js";
-import { extractSymbolsWithMeta, extractTestNames, MAX_SYMBOLS_PER_FILE, type SymbolExtraction } from "./symbols.js";
+import { extractSymbolsWithMeta, extractTestNames, MAX_SYMBOLS_PER_FILE, type ExtractedSymbol, type SymbolExtraction } from "./symbols.js";
 import { extractTreeSitterStructure, extractTreeSitterSymbols, treeSitterReady, treeSitterStatus, type TreeSitterStructure } from "./treeSitter/engine.js";
 import { isTreeSitterLanguage } from "./treeSitter/languages.js";
 import { conventionSibling, isConventionLanguage } from "./linkage/conventions.js";
-import { isBoilerplateSymbol, BOILERPLATE_REASON } from "./boilerplate.js";
+import { isBoilerplateSymbol, BOILERPLATE_REASON, DOCUMENTED_PRIVATE_REASON, TRIVIAL_BODY_REASON } from "./boilerplate.js";
+import { entryFileReexports } from "./entryReexports.js";
+import type { NotSupportedEntry } from "./exportShapes.js";
 import {
   extractCalls,
   extractMedusaGeneratedServices,
@@ -122,6 +124,15 @@ const BUILD_BOOTSTRAP_PREFIX_RE =
 const INFRA_SERVICE_NAME_RE =
   /^(?:(InMemory|Redis|Pg|Mongo|Mikro|TypeOrm|Knex).*Service|(Cache|Caching|EventBus|JobScheduler|RemoteQuery|Index|Search|QueryBuilder).*Service)$/;
 const FRAMEWORK_HOOK_METHOD_RE = /^__(joinerConfig|hooks|definition)$/;
+
+/** Decision of the TS/JS export gate for one symbol that 0.2.58 does not count. */
+interface ExportGate {
+  counted: boolean;
+  surfaceReason: string | null;
+  publicApiEntry: boolean;
+  /** Why it is not counted, most specific first. Empty when counted. */
+  reasons: string[];
+}
 
 function handlerSymbolCandidates(contract: BehaviorContract): string[] {
   if (!contract.handler) return [];
@@ -238,7 +249,16 @@ function cliEntrySymbols(content: string): Map<string, CliFramework> {
  * surface without treating every exported helper in the repository as product
  * behavior.
  */
-function packagePublicEntryPaths(root: string, relPaths: string[]): Set<string> {
+interface PublicEntryPaths {
+  /** Public entry modules, including files handed out as `exports.name = require("./x")`. */
+  entries: Set<string>;
+  /** The same set without that CommonJS property rule — what 0.2.58 treats as public. */
+  baseline: Set<string>;
+  /** Per public entry file: relative re-exports made in a spelling that is not followed. */
+  notFollowed: Map<string, Array<{ path: string; line: number }>>;
+}
+
+function packagePublicEntryPaths(root: string, relPaths: string[]): PublicEntryPaths {
   const normalizedPaths = new Set(relPaths.map((relPath) => relPath.replace(/\\/g, "/")));
   const entries = new Set<string>();
   const extensions = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
@@ -293,60 +313,74 @@ function packagePublicEntryPaths(root: string, relPaths: string[]): Set<string> 
   // relative AST re-exports so the callable implementation remains public
   // without widening every internal helper into the denominator. Handles both
   // ESM barrels and the conventional CommonJS `module.exports = require(...)`.
-  const queued = [...entries];
-  const visited = new Set<string>();
-  const addRelativeTarget = (fromFile: string, rawTarget: string): void => {
-    if (!rawTarget.startsWith(".")) return;
-    const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromFile), rawTarget));
-    if (base === ".." || base.startsWith("../")) return;
-    const candidates = new Set<string>([base]);
-    const withoutExt = base.replace(RUNTIME_SOURCE_EXT_RE, "");
-    for (const extension of extensions) {
-      candidates.add(`${withoutExt}${extension}`);
-      candidates.add(`${withoutExt}/index${extension}`);
-    }
-    for (const candidate of candidates) {
-      if (normalizedPaths.has(candidate) && !entries.has(candidate)) {
-        entries.add(candidate);
-        queued.push(candidate);
+  // `followPropertyRequires` adds the CommonJS property form
+  // (`exports.name = require("./x")`), applied again in each file it reaches.
+  const seeds = [...entries];
+  const notFollowed = new Map<string, Array<{ path: string; line: number }>>();
+  const follow = (followPropertyRequires: boolean): Set<string> => {
+    const entries = new Set<string>(seeds);
+    const queued = [...entries];
+    const visited = new Set<string>();
+    const addRelativeTarget = (fromFile: string, rawTarget: string): void => {
+      if (!rawTarget.startsWith(".")) return;
+      const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromFile), rawTarget));
+      if (base === ".." || base.startsWith("../")) return;
+      const candidates = new Set<string>([base]);
+      const withoutExt = base.replace(RUNTIME_SOURCE_EXT_RE, "");
+      for (const extension of extensions) {
+        candidates.add(`${withoutExt}${extension}`);
+        candidates.add(`${withoutExt}/index${extension}`);
       }
-    }
-  };
-  while (queued.length) {
-    const entry = queued.shift();
-    if (!entry || visited.has(entry)) continue;
-    visited.add(entry);
-    try {
-      const source = ts.createSourceFile(entry, readFileSync(path.join(root, entry), "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
-      for (const statement of source.statements) {
-        if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
-          addRelativeTarget(entry, statement.moduleSpecifier.text);
-          continue;
+      for (const candidate of candidates) {
+        if (normalizedPaths.has(candidate) && !entries.has(candidate)) {
+          entries.add(candidate);
+          queued.push(candidate);
         }
-        if (!ts.isExpressionStatement(statement)) continue;
-        let assignment = ts.isBinaryExpression(statement.expression) && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
-          ? statement.expression
-          : undefined;
-        while (assignment) {
-          const left = assignment.left;
-          const isModuleExports = ts.isPropertyAccessExpression(left)
-            && ts.isIdentifier(left.expression)
-            && left.expression.text === "module"
-            && left.name.text === "exports";
-          if (isModuleExports && ts.isCallExpression(assignment.right) && ts.isIdentifier(assignment.right.expression) && assignment.right.expression.text === "require") {
-            const [arg] = assignment.right.arguments;
-            if (arg && ts.isStringLiteral(arg)) addRelativeTarget(entry, arg.text);
+      }
+    };
+    while (queued.length) {
+      const entry = queued.shift();
+      if (!entry || visited.has(entry)) continue;
+      visited.add(entry);
+      try {
+        const source = ts.createSourceFile(entry, readFileSync(path.join(root, entry), "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
+        if (followPropertyRequires) {
+          const reexports = entryFileReexports(source);
+          for (const target of reexports.followed) addRelativeTarget(entry, target);
+          if (reexports.notFollowed.length > 0) notFollowed.set(entry, reexports.notFollowed);
+        }
+        for (const statement of source.statements) {
+          if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+            addRelativeTarget(entry, statement.moduleSpecifier.text);
+            continue;
           }
-          assignment = ts.isBinaryExpression(assignment.right) && assignment.right.operatorToken.kind === ts.SyntaxKind.EqualsToken
-            ? assignment.right
+          if (!ts.isExpressionStatement(statement)) continue;
+          let assignment = ts.isBinaryExpression(statement.expression) && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+            ? statement.expression
             : undefined;
+          while (assignment) {
+            const left = assignment.left;
+            const isModuleExports = ts.isPropertyAccessExpression(left)
+              && ts.isIdentifier(left.expression)
+              && left.expression.text === "module"
+              && left.name.text === "exports";
+            if (isModuleExports && ts.isCallExpression(assignment.right) && ts.isIdentifier(assignment.right.expression) && assignment.right.expression.text === "require") {
+              const [arg] = assignment.right.arguments;
+              if (arg && ts.isStringLiteral(arg)) addRelativeTarget(entry, arg.text);
+            }
+            assignment = ts.isBinaryExpression(assignment.right) && assignment.right.operatorToken.kind === ts.SyntaxKind.EqualsToken
+              ? assignment.right
+              : undefined;
+          }
         }
+      } catch {
+        // An unreadable barrel cannot widen the public surface; keep the manifest entry only.
       }
-    } catch {
-      // An unreadable barrel cannot widen the public surface; keep the manifest entry only.
     }
-  }
-  return entries;
+    return entries;
+  };
+  const baseline = follow(false);
+  return { entries: follow(true), baseline, notFollowed };
 }
 
 const FLOW_LINK_STOPWORDS = new Set([
@@ -517,10 +551,11 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   const maxSymbols = Math.max(1, opts.maxSymbols ?? MAX_TOTAL_SYMBOLS);
   const ignore = loadIgnore(root);
   const { files, truncated: filesCapHit, max_files: maxFiles } = walkFilesWithMeta(root, ignore, { maxFiles: opts.maxFiles });
-  const publicEntryFiles = packagePublicEntryPaths(
+  const publicEntries = packagePublicEntryPaths(
     root,
     files.map((file) => file.relPath)
   );
+  const publicEntryFiles = publicEntries.entries;
   const warnings: string[] = [];
   // Wall-clock budget for the per-file scan (DISCLOSED partial when hit; never silent).
   const now = opts.now ?? (() => Date.now());
@@ -609,6 +644,28 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   // Emitted CodeSymbol names per file — the call graph resolves callers/callees
   // ONLY to symbols that actually became nodes (the "known symbol" invariant).
   const symbolsByFile = new Map<string, Set<string>>();
+  // TS/JS export shapes (exportShapes.ts). Position-bound names are inline
+  // functions of an exported object literal and unnamed defaults: not module
+  // bindings, so a same-file free call `name()` never targets them. Member
+  // aliases answer `this.<alias>()`; export aliases answer a lookup from another
+  // file by imported name.
+  const positionBoundByFile = new Map<string, Set<string>>();
+  // Prototype methods are instance members: a static call `F.name()` never reaches them.
+  const prototypeMembersByFile = new Map<string, Set<string>>();
+  const newlyVisibleByFile = new Map<string, Set<string>>();
+  // Symbols named by an export key (`exports.send = function`), not by a module binding.
+  const unboundNamesByFile = new Map<string, Set<string>>();
+  // Functions made visible by reference whose own name is not an exported name.
+  const ownNameNotExportedByFile = new Map<string, Set<string>>();
+  const literalKeysByFile = new Map<string, Map<string, string>>();
+  const memberAliasesByFile = new Map<string, Map<string, string>>();
+  const exportAliasesByFile = new Map<string, Map<string, string>>();
+  const notSupportedByFile = new Map<string, NotSupportedEntry[]>();
+  const addToSetMap = (map: Map<string, Set<string>>, key: string, value: string): void => {
+    const existing = map.get(key);
+    if (existing) existing.add(value);
+    else map.set(key, new Set([value]));
+  };
   // Retained callee NAMES (no node, no edge) for calls the resolver cannot anchor —
   // shared by the TS/JS loop and the tree-sitter loop; persisted as external_callees.
   const externalCalleesByCaller = new Map<string, Set<string>>();
@@ -1010,13 +1067,11 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           : extractFileSymbols(content, language);
         const cliEntries = language === "typescript" || language === "javascript" ? cliEntrySymbols(content) : new Map<string, CliFramework>();
         if (extraction.truncated) symbolFilesTruncated++;
-        for (const sym of extraction.symbols) {
-          if (symbolCount >= maxSymbols) {
-            symbolCapHit = true;
-            warnings.push(`Symbol extraction cap (${maxSymbols}) reached; some code symbols omitted. Raise ORANGEPRO_MAX_SYMBOLS to include them.`);
-            break;
-          }
-          const symId = `sym:${file.relPath}#${sym.name}`;
+        const isTsJs = language === "typescript" || language === "javascript";
+        // What 0.2.58's rules decide for one symbol. A symbol made visible by an
+        // export shape (`seen_by`) is never eligible here: it goes through the
+        // export gate below.
+        const baselineOf = (sym: ExtractedSymbol) => {
           // Gate 3 eligibility: an export counts as a code-derived behavior only
           // when it is provably callable behavior surface — fn/class/method, or
           // a const the AST proved is a function. `.d.ts` declares types, not
@@ -1048,13 +1103,110 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             : callableBehaviorCandidate && !surfaceExclusionReason
               ? behaviorSurfaceReason(file.relPath, sym.name, sym.member_of)
               : null;
-          const publicApiEntry = callableBehaviorCandidate && !surfaceExclusionReason && publicEntryFiles.has(file.relPath);
-          const eligible = cliDenominatorOverride || (callableBehaviorCandidate && (surfaceReason !== null || publicApiEntry));
+          const publicApiEntry = callableBehaviorCandidate && !surfaceExclusionReason && publicEntries.baseline.has(file.relPath);
+          const eligible =
+            sym.seen_by === undefined && (cliDenominatorOverride || (callableBehaviorCandidate && (surfaceReason !== null || publicApiEntry)));
+          return { isDts, isInfra, isGeneratedSymbol, isBoilerplate, callableBehaviorCandidate, surfaceExclusionReason, cliFramework, cliDenominatorOverride, surfaceReason, publicApiEntry, eligible };
+        };
+        // Export gate (TS/JS): a function 0.2.58 does not count is counted only
+        // when it is public, not documented private and not trivial. Decided for
+        // the whole file first, so a pass-through can ask whether its callee is
+        // itself counted without depending on symbol order.
+        const exportGate = new Map<string, ExportGate>();
+        if (isTsJs) {
+          const byName = new Map(extraction.symbols.map((sym) => [sym.name, sym] as const));
+          const baseByName = new Map(extraction.symbols.map((sym) => [sym.name, baselineOf(sym)] as const));
+          const aliasToName = new Map<string, string>();
+          for (const sym of extraction.symbols) for (const alias of sym.aliases ?? []) if (!aliasToName.has(alias)) aliasToName.set(alias, sym.name);
+          const provisional = new Map<string, ExportGate & { documentedPrivate: boolean; trivial: boolean; isPublic: boolean; candidate: boolean }>();
+          for (const sym of extraction.symbols) {
+            const base = baseByName.get(sym.name);
+            if (!base || base.eligible || !base.callableBehaviorCandidate) continue;
+            // Every public name is tried: a function exported under a behavior-like name counts like one declared with it.
+            const aliasReason = base.surfaceExclusionReason
+              ? null
+              : ((sym.aliases ?? []).map((alias) => behaviorSurfaceReason(file.relPath, alias, sym.member_of)).find((reason) => reason !== null) ?? null);
+            const surfaceReason = base.surfaceReason ?? aliasReason;
+            const publicApiEntry = !base.surfaceExclusionReason && publicEntryFiles.has(file.relPath);
+            const isPublic = base.cliDenominatorOverride || surfaceReason !== null || publicApiEntry;
+            // Already visible and still not public: 0.2.58's result stands, reason included.
+            if (sym.seen_by === undefined && !isPublic) continue;
+            const documentedPrivate = sym.documented_private === true;
+            const trivial = sym.trivial_body !== undefined;
+            provisional.set(sym.name, {
+              counted: isPublic && !documentedPrivate && !trivial,
+              surfaceReason,
+              publicApiEntry,
+              reasons: [],
+              documentedPrivate,
+              trivial,
+              isPublic,
+              candidate: isPublic && !documentedPrivate && !trivial && sym.pass_through !== undefined
+            });
+          }
+          const passThroughTarget = (sym: ExtractedSymbol): string | null => {
+            const pt = sym.pass_through;
+            if (!pt) return null;
+            if (pt.via === "free") {
+              // Only a real top-level binding can be reached by a free call.
+              const target = byName.get(pt.callee);
+              const bound =
+                target &&
+                !target.member_of &&
+                !target.unbound_name &&
+                (target.shape_form === undefined || target.shape_form === "export_list" || target.shape_form === "literal_reference");
+              return bound ? target.name : null;
+            }
+            if (sym.member_of) {
+              const member = `${sym.member_of}.${pt.callee}`;
+              return byName.has(member) ? member : (aliasToName.get(member) ?? null);
+            }
+            if (sym.shape_form === "literal_inline") return byName.get(pt.callee)?.shape_form === "literal_inline" ? pt.callee : null;
+            return null;
+          };
+          const countedBeforePassThrough = (name: string): boolean => {
+            const gated = provisional.get(name);
+            return gated ? gated.counted && !gated.candidate : baseByName.get(name)?.eligible === true;
+          };
+          for (const sym of extraction.symbols) {
+            const gated = provisional.get(sym.name);
+            if (!gated) continue;
+            const target = gated.candidate ? passThroughTarget(sym) : null;
+            const passesStraightOn = target !== null && target !== sym.name && countedBeforePassThrough(target);
+            const base = baseByName.get(sym.name);
+            const reasons = [
+              ...(gated.documentedPrivate ? ["documented_private"] : []),
+              ...(gated.trivial || passesStraightOn ? ["trivial_body"] : []),
+              ...(gated.isPublic ? [] : [base?.surfaceExclusionReason ? "infra_behavior_surface" : "not_entry_point_adjacent"])
+            ];
+            exportGate.set(sym.name, {
+              counted: gated.counted && !passesStraightOn,
+              surfaceReason: gated.surfaceReason,
+              publicApiEntry: gated.publicApiEntry,
+              reasons
+            });
+          }
+        }
+        for (const sym of extraction.symbols) {
+          if (symbolCount >= maxSymbols) {
+            symbolCapHit = true;
+            warnings.push(`Symbol extraction cap (${maxSymbols}) reached; some code symbols omitted. Raise ORANGEPRO_MAX_SYMBOLS to include them.`);
+            break;
+          }
+          const symId = `sym:${file.relPath}#${sym.name}`;
+          const base = baselineOf(sym);
+          const { isDts, isInfra, isGeneratedSymbol, isBoilerplate, callableBehaviorCandidate, surfaceExclusionReason, cliFramework } = base;
+          const gate = exportGate.get(sym.name);
+          const gateReasons = gate && !gate.counted ? gate.reasons : [];
+          const cliDenominatorOverride = base.cliDenominatorOverride && gateReasons.length === 0;
+          const surfaceReason = gate ? (gate.counted ? gate.surfaceReason : null) : base.surfaceReason;
+          const publicApiEntry = gate ? gate.counted && gate.publicApiEntry : base.publicApiEntry;
+          const eligible = gate ? gate.counted : base.eligible;
           const behaviorSurfaceExcluded = callableBehaviorCandidate && surfaceExclusionReason !== null && !cliDenominatorOverride;
           const notEntryPointAdjacent = callableBehaviorCandidate && !eligible && !behaviorSurfaceExcluded;
           const rankingExclusion = builtInRankExclusion(file.relPath);
           const pythonRankingExclusion = treeStructure?.pythonRankingExclusions?.find((candidate) => candidate.symbol === sym.name);
-          if (isBoilerplate) excludedBoilerplate++;
+          if (isBoilerplate || gateReasons[0] === "trivial_body") excludedBoilerplate++;
           nodes.push(
             makeNode({
               kind: "CodeSymbol",
@@ -1068,6 +1220,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 ...(sym.member_of ? { member_of: sym.member_of } : {}),
                 ...(cliFramework ? { cli_entrypoint: true, entry_lane: "cli", cli_framework: cliFramework } : {}),
                 ...(sym.callable !== undefined ? { callable_const: sym.callable } : {}),
+                ...(sym.seen_by ? { seen_by: sym.seen_by } : {}),
+                ...(sym.aliases?.length ? { aliases: sym.aliases } : {}),
                 ...(cliDenominatorOverride
                   ? {
                       behavior_surface: "cli_command_entry",
@@ -1081,6 +1235,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                       : {}),
                 ...(behaviorSurfaceExcluded ? { denominator_reason_code: "infra_behavior_surface" } : {}),
                 ...(notEntryPointAdjacent ? { denominator_reason_code: "not_entry_point_adjacent" } : {}),
+                ...(gateReasons.length > 0 ? { denominator_reason_code: gateReasons[0], not_counted_because: gateReasons } : {}),
                 ...(pythonRankingExclusion
                   ? {
                       ranking_exclusion_code:
@@ -1113,6 +1268,10 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                   ? GENERATED_CODE_REASON
                   : isBoilerplate
                   ? BOILERPLATE_REASON
+                  : gateReasons[0] === "documented_private"
+                  ? DOCUMENTED_PRIVATE_REASON
+                  : gateReasons[0] === "trivial_body"
+                  ? TRIVIAL_BODY_REASON
                   : cliDenominatorOverride
                     ? `Verified ${cliFramework} CLI command run() entry — countable behavior surface${surfaceExclusionReason ? `; overrides: ${surfaceExclusionReason}` : "."}`
                   : eligible && surfaceReason
@@ -1183,8 +1342,40 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         // symbols from the denominator.
         if ((language === "typescript" || language === "javascript") && !isNonProductFile(file.relPath)) {
           const tsx = /\.(tsx|jsx)$/.test(file.relPath);
-          const calls = extractCalls(content, tsx);
+          // Export-shape symbols: who may speak as a caller, which names are bound
+          // by position (never the target of a same-file free call), and which
+          // extra names resolve to them.
+          const shapeCallerNames = new Set<string>();
+          const existingSymbols = new Map<string, { kind: ExtractedSymbol["symbol_kind"]; callable: boolean }>();
+          for (const sym of extraction.symbols) {
+            if (sym.seen_by === undefined) existingSymbols.set(sym.name, { kind: sym.symbol_kind, callable: sym.callable === true });
+            if (sym.shape_form === "member" || sym.shape_form === "prototype" || sym.shape_form === "literal_inline" || sym.shape_form === "unnamed_default") {
+              shapeCallerNames.add(sym.name);
+            }
+            if (sym.shape_form === "literal_inline" || sym.shape_form === "unnamed_default") {
+              addToSetMap(positionBoundByFile, file.relPath, sym.name);
+            }
+            if (sym.seen_by === "prototype_method") addToSetMap(prototypeMembersByFile, file.relPath, sym.name);
+            if (sym.seen_by !== undefined) addToSetMap(newlyVisibleByFile, file.relPath, sym.name);
+            if (sym.unbound_name) addToSetMap(unboundNamesByFile, file.relPath, sym.name);
+            if (sym.own_name_exported === false) addToSetMap(ownNameNotExportedByFile, file.relPath, sym.name);
+            // Keys of the exported object literal: an inline function under its key, a reference under each key it is written with.
+            if (sym.shape_form === "literal_inline" || sym.shape_form === "literal_reference") {
+              const keys = sym.shape_form === "literal_inline" ? [sym.name] : [...(sym.aliases ?? []), ...(sym.own_name_exported === false ? [] : [sym.name])];
+              let byKey = literalKeysByFile.get(file.relPath);
+              if (!byKey) literalKeysByFile.set(file.relPath, (byKey = new Map()));
+              for (const key of keys) if (!byKey.has(key)) byKey.set(key, sym.name);
+            }
+            for (const alias of sym.aliases ?? []) {
+              const aliases = sym.member_of ? memberAliasesByFile : exportAliasesByFile;
+              let byAlias = aliases.get(file.relPath);
+              if (!byAlias) aliases.set(file.relPath, (byAlias = new Map()));
+              if (!byAlias.has(alias)) byAlias.set(alias, sym.name);
+            }
+          }
+          const calls = extractCalls(content, tsx, shapeCallerNames.size > 0 ? { names: shapeCallerNames, existing: existingSymbols } : undefined);
           if (calls.length > 0) rawCallsByFile.set(file.relPath, calls);
+          if (extraction.not_supported?.length) notSupportedByFile.set(file.relPath, extraction.not_supported);
           const generatedServices = extractMedusaGeneratedServices(content, tsx);
           if (generatedServices.length > 0) medusaGeneratedServicesByFile.set(file.relPath, generatedServices);
         } else if (treeStructure && !isNonProductFile(file.relPath)) {
@@ -1458,8 +1649,17 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     // Resolve `name` exported from a (possibly barrel) module to an emitted,
     // non-infra terminal symbol id, or null. Direct local definition first,
     // else a deterministic resolver-backed barrel walk.
+    // The emitted symbol a file exports as `name`: the symbol itself, or the one that carries `name` as an export alias.
+    // The alias is asked first: `export { parseLoose as parse, parse as parseStrict }`
+    // exports `parseLoose` under the name `parse`, whatever the local `parse` is.
+    const exportedSymbolName = (targetRel: string, name: string): string | null => {
+      const aliased = exportAliasesByFile.get(targetRel)?.get(name);
+      if (aliased) return aliased;
+      return symbolsByFile.get(targetRel)?.has(name) && !ownNameNotExportedByFile.get(targetRel)?.has(name) ? name : null;
+    };
     const resolveModuleExport = (targetRel: string, targetAbs: string, name: string): string | null => {
-    if (symbolsByFile.get(targetRel)?.has(name) && !isNonProductFile(targetRel)) return `sym:${targetRel}#${name}`;
+    const direct = isNonProductFile(targetRel) ? null : exportedSymbolName(targetRel, name);
+    if (direct) return `sym:${targetRel}#${direct}`;
       const w = walkBarrel(targetAbs, name);
       if (w.status !== "terminal" || !w.covered || !w.terminalFile || !w.terminalBinding) return null;
       const termRel = relByAbs.get(path.resolve(w.terminalFile));
@@ -1492,12 +1692,18 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         const callerId = `sym:${rel}#${c.caller}`;
         if (c.via === "free") {
           if (localSyms.has(c.callee)) {
+            // A position-bound symbol is not a module binding: a free `name()` calls something else.
+            if (positionBoundByFile.get(rel)?.has(c.callee)) continue;
+            // Nor is a symbol named by an export key. Callers 0.2.58 already links keep their
+            // links; a newly visible caller does not add to that guess.
+            if (unboundNamesByFile.get(rel)?.has(c.callee) && newlyVisibleByFile.get(rel)?.has(c.caller)) continue;
             emitCall(callerId, `sym:${rel}#${c.callee}`, rel, "free", "same_file"); // same-file
           } else {
             const b = imports?.get(c.callee);
             if (!b) continue;
-          if (symbolsByFile.get(b.targetRel)?.has(b.imported) && !isNonProductFile(b.targetRel)) {
-              emitCall(callerId, `sym:${b.targetRel}#${b.imported}`, rel, "free", "import"); // exact: target defines it
+            const exported = isNonProductFile(b.targetRel) ? null : exportedSymbolName(b.targetRel, b.imported);
+          if (exported) {
+              emitCall(callerId, `sym:${b.targetRel}#${exported}`, rel, "free", "import"); // exact: target defines it
             } else {
               // 0.45 — resolver-backed barrel terminal recovery.
               const w = walkBarrel(b.targetAbs, b.imported);
@@ -1511,13 +1717,19 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           }
         } else if (c.via === "this") {
           const cls = c.caller.includes(".") ? c.caller.slice(0, c.caller.indexOf(".")) : "";
-          if (cls) {
-            const member = `${cls}.${c.callee}`;
-            if (localSyms.has(member)) emitCall(callerId, `sym:${rel}#${member}`, rel, "this", "same_file");
+          if (c.sibling) {
+            // Inline function of the exported object literal: `this.name()` is a sibling
+            // property — another inline function, or a reference written under that key.
+            const sibling = literalKeysByFile.get(rel)?.get(c.callee);
+            if (sibling && localSyms.has(sibling)) emitCall(callerId, `sym:${rel}#${sibling}`, rel, "this", "same_file");
+          } else if (cls) {
+            const named = `${cls}.${c.callee}`;
+            const member = localSyms.has(named) ? named : memberAliasesByFile.get(rel)?.get(named);
+            if (member) emitCall(callerId, `sym:${rel}#${member}`, rel, "this", "same_file");
           }
         } else if (c.via === "static" && c.qualifier) {
           const member = `${c.qualifier}.${c.callee}`;
-          if (localSyms.has(c.qualifier) && localSyms.has(member)) {
+          if (localSyms.has(c.qualifier) && localSyms.has(member) && !prototypeMembersByFile.get(rel)?.has(member)) {
             emitCall(callerId, `sym:${rel}#${member}`, rel, "static", "same_file"); // exact: same-file class member
           } else {
             const ns = namespaces?.get(c.qualifier);
@@ -3176,6 +3388,25 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   const structuralClusters = buildStructuralClusters(nodes, edges, candidate_edges);
   const flows = enumerateFlows({ nodes, edges, candidate_edges, workspaceRoot: root });
 
+  for (const [rel, reexports] of publicEntries.notFollowed) {
+    const lines = reexports.map((entry) => entry.line);
+    const entry: NotSupportedEntry = {
+      code: "public_reexport_not_followed",
+      name: [...new Set(reexports.map((r) => r.path))].sort().join(", "),
+      start_line: Math.min(...lines),
+      end_line: Math.max(...lines)
+    };
+    notSupportedByFile.set(rel, [...(notSupportedByFile.get(rel) ?? []), entry]);
+  }
+  const notSupportedByCode: Record<string, number> = {};
+  let notSupportedTotal = 0;
+  for (const entries of notSupportedByFile.values()) {
+    for (const entry of entries) {
+      notSupportedByCode[entry.code] = (notSupportedByCode[entry.code] ?? 0) + 1;
+      notSupportedTotal++;
+    }
+  }
+
   const analysis = {
     test_files: testFiles,
     inferred_flows: flowIds.size,
@@ -3198,6 +3429,15 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       ? { resolver_cache: { hits: opts.resolverCache.hits, misses: opts.resolverCache.misses, hit_rate: opts.resolverCache.hitRate() } }
       : {}),
     exclude_suggestions,
+    ...(notSupportedTotal > 0
+      ? {
+          not_supported: {
+            total: notSupportedTotal,
+            by_code: Object.fromEntries(Object.entries(notSupportedByCode).sort(([x], [y]) => x.localeCompare(y))),
+            files: Object.fromEntries([...notSupportedByFile.entries()].sort(([x], [y]) => x.localeCompare(y)))
+          }
+        }
+      : {}),
     ...(behaviorContractsTotal
       ? {
           behavior_contracts: {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +19,8 @@ function usage() {
     "Runs a baseline test, mutates the target method body in an isolated copy, reruns the same test, and classifies the result.",
     "--replacement must be inert: either empty or a single return of a JSON literal, e.g. 'return {\"ok\":false};'. Use --replacement-mode promise-json for Promise<T> methods.",
     "--link-node-modules is a trusted-repo speed mode: source files are copied, but node_modules is symlinked and must not be treated as write-isolated.",
+    "Bound mutation (a member written `owner.name = function` or `F.prototype.name = function`): pass --bound-file-sha256 <hex> --bound-statement-start <n> --bound-function-start <n> --bound-body-start <n> --bound-body-end <n> (raw-byte offsets, end exclusive) and one --bound-target <owner.name> per name. The function is then changed by its exact position, never by a name search; any disagreement is a named refusal.",
+    "--preview (bound mutation only) prints the diff the mutation would make and stops: no copy, no test run. --test is not needed.",
     "Repo test lifecycle hooks and runner binaries are trusted in this spike; use it only for local measurement on trusted checkouts.",
     "This is a spike harness only; it does not write graph edges or product artifacts."
   ].join("\n");
@@ -35,6 +38,10 @@ function parseArgs(argv) {
       args.linkNodeModules = true;
       continue;
     }
+    if (arg === "--preview") {
+      args.preview = true;
+      continue;
+    }
     if (!arg.startsWith("--")) {
       throw new Error(`Unexpected positional argument: ${arg}`);
     }
@@ -48,10 +55,19 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (key === "boundTarget") {
+      (args.boundTarget ??= []).push(value);
+      i += 1;
+      continue;
+    }
     args[key] = value;
     i += 1;
   }
   for (const required of ["root", "test", "target", "method", "replacement"]) {
+    // A preview runs no test.
+    if (required === "test" && args.preview) {
+      continue;
+    }
     if (!Object.prototype.hasOwnProperty.call(args, required)) {
       throw new Error(`Missing required --${required.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`);
     }
@@ -909,6 +925,217 @@ function mutateMethod(targetAbs, method, replacementBody) {
   const replacement = `{\n${bodyIndent}${replacementBody.trim()}\n${indent}}`;
   const mutated = `${source.slice(0, openBraceIndex)}${replacement}${source.slice(closeBraceIndex + 1)}`;
   writeFileSync(targetAbs, mutated);
+}
+
+// ── Bound mutation ─────────────────────────────────────────────────────────────────
+// A member written `owner.name = function …` or `F.prototype.name = function …` is changed by its exact
+// position, never by the name search above: the search cannot see an unnamed member and can match a
+// different function of the same name. The caller re-parses the file and passes the binding (file hash,
+// raw-byte offsets, the names written before the function). This script holds no parser, so it repeats
+// the checks it can make on raw bytes and refuses, by name, on any disagreement. A refusal is final:
+// nothing here falls back to the name search.
+class BoundRefusal extends Error {
+  constructor(code, detail) {
+    super(`bound mutation refused (${code}): ${detail}`);
+    this.code = code;
+  }
+}
+
+const JS_IDENTIFIER = "[\\p{ID_Start}$_][\\p{ID_Continue}$\\u200c\\u200d]*";
+// `<owner>.<property>` or `<F>.prototype.<property>`: the only two shapes that reach this path.
+const BOUND_TARGET_RE = new RegExp(`^${JS_IDENTIFIER}(?:\\.prototype)?\\.${JS_IDENTIFIER}$`, "u");
+const BOUND_ARG_KEYS = ["boundFileSha256", "boundStatementStart", "boundFunctionStart", "boundBodyStart", "boundBodyEnd", "boundTarget"];
+const ASCII_WHITESPACE_BYTES = new Set([0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20]);
+const DIFF_CONTEXT_LINES = 3;
+
+function sha256Hex(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+// null → no --bound-* argument was given: the name search runs, exactly as before.
+function parseBinding(args) {
+  if (!BOUND_ARG_KEYS.some(key => args[key] !== undefined)) {
+    return null;
+  }
+  const offset = key => (/^(?:0|[1-9]\d*)$/.test(String(args[key] ?? "")) ? Number(args[key]) : Number.NaN);
+  const binding = {
+    fileSha256: String(args.boundFileSha256 ?? ""),
+    statementStart: offset("boundStatementStart"),
+    functionStart: offset("boundFunctionStart"),
+    bodyStart: offset("boundBodyStart"),
+    bodyEnd: offset("boundBodyEnd"),
+    targets: args.boundTarget ?? []
+  };
+  if (!/^[0-9a-f]{64}$/.test(binding.fileSha256)) {
+    throw new BoundRefusal("invalid_binding", "--bound-file-sha256 must be a sha256 in lowercase hex");
+  }
+  if (![binding.statementStart, binding.functionStart, binding.bodyStart, binding.bodyEnd].every(Number.isSafeInteger)) {
+    throw new BoundRefusal("invalid_binding", "--bound-statement-start, --bound-function-start, --bound-body-start and --bound-body-end must all be given as non-negative integers");
+  }
+  if (binding.targets.length === 0 || binding.targets.some(target => !BOUND_TARGET_RE.test(target))) {
+    throw new BoundRefusal("invalid_binding", "at least one --bound-target is required, each written owner.property or Owner.prototype.property");
+  }
+  return binding;
+}
+
+// The plain count the name search uses, on bytes: it knows nothing of strings, regexes, templates or comments.
+function rawBraceClose(bytes, openIndex) {
+  let depth = 0;
+  for (let i = openIndex; i < bytes.length; i += 1) {
+    if (bytes[i] === 0x7b) {
+      depth += 1;
+    } else if (bytes[i] === 0x7d) {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+// Every check that can be made before a byte is written. Returns the mutated bytes; writes nothing.
+function planBoundMutation(original, binding, replacementBody) {
+  const { statementStart, functionStart, bodyStart, bodyEnd, targets } = binding;
+  if (sha256Hex(original) !== binding.fileSha256) {
+    throw new BoundRefusal("stale_hash", "the target file is not the file the binding was made from");
+  }
+  const text = original.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(original)) {
+    throw new BoundRefusal("not_utf8", "the target file does not survive a UTF-8 round trip unchanged");
+  }
+  if (!(statementStart <= functionStart && functionStart < bodyStart && bodyStart < bodyEnd && bodyEnd <= original.length)) {
+    throw new BoundRefusal("invalid_binding", "the byte offsets are out of order or outside the file");
+  }
+  // The statement begins where a name can begin. A byte before it that continues a name or a member chain
+  // (`book|shelf.count =`, `this.|shelf.count =`) means the bytes read below are the tail of another owner.
+  // A non-ASCII character there is refused as well, unless it is white space (a byte order mark included).
+  const previous = [...original.subarray(Math.max(0, statementStart - 4), statementStart).toString("utf8")].pop() ?? "";
+  if (/^[A-Za-z0-9_$.]$/.test(previous) || (previous > "\u007f" && !/^\s$/u.test(previous))) {
+    throw new BoundRefusal("prefix_mismatch", "the statement does not begin at the start of a name: the character before it belongs to a longer name");
+  }
+  // From the statement's first byte to the function's first byte there is nothing but the recorded names,
+  // each followed by `=`. A span that points at another owner, another function, or one byte to either
+  // side fails here.
+  const prefix = original.subarray(statementStart, functionStart).toString("utf8");
+  const links = prefix.split("=");
+  const afterLastEquals = links.pop();
+  const written = links.map(link => link.replace(/\s+/g, ""));
+  if (
+    /^\s/.test(prefix)
+    || afterLastEquals.trim() !== ""
+    || ASCII_WHITESPACE_BYTES.has(original[functionStart])
+    || written.length !== targets.length
+    || written.some((name, index) => name !== targets[index])
+  ) {
+    throw new BoundRefusal("prefix_mismatch", `the bytes before the function are not exactly ${targets.map(target => `${target} =`).join(" ")}`);
+  }
+  // The recorded body is the first block after the function's parameters: between the function's first
+  // byte and the body's opening brace there is no brace outside parentheses. A body span that is a later
+  // function's body, a block nested in this one, or a block inside a comment further down fails here.
+  // (So does a return type or a type parameter written with braces: raw bytes cannot tell it from a body.)
+  let parenDepth = 0;
+  for (let i = functionStart; i < bodyStart; i += 1) {
+    if (original[i] === 0x28) {
+      parenDepth += 1;
+    } else if (original[i] === 0x29) {
+      parenDepth -= 1;
+    } else if ((original[i] === 0x7b || original[i] === 0x7d) && parenDepth <= 0) {
+      throw new BoundRefusal("brace_scan_mismatch", "the recorded body is not the first block after the function's parameters");
+    }
+  }
+  // The raw brace count must land on the recorded end of the body, and the name search's own scan of the
+  // same text must agree. One unbalanced brace inside a string, a regex, a template or a comment moves
+  // both away from the parser's answer, and the function is refused instead of being cut in the wrong place.
+  let textClose = -1;
+  try {
+    const openChar = original.subarray(0, bodyStart).toString("utf8").length;
+    textClose = Buffer.byteLength(text.slice(0, findMatchingBrace(text, openChar)), "utf8");
+  } catch {
+    textClose = -1;
+  }
+  if (original[bodyStart] !== 0x7b || rawBraceClose(original, bodyStart) !== bodyEnd - 1 || textClose !== bodyEnd - 1) {
+    throw new BoundRefusal("brace_scan_mismatch", "a raw brace count from the body's opening brace does not end at the recorded end of the body");
+  }
+  const lineStart = statementStart === 0 ? 0 : original.lastIndexOf(0x0a, statementStart - 1) + 1;
+  let indentEnd = lineStart;
+  while (indentEnd < statementStart && (original[indentEnd] === 0x20 || original[indentEnd] === 0x09)) {
+    indentEnd += 1;
+  }
+  const indent = original.subarray(lineStart, indentEnd).toString("latin1");
+  const replacement = Buffer.from(`{\n${indent}  ${replacementBody.trim()}\n${indent}}`, "utf8");
+  const mutated = Buffer.concat([original.subarray(0, bodyStart), replacement, original.subarray(bodyEnd)]);
+  return { original, mutated, replacementBytes: replacement.length };
+}
+
+function mutateBound(writeAbs, copy, binding, replacementBody) {
+  // Only this script's own copy may be written: a real file under the temp folder made for this run,
+  // never the checkout file and never a link that leads back to it.
+  const realWrite = realpathSync(writeAbs);
+  if (
+    !lstatSync(writeAbs).isFile()
+    || !isInsideDir(realpathSync(copy.tmpRoot), realWrite)
+    || realWrite === realpathSync(copy.checkoutAbs)
+  ) {
+    throw new BoundRefusal("write_outside_copy", "the file to be changed is not inside this run's own temp folder");
+  }
+  const plan = planBoundMutation(readFileSync(writeAbs), binding, replacementBody);
+  writeFileSync(writeAbs, plan.mutated);
+  return plan;
+}
+
+function boundSummary(binding, plan) {
+  return {
+    fileSha256: binding.fileSha256,
+    mutatedSha256: sha256Hex(plan.mutated),
+    changedBytes: { start: binding.bodyStart, end: binding.bodyEnd },
+    replacementBytes: plan.replacementBytes,
+    targets: binding.targets
+  };
+}
+
+// One hunk is enough: a bound mutation replaces a single run of bytes.
+function unifiedDiff(relPath, before, after) {
+  const split = text => {
+    const lines = text.split("\n");
+    if (lines[lines.length - 1] === "") {
+      lines.pop();
+    } else {
+      lines[lines.length - 1] += "\n\\ No newline at end of file";
+    }
+    return lines;
+  };
+  const a = split(before);
+  const b = split(after);
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) {
+    head += 1;
+  }
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) {
+    tail += 1;
+  }
+  if (head === a.length && head === b.length) {
+    return "";
+  }
+  const from = Math.max(0, head - DIFF_CONTEXT_LINES);
+  const leading = a.slice(from, head);
+  const removed = a.slice(head, a.length - tail);
+  const added = b.slice(head, b.length - tail);
+  const trailing = a.slice(a.length - tail, a.length - tail + Math.min(tail, DIFF_CONTEXT_LINES));
+  const oldCount = leading.length + removed.length + trailing.length;
+  const newCount = leading.length + added.length + trailing.length;
+  const rel = relPath.split(path.sep).join("/");
+  return [
+    `--- a/${rel}`,
+    `+++ b/${rel}`,
+    `@@ -${oldCount === 0 ? from : from + 1},${oldCount} +${newCount === 0 ? from : from + 1},${newCount} @@`,
+    ...leading.map(line => ` ${line}`),
+    ...removed.map(line => `-${line}`),
+    ...added.map(line => `+${line}`),
+    ...trailing.map(line => ` ${line}`),
+    ""
+  ].join("\n");
 }
 
 function firstExisting(paths) {
@@ -2330,9 +2557,9 @@ function classify({ baseline, mutant, testRel, repoRoot }) {
   };
 }
 
-function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const root = path.resolve(args.root);
+// binding === null → today's name search. Otherwise the caller has already checked the binding against
+// the checkout file (boundAttempt) and `root` is the real path of the source root.
+function runProof(args, root, binding) {
   const testAbs = resolveInside(root, args.test);
   const targetAbs = resolveInside(root, args.target);
   const testRel = path.relative(root, testAbs);
@@ -2358,10 +2585,15 @@ function main() {
   }
   try {
     const baseline = runTest({ runner, repoRoot: baselineCopy.repoRoot, monoRoot: baselineCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: baselineCopy.aliases });
-    mutateMethod(path.join(mutantCopy.repoRoot, targetRel), args.method, replacementBody);
+    let boundPlan = null;
+    if (binding) {
+      boundPlan = mutateBound(path.join(mutantCopy.repoRoot, targetRel), { tmpRoot: mutantCopy.tmpRoot, checkoutAbs: targetAbs }, binding, replacementBody);
+    } else {
+      mutateMethod(path.join(mutantCopy.repoRoot, targetRel), args.method, replacementBody);
+    }
     const mutant = runTest({ runner, repoRoot: mutantCopy.repoRoot, monoRoot: mutantCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: mutantCopy.aliases });
     const verdict = classify({ baseline, mutant, testRel, repoRoot: mutantCopy.repoRoot });
-    const output = {
+    return {
       ...verdict,
       runner,
       replacementMode: args.replacementMode,
@@ -2384,24 +2616,140 @@ function main() {
         assertionFailure: isAssertionFailure(mutant, testRel, mutantCopy.repoRoot, baseline),
         failureSummary: failureSummary(mutant)
       },
-      medianProofMs: Math.round((baseline.elapsedMs + mutant.elapsedMs) / 2)
+      medianProofMs: Math.round((baseline.elapsedMs + mutant.elapsedMs) / 2),
+      ...(boundPlan ? { bound: boundSummary(binding, boundPlan) } : {})
     };
-    if (args.json) {
-      process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    } else {
-      process.stdout.write(`${output.status}: ${output.reason}\n`);
-      process.stdout.write(`baseline=${baseline.exitCode} mutant=${mutant.exitCode} median_ms=${output.medianProofMs}\n`);
-    }
-    process.exitCode = output.status === "unrunnable" ? 2 : 0;
   } finally {
     rmSync(baselineCopy.tmpRoot, { recursive: true, force: true });
     rmSync(mutantCopy.tmpRoot, { recursive: true, force: true });
   }
 }
 
+// Everything a bound run does before a copy exists. Each check reads; none writes.
+function boundAttempt(args, binding, givenRoot) {
+  // A linked source root is refused, and the root is resolved to its real path before any copy: copying a
+  // linked root yields a link back to the checkout, and the "copy" would be the checkout itself.
+  if (lstatSync(givenRoot).isSymbolicLink()) {
+    throw new BoundRefusal("symlinked_target", "the source root is a symbolic link");
+  }
+  const root = realpathSync(givenRoot);
+  const targetAbs = insideOrRefuse(root, args.target, "--target");
+  if (realpathSync(targetAbs) !== targetAbs) {
+    throw new BoundRefusal("symlinked_target", `${args.target} is reached through a symbolic link`);
+  }
+  let replacementBody;
+  try {
+    replacementBody = buildReplacementBody(args.replacement, args.replacementMode);
+  } catch (error) {
+    throw new BoundRefusal("invalid_binding", error instanceof Error ? error.message : String(error));
+  }
+  const plan = planBoundMutation(readFileSync(targetAbs), binding, replacementBody);
+  if (!args.preview) {
+    insideOrRefuse(root, args.test, "--test");
+    return runProof(args, root, binding);
+  }
+  const targetRel = path.relative(root, targetAbs);
+  return {
+    status: "preview",
+    proven: false,
+    reason: "preview only: no test was run and nothing was written",
+    replacementMode: args.replacementMode,
+    target: targetRel,
+    method: args.method,
+    bound: boundSummary(binding, plan),
+    diff: unifiedDiff(targetRel, plan.original.toString("utf8"), plan.mutated.toString("utf8"))
+  };
+}
+
+// On the bound path a path the caller named wrongly is a refusal like any other: named, and JSON when asked for.
+function insideOrRefuse(root, relOrAbs, flag) {
+  try {
+    return resolveInside(root, relOrAbs);
+  } catch {
+    throw new BoundRefusal("invalid_binding", `${flag} ${relOrAbs} is outside the source root`);
+  }
+}
+
+function runBound(args, binding) {
+  const givenRoot = path.resolve(args.root);
+  if (!existsSync(givenRoot)) {
+    throw new BoundRefusal("invalid_binding", "--root does not exist");
+  }
+  const checkoutAbs = insideOrRefuse(givenRoot, args.target, "--target");
+  // Read before anything else: "the checkout is unchanged" is measured against this hash.
+  let before = null;
+  try {
+    before = sha256Hex(readFileSync(checkoutAbs));
+  } catch {
+    throw new BoundRefusal("invalid_binding", `--target ${args.target} is not a file that can be read in the source root`);
+  }
+  let output = null;
+  let failure = null;
+  try {
+    output = boundAttempt(args, binding, givenRoot);
+  } catch (error) {
+    failure = error;
+  }
+  // After every attempt, including errors, the checkout file is hashed again.
+  let after = null;
+  try {
+    after = sha256Hex(readFileSync(checkoutAbs));
+  } catch {
+    after = null;
+  }
+  if (after !== before) {
+    throw new BoundRefusal("checkout_modified", `${args.target} changed in the source checkout during the run`);
+  }
+  if (failure) {
+    throw failure;
+  }
+  return { ...output, checkout: { sha256: before, unchanged: true } };
+}
+
+// The name search's source root. A root that is itself a symbolic link is resolved to its real path before
+// any copy: copying a linked root yields a link back to the checkout, and the mutation would be written
+// into the user's own file. Every other root, one under a linked parent folder included, is used as given.
+function nameSearchRoot(givenRoot) {
+  let linked = false;
+  try {
+    linked = lstatSync(givenRoot).isSymbolicLink();
+  } catch {
+    linked = false;
+  }
+  return linked ? realpathSync(givenRoot) : givenRoot;
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const binding = parseBinding(args);
+  if (args.preview && !binding) {
+    throw new BoundRefusal("preview_requires_bound", "--preview needs the --bound-* arguments; the name search has no preview");
+  }
+  const output = binding ? runBound(args, binding) : runProof(args, nameSearchRoot(path.resolve(args.root)), null);
+  if (args.json) {
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+  } else if (output.status === "preview") {
+    process.stdout.write(output.diff);
+  } else {
+    process.stdout.write(`${output.status}: ${output.reason}\n`);
+    process.stdout.write(`baseline=${output.baseline.exitCode} mutant=${output.mutant.exitCode} median_ms=${output.medianProofMs}\n`);
+  }
+  process.exitCode = output.status === "unrunnable" ? 2 : 0;
+}
+
 try {
   main();
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${usage()}\n`);
-  process.exitCode = 1;
+  if (error instanceof BoundRefusal) {
+    // A named refusal is a result, not a crash: JSON on stdout when asked for, exit code 2.
+    if (process.argv.includes("--json")) {
+      process.stdout.write(`${JSON.stringify({ status: "refused", proven: false, refusal: error.code, reason: error.message }, null, 2)}\n`);
+    } else {
+      process.stderr.write(`${error.message}\n`);
+    }
+    process.exitCode = 2;
+  } else {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${usage()}\n`);
+    process.exitCode = 1;
+  }
 }

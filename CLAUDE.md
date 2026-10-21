@@ -10,6 +10,19 @@ Two independent products live here (they share no code):
 
 2. **OrangePro MCP server** (`src/index.ts` + top-level `src/*.ts`) — a Model Context Protocol server that exposes OrangePro's hosted agent platform and QA intelligence APIs as MCP tools over stdio. Clients (Claude Desktop, Claude Code, etc.) connect and call tools to manage OrangePro agents, resolve stories against a Knowledge Graph, and run QA analytics (coverage gaps, PR risk, release readiness, bug-to-test conversion, test generation). Requires a hosted backend; not part of the npm package.
 
+## What counts as a behavior (Local Proof Kit)
+
+The kit does not try to produce a test for every function. It identifies consequential, observable behaviors and the integration scenarios a change affects, then closes selected test gaps with a reviewable, execution-backed test patch. When changing what is seen, counted, ranked or proven, hold to these:
+
+- **A symbol is not a behavior.** Being visible to the analyzer does not make a function count. It must be public and must compute, compare or decide something.
+- **Trivial plumbing stays in the graph, uncounted, with a reason.** A body that is empty, returns or stores a value unchanged, or passes its own arguments straight to a counted function is plumbing. So is code its own authors document as private. When it is unclear, it counts.
+- **Judge what the body does, not what it is called.** Never add a rule for one repository or one library.
+- **Keep helpers in the graph.** A change inside an uncounted helper is followed to the public behavior that uses it. If it cannot be followed, report it as unknown, never as low risk.
+- **Bind the exact change.** Changed lines map to one function and its exact bytes; a mutation changes that function and nothing else.
+- **Credit a test only when running it shows it would catch a break.**
+
+The graph decides what deserves attention. Execution establishes whether a test protects it. The patch makes that protection usable.
+
 ## Commands
 
 ```bash

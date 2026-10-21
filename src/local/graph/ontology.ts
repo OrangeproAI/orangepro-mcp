@@ -373,6 +373,17 @@ export interface AnalysisMeta {
   /** Directories full of non-evidence files — candidates for .orangeproignore (speed/de-noise). */
   exclude_suggestions?: ExcludeSuggestion[];
   /**
+   * TS/JS export shapes the extractor recognised but deliberately did not turn
+   * into symbols (a helper-defined getter, a run-time property name, an
+   * unfollowed re-export …), per file. Present only when non-empty, so a shape
+   * left out is disclosed rather than silently missing from the denominator.
+   */
+  not_supported?: {
+    total: number;
+    by_code: Record<string, number>;
+    files: Record<string, Array<{ code: string; owner?: string; name?: string; start_line: number; end_line: number }>>;
+  };
+  /**
    * tree-sitter extraction status (Java/Python/Go). `loaded` grammars extracted via
    * AST; `failed` grammars (load attempted + errored) fell back to the shallow regex
    * path; `downgraded` is the subset of `failed` actually present in the repo — its

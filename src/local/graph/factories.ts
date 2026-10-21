@@ -1,5 +1,5 @@
 import { stableId } from "../util/ids.js";
-import { BOILERPLATE_REASON } from "../analyze/boilerplate.js";
+import { BOILERPLATE_REASON, TRIVIAL_BODY_REASON } from "../analyze/boilerplate.js";
 import { GENERATED_CODE_REASON, NON_PRODUCT_REASON } from "../analyze/classify.js";
 import {
   BEHAVIOR_KINDS,
@@ -248,7 +248,7 @@ export function denominatorComposition(graph: Pick<LocalGraph, "nodes">): Denomi
       else comp.unattributed++;
     } else if (n.behavior_source === "test_inferred") {
       comp.excluded_test_inferred++;
-    } else if (n.denominator_reason === BOILERPLATE_REASON) {
+    } else if (n.denominator_reason === BOILERPLATE_REASON || n.denominator_reason === TRIVIAL_BODY_REASON) {
       // Recomputed from nodes (not persisted analysis) so the report disclosure
       // can never disagree with the graph it is paired with.
       comp.excluded_boilerplate++;

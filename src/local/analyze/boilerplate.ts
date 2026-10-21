@@ -13,6 +13,13 @@
 
 export const BOILERPLATE_REASON = "Trivial accessor/object method — excluded from behavior denominator.";
 
+// TS/JS export gate (analyzer.ts): body-aware, and applied only to functions
+// that would otherwise be NEWLY counted, so nothing counted before moves.
+// A trivial body is disclosed together with the accessors above.
+export const TRIVIAL_BODY_REASON =
+  "Trivial body (empty, returns or stores a value unchanged, or passes its own arguments straight to a counted function) — kept for grounding, excluded from the behavior denominator.";
+export const DOCUMENTED_PRIVATE_REASON = "Documented private/internal by its own JSDoc — kept for grounding, excluded from the behavior denominator.";
+
 /**
  * True iff `name` is a trivial accessor/object-protocol member for `language`.
  * Only ever applied to function/method symbols (classes are never boilerplate).

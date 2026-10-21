@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import {
   AnalysisMeta,
   CandidateFlowMeta,
@@ -122,6 +123,18 @@ import { buildArtifactIdentity, PROOF_ORACLE_VERSION } from "./provenance.js";
 import { tryScopedReprove } from "./reprove/scoped.js";
 import { resolveContained, toWorkspaceRel } from "./reprove/paths.js";
 import { hashBuffer } from "./util/hash.js";
+import {
+  describeTarget,
+  mutationRouteFor,
+  sha256Hex,
+  TARGET_RECORD_VERSION,
+  type ByteSpan,
+  type DescribeResult,
+  type MutationRoute,
+  type TargetDescription,
+  type TargetRecord
+} from "./contracts/targetRecord.js";
+import { verifyTargetRecord } from "./changedTargets.js";
 import { applyAiLinks, generateAiLinks, summarizeAiLinks, type AiLinkedSummary, type AiLinksResult } from "./aiGraph/links.js";
 import { applyAiFlows, generateAiFlows, isValidStoredCandidateFlowMeta, revalidateCandidateFlowMeta, type AiFlowsResult } from "./flows/llmFlowDiscovery.js";
 import { summarizeCorpusScope, type CorpusScopeSummary } from "./corpusScope.js";
@@ -258,12 +271,74 @@ export interface DynamicProofOptions {
   jest_config?: string;
   test_env?: string[];
   run_id?: string;
+  /**
+   * TS/JS, bound targets only: return the diff the mutation would make and stop.
+   * No test is run and no ledger record is written; `test_path` is not needed.
+   */
+  preview?: boolean;
+  /**
+   * A changed-target record for this symbol (TS/JS). A claim, never trusted: its
+   * identity is rebuilt from the file, git and the graph and compared field by
+   * field, and any difference refuses the proof.
+   */
+  target_record?: TargetRecord;
+}
+
+/** Why a proof was refused without a verdict. Named, so a caller can branch on it and JSON can carry it. */
+export const PROOF_REFUSAL_CODES = [
+  "unsupported_shape",
+  "no_block_body",
+  "preview_requires_bound",
+  "stale_record",
+  "missing_manifest_hash",
+  "not_utf8",
+  "line_rule_mismatch",
+  "stale_hash",
+  "prefix_mismatch",
+  "brace_scan_mismatch",
+  "invalid_binding",
+  "binding_not_confirmed",
+  "write_outside_copy",
+  "symlinked_target",
+  "checkout_modified"
+] as const;
+export type ProofRefusalCode = (typeof PROOF_REFUSAL_CODES)[number];
+
+/**
+ * A named refusal. Nothing was credited, no ledger record is written, and nothing
+ * falls back to another mutator.
+ */
+export class ProofRefusalError extends Error {
+  readonly code: ProofRefusalCode;
+  constructor(code: ProofRefusalCode, detail: string) {
+    super(`prove refused (${code}): ${detail}`);
+    this.name = "ProofRefusalError";
+    this.code = code;
+  }
+}
+
+/** What `preview: true` returns instead of a proof: the diff only. */
+export interface DynamicProofPreview {
+  preview: true;
+  target_symbol: string;
+  /** Workspace-relative target file. */
+  target: string;
+  mutation_route: "bound";
+  /** Unified diff of the mutated file against the checkout file. Nothing was written. */
+  diff: string;
+  file_sha256: string;
+  mutated_sha256: string;
+  /** Raw bytes of the checkout file the mutation replaces: the function body, braces included. */
+  changed_bytes: ByteSpan;
+  checkout_unchanged: true;
 }
 
 export interface DynamicProofOracleSummary {
   status: string;
   proven: boolean;
   reason?: string;
+  /** Present only when the function was changed by its exact position; absent for the name search. */
+  mutation_route?: "bound";
   /** Optional language-runner refusal class; absent for legacy TS/Go/Java spikes. */
   category?: "environment_unavailable" | "collection_error" | "project_boundary" | "mutation_unsupported";
   runner?: string;
@@ -307,7 +382,7 @@ export interface ProveLoopSetupCommand {
   timeout_ms?: number;
 }
 
-export interface ProveLoopOptions extends DynamicProofOptions {
+export interface ProveLoopOptions extends Omit<DynamicProofOptions, "preview"> {
   setup_commands?: ProveLoopSetupCommand[];
   setup_timeout_ms?: number;
 }
@@ -821,6 +896,234 @@ function assertTargetFileFresh(sourceRoot: string, targetRel: string, graph: Loc
       `prove: target file ${targetRel} changed since analyze; rerun \`opro analyze\` before proving so the proof binds to the current code.`
     );
   }
+}
+
+interface TsJsProofRoute {
+  /** null → the file does not show the symbol as a function: today's name search decides, as before. */
+  route: MutationRoute | null;
+  described: DescribeResult | null;
+}
+
+/**
+ * Which mutator may touch a TS/JS target. Decided by re-parsing the file as it is on
+ * disk now — never from a flag on the graph node and never from the caller.
+ */
+function routeTsJsProofTarget(targetAbs: string, symbolName: string): TsJsProofRoute {
+  if (!existsSync(targetAbs)) return { route: null, described: null };
+  const bytes = readFileSync(targetAbs);
+  const described = describeTarget(bytes, symbolName);
+  if (described.ok) return { route: described.target.mutation_route, described };
+  // `not_utf8` and `line_rule_mismatch` are decided before the parse. The route still has
+  // to be known: only the bound and unsupported shapes refuse on them, and a symbol the
+  // name search handles keeps today's behaviour. A name the file exports only as a
+  // colliding `name: function` property has no symbol and is `unsupported_shape` here too.
+  return { route: mutationRouteFor(bytes, symbolName), described };
+}
+
+/** The spike's binding arguments for a bound target. Offsets are raw bytes, ends exclusive. */
+function boundMutationArgs(target: TargetDescription, body: ByteSpan, targets: string[]): string[] {
+  return [
+    "--bound-file-sha256",
+    target.file_sha256,
+    "--bound-statement-start",
+    String(target.statement.bytes.start),
+    "--bound-function-start",
+    String(target.function.bytes.start),
+    "--bound-body-start",
+    String(body.start),
+    "--bound-body-end",
+    String(body.end),
+    ...targets.flatMap((name) => ["--bound-target", name])
+  ];
+}
+
+/**
+ * Run the spike for a bound target. A named refusal from the script becomes a
+ * ProofRefusalError; after every attempt, including errors, the checkout file is
+ * hashed again and a difference fails the run as `checkout_modified`. Any other
+ * answer has to carry the script's own `bound` block for the file hash and body
+ * span that were sent: a runner that does not know the binding arguments falls
+ * back to its name search, and its result must not be credited as bound.
+ */
+function runBoundSpike(
+  runner: DynamicProofRunner,
+  args: string[],
+  sourceRoot: string,
+  targetAbs: string,
+  targetRel: string,
+  fileSha256: string,
+  body: ByteSpan
+): { run: ReturnType<DynamicProofRunner>; oracle: DynamicProofOracleSummary } {
+  let run: ReturnType<DynamicProofRunner>;
+  let oracle: DynamicProofOracleSummary;
+  try {
+    run = runner(args, { cwd: sourceRoot });
+    oracle = parseDynamicProofJson(run.stdout, run.stderr);
+  } finally {
+    if (!existsSync(targetAbs) || sha256Hex(readFileSync(targetAbs)) !== fileSha256) {
+      throw new ProofRefusalError("checkout_modified", `${targetRel} changed in the source checkout during the run.`);
+    }
+  }
+  if (oracle.status === "refused") {
+    const code = (oracle as { refusal?: unknown }).refusal;
+    const detail = redactSecrets(oracle.reason ?? "").replace(/^bound mutation refused \([a-z_]+\): /, "");
+    if (typeof code !== "string" || !(PROOF_REFUSAL_CODES as readonly string[]).includes(code)) {
+      throw new Error(`Dynamic proof runner returned an unnamed refusal: ${detail}`);
+    }
+    throw new ProofRefusalError(code as ProofRefusalCode, detail);
+  }
+  const confirmed = (oracle as { bound?: { fileSha256?: unknown; changedBytes?: { start?: unknown; end?: unknown } } }).bound;
+  if (confirmed?.fileSha256 !== fileSha256 || confirmed.changedBytes?.start !== body.start || confirmed.changedBytes?.end !== body.end) {
+    throw new ProofRefusalError(
+      "binding_not_confirmed",
+      `the proof runner did not confirm that it changed ${targetRel} at the recorded position (file hash and body span); its result is not credited.`
+    );
+  }
+  return { run, oracle };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// The identity fields `describeTarget` rebuilds from the file alone.
+const RECORD_DESCRIPTION_FIELDS = [
+  "name",
+  "seen_by",
+  "shape_form",
+  "fn_kind",
+  "owner",
+  "property",
+  "owner_binding",
+  "targets",
+  "aliases",
+  "statement",
+  "function",
+  "body",
+  "file_sha256",
+  "function_sha256",
+  "mutation_route"
+] as const satisfies readonly (keyof TargetDescription)[];
+// The identity fields that need git or the graph as well.
+const RECORD_CONTEXT_FIELDS = ["merged_commit", "package_root", "file", "symbol_id", "via_helper"] as const;
+
+interface TargetRecordContext {
+  /** Workspace root (where `.orangepro/` lives). */
+  root: string;
+  graph: LocalGraph;
+  sourceRoot: string;
+  /** Graph id of the symbol being proved. */
+  target: string;
+  /** Scan-root-relative target file. */
+  targetRel: string;
+  symbolName: string;
+  described: DescribeResult | null;
+}
+
+/**
+ * Repo-relative directory of the nearest `package.json` at or above the file, as the
+ * commit has it (`""` = the repository root, or none): the rule a record is written with.
+ */
+function packageRootInRepo(git: (args: string[]) => string | null, commit: string, fileInRepo: string): string {
+  let dir = fileInRepo;
+  do {
+    dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+    if (git(["cat-file", "-e", `${commit}:${dir ? `${dir}/` : ""}package.json`]) !== null) return dir;
+  } while (dir !== "");
+  return "";
+}
+
+/**
+ * The helper half of an `affected_through` record: the helper's span and hash are
+ * rebuilt from its file, and the link path (helper first, target last, one or two
+ * steps) must be made of hard CALLS edges that are in the graph.
+ */
+function viaHelperHolds(via: unknown, ctx: TargetRecordContext): boolean {
+  if (!isPlainRecord(via)) return false;
+  if (Object.keys(via).some((key) => !["symbol_id", "function", "function_sha256", "path"].includes(key))) return false;
+  const path = via.path;
+  if (typeof via.symbol_id !== "string" || !Array.isArray(path) || path.some((id) => typeof id !== "string")) return false;
+  const match = /^sym:(.+)#([^#]+)$/.exec(via.symbol_id);
+  if (!match) return false;
+  let helperAbs: string;
+  try {
+    helperAbs = resolveContained(ctx.sourceRoot, match[1]!);
+  } catch {
+    return false;
+  }
+  if (!existsSync(helperAbs)) return false;
+  const helper = describeTarget(readFileSync(helperAbs), match[2]!);
+  if (!helper.ok) return false;
+  if (!isDeepStrictEqual(via.function, helper.target.function) || via.function_sha256 !== helper.target.function_sha256) return false;
+  if (path.length < 2 || path.length > 3 || path[0] !== via.symbol_id || path[path.length - 1] !== ctx.target) return false;
+  const hardCalls = new Set(
+    ctx.graph.edges
+      .filter((edge) => edge.relationship_type === "CALLS" && edge.evidence_strength === "hard")
+      .map((edge) => `${edge.from_external_id}\u0000${edge.to_external_id}`)
+  );
+  return path.slice(1).every((caller, index) => hardCalls.has(`${caller}\u0000${path[index]}`));
+}
+
+/**
+ * The selection half of a record (changed blocks, base commit, reason, rank,
+ * uncertainty) is rebuilt from git and the graph by the changed-targets module,
+ * which also re-derives the identity. Returns a sentence saying what differs, or
+ * null when the record is what git and the graph give now. A proof run does not
+ * require a clean tree: every file the record depends on is still compared with
+ * the commit.
+ */
+function selectionDifference(record: TargetRecord, ctx: TargetRecordContext): string | null {
+  const check = verifyTargetRecord(ctx.root, record, { cleanTree: false });
+  return check.ok ? null : check.message;
+}
+
+/**
+ * A record handed to the proof operation is a claim. Its identity is rebuilt from the
+ * file, git and the graph, and any difference refuses the proof as `stale_record`:
+ * a record made at another commit, for another file, or for bytes that have moved.
+ */
+function assertTargetRecordCurrent(record: unknown, ctx: TargetRecordContext): void {
+  const stale = (detail: string): never => {
+    throw new ProofRefusalError("stale_record", detail);
+  };
+  if (!isPlainRecord(record) || record.version !== TARGET_RECORD_VERSION || !isPlainRecord(record.identity) || !isPlainRecord(record.selection)) {
+    return stale(`not a target record of version ${TARGET_RECORD_VERSION}.`);
+  }
+  const identity = record.identity;
+  const git = gitRunner(ctx.sourceRoot);
+  const head = git(["rev-parse", "HEAD"])?.trim() ?? null;
+  const gitPrefix = git(["rev-parse", "--show-prefix"])?.trim() ?? null;
+  const graphCommit = ctx.graph.manifest.git?.commit ?? null;
+  if (typeof identity.merged_commit !== "string" || !/^[0-9a-f]{40,64}$/.test(identity.merged_commit)) {
+    return stale("the record's merged commit is not a full commit id.");
+  }
+  if (head === null || gitPrefix === null || identity.merged_commit !== head) {
+    return stale(`the record was made at commit ${identity.merged_commit}; HEAD of the source checkout is ${head ?? "unknown"}.`);
+  }
+  if (identity.merged_commit !== graphCommit) {
+    return stale(`the record was made at commit ${identity.merged_commit}; the graph was built at ${graphCommit ?? "an unknown commit"}. Rerun \`opro analyze\`.`);
+  }
+  const described = ctx.described;
+  if (!described?.ok) {
+    if (described?.refused === "not_utf8" || described?.refused === "line_rule_mismatch") {
+      throw new ProofRefusalError(described.refused, `${ctx.targetRel} cannot be bound to exact bytes.`);
+    }
+    return stale(`${ctx.symbolName} is not a function in ${ctx.targetRel} as it is now.`);
+  }
+  const now = described.target;
+  const differs: string[] = RECORD_DESCRIPTION_FIELDS.filter((field) => !isDeepStrictEqual(identity[field], now[field]));
+  if (identity.file !== `${gitPrefix}${ctx.targetRel}`) differs.push("file");
+  if (identity.symbol_id !== ctx.target) differs.push("symbol_id");
+  if (identity.package_root !== packageRootInRepo(git, head, `${gitPrefix}${ctx.targetRel}`)) differs.push("package_root");
+  if (identity.via_helper !== undefined && !viaHelperHolds(identity.via_helper, ctx)) differs.push("via_helper");
+  // A field this code cannot rebuild is a claim it cannot check.
+  const known: readonly string[] = [...RECORD_DESCRIPTION_FIELDS, ...RECORD_CONTEXT_FIELDS];
+  differs.push(...Object.keys(identity).filter((key) => !known.includes(key)));
+  if (differs.length > 0) {
+    return stale(`the record differs from the file, git or the graph in: ${differs.join(", ")}.`);
+  }
+  const selectionDiffers = selectionDifference(record as unknown as TargetRecord, ctx);
+  if (selectionDiffers !== null) return stale(selectionDiffers);
 }
 
 /** Parse a positive-int env override; undefined falls back to the analyzer default. */
@@ -1606,7 +1909,101 @@ function pythonModuleRoot(sourceRoot: string, targetRel: string, testRel: string
   return testAbs === found || testAbs.startsWith(found + sep) ? found : stop;
 }
 
-export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: OperationDeps = defaultDeps()): DynamicProofResult {
+interface TsJsProofPlan {
+  targetAbs: string;
+  /** Present only for a function changed by its exact position. */
+  bound?: { target: TargetDescription; body: ByteSpan; args: string[] };
+}
+
+interface ProofPreflight {
+  sourceRoot: string;
+  symbolTarget: ReturnType<typeof symbolTargetParts>;
+  /** TS/JS targets only. */
+  tsjs?: TsJsProofPlan;
+}
+
+/**
+ * Everything `opDynamicProof` checks before any runner starts, in its order: the source
+ * and target the caller named, the manifest hash a record needs, the file's freshness,
+ * and for a TS/JS target the mutation route, the record and the binding. The loop wrapper
+ * runs the same checks before its setup commands, so a refusal that is already certain
+ * (an unsupported shape, a stale record) comes before anything touches the checkout.
+ */
+function proofPreflight(root: string, opts: DynamicProofOptions, graph: LocalGraph, target: string, language: string): ProofPreflight {
+  const sourceRoot = resolve(opts.source ?? root);
+  assertProofSourceMatchesGraph(sourceRoot, graph);
+  const symbolTarget = symbolTargetParts(target);
+  const providedTargetRel = opts.target_path ? toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.target_path)) : undefined;
+  assertProofTargetMatchesSymbol({ ...opts, target_path: providedTargetRel }, symbolTarget);
+  const targetRel = symbolTarget.file;
+  // Without a record a missing manifest hash is skipped, as before. A record binds the
+  // proof to an analyzed revision, so on that path the hash has to be there.
+  if (opts.target_record !== undefined && graph.manifest.files[targetRel]?.hash === undefined) {
+    throw new ProofRefusalError("missing_manifest_hash", `the graph has no recorded hash for ${targetRel}; rerun \`opro analyze\` before proving from a record.`);
+  }
+  assertTargetFileFresh(sourceRoot, targetRel, graph);
+  if (language !== "typescript") {
+    if (opts.preview) {
+      throw new ProofRefusalError("preview_requires_bound", `a preview exists only for a JavaScript/TypeScript function changed by its exact position; ${target} is a ${language} target.`);
+    }
+    if (opts.target_record !== undefined) {
+      throw new ProofRefusalError("stale_record", `a target record can only be checked for a JavaScript/TypeScript target; ${target} is a ${language} target.`);
+    }
+    return { sourceRoot, symbolTarget };
+  }
+  // Which mutator may touch this function is decided here, by re-parsing the file —
+  // never from a flag on the graph node and never from the caller. `name_search`, and
+  // a symbol the file does not show as a function, take today's path unchanged.
+  const targetAbs = resolveContained(sourceRoot, targetRel);
+  const symbolName = target.slice(target.lastIndexOf("#") + 1);
+  const { route, described } = routeTsJsProofTarget(targetAbs, symbolName);
+  if (opts.target_record !== undefined) {
+    assertTargetRecordCurrent(opts.target_record, { root, graph, sourceRoot, target, targetRel, symbolName, described });
+  }
+  if (route === "unsupported_shape") {
+    throw new ProofRefusalError(
+      "unsupported_shape",
+      `${symbolName} in ${targetRel} is an object-literal \`name: function\` property, a method with a quoted key, an unnamed default export, or a newly visible function the search by name does not find at its own definition. The proof runner cannot change it by position yet, and a search by name could change a different function.`
+    );
+  }
+  if (opts.preview && route !== "bound") {
+    throw new ProofRefusalError(
+      "preview_requires_bound",
+      `a preview exists only for a prototype or exported-object method, which is changed by its exact position; ${symbolName} in ${targetRel} is not one.`
+    );
+  }
+  if (route !== "bound") return { sourceRoot, symbolTarget, tsjs: { targetAbs } };
+  // From here a failure is final: nothing falls back to the name search.
+  if (!described?.ok) {
+    const refused = described?.refused === "not_utf8" ? "not_utf8" : "line_rule_mismatch";
+    throw new ProofRefusalError(
+      refused,
+      refused === "not_utf8"
+        ? `${targetRel} is not valid UTF-8, so ${symbolName} cannot be bound to exact bytes.`
+        : `${targetRel} contains a lone carriage return, U+2028 or U+2029; git and the parser count its lines differently, so ${symbolName} cannot be bound to exact bytes.`
+    );
+  }
+  const { body, targets } = described.target;
+  if (!targets || targets.length === 0) {
+    throw new ProofRefusalError("invalid_binding", `no assignment target was found before ${symbolName} in ${targetRel}.`);
+  }
+  if (!body) {
+    throw new ProofRefusalError("no_block_body", `${symbolName} in ${targetRel} is an arrow function without a body in braces; there is no block to replace.`);
+  }
+  return {
+    sourceRoot,
+    symbolTarget,
+    tsjs: { targetAbs, bound: { target: described.target, body: body.bytes, args: boundMutationArgs(described.target, body.bytes, targets) } }
+  };
+}
+
+export function opDynamicProof(root: string, opts: DynamicProofOptions & { preview: true }, deps?: OperationDeps): DynamicProofPreview;
+export function opDynamicProof(root: string, opts: DynamicProofOptions & { preview?: false }, deps?: OperationDeps): DynamicProofResult;
+export function opDynamicProof(
+  root: string,
+  opts: DynamicProofOptions,
+  deps: OperationDeps = defaultDeps()
+): DynamicProofResult | DynamicProofPreview {
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
   const targetInput = opts.target_symbol ?? opts.target_id;
@@ -1618,19 +2015,15 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
   if (language !== "typescript" && language !== "go" && language !== "java" && language !== "python") {
     throw new Error(`prove currently supports JavaScript/TypeScript, Go, Java, and Python targets only; found ${language}.`);
   }
-  const sourceRoot = resolve(opts.source ?? root);
-  assertProofSourceMatchesGraph(sourceRoot, graph);
-  const symbolTarget = symbolTargetParts(target);
-  const providedTargetRel = opts.target_path ? toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.target_path)) : undefined;
-  assertProofTargetMatchesSymbol({ ...opts, target_path: providedTargetRel }, symbolTarget);
+  const { sourceRoot, symbolTarget, tsjs } = proofPreflight(root, opts, graph, target, language);
   const targetRel = symbolTarget.file;
   const method = symbolTarget.method;
-  assertTargetFileFresh(sourceRoot, targetRel, graph);
 
   // Per-language routing produces the spike args + a mapped oracle in the SAME
   // DynamicProofOracleSummary shape. Everything from `closed` onward (the trust gate,
   // the cert, appendLedgerRecord, the return summary) is language-agnostic and unchanged.
   let oracle: DynamicProofOracleSummary;
+  let mutationRoute: "bound" | undefined;
   let proofModuleRoot: string | undefined;
   let testRel: string;
   let replacementMode: string;
@@ -1769,9 +2162,13 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
       throw new Error(`Python proof runner exited ${run.exitCode}; no dynamic proof can be credited. ${redactSecrets(run.stderr).slice(0, 300)}`);
     }
   } else {
-    if (!opts.test_path) throw new Error("prove requires --test <path>.");
+    // Which mutator may touch this function was decided in the preflight, by re-parsing
+    // the file. `name_search`, and a symbol the file does not show as a function, take
+    // today's path unchanged (no `bound`).
+    const { targetAbs, bound } = tsjs as TsJsProofPlan;
+    if (!opts.preview && !opts.test_path) throw new Error("prove requires --test <path>.");
     if (opts.replacement === undefined) throw new Error("prove requires --replacement <sentinel>.");
-    testRel = toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.test_path));
+    testRel = opts.test_path ? toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.test_path)) : "";
     replacementMode = opts.replacement_mode ?? "return-json";
     runner = opts.runner ?? "auto";
     if (replacementMode !== "return-json" && replacementMode !== "promise-json") {
@@ -1782,6 +2179,40 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
     }
     if (runner !== "auto" && runner !== "vitest" && runner !== "jest" && runner !== "mocha") {
       throw new Error("prove --runner must be one of: auto, vitest, jest, mocha.");
+    }
+    if (opts.preview && bound) {
+      // The diff only: no test run, no ledger record.
+      const previewArgs = [
+        "--root",
+        sourceRoot,
+        "--target",
+        targetRel,
+        "--method",
+        method,
+        "--replacement",
+        opts.replacement,
+        "--replacement-mode",
+        replacementMode,
+        ...bound.args,
+        "--preview",
+        "--json"
+      ];
+      const shown = runBoundSpike(deps.dynamicProofRunner ?? defaultDynamicProofRunner, previewArgs, sourceRoot, targetAbs, targetRel, bound.target.file_sha256, bound.body)
+        .oracle as unknown as { status?: unknown; diff?: unknown; bound?: { mutatedSha256?: unknown } };
+      if (shown.status !== "preview" || typeof shown.diff !== "string" || typeof shown.bound?.mutatedSha256 !== "string") {
+        throw new Error("Dynamic proof runner did not return a preview.");
+      }
+      return {
+        preview: true,
+        target_symbol: target,
+        target: targetRel,
+        mutation_route: "bound",
+        diff: shown.diff,
+        file_sha256: bound.target.file_sha256,
+        mutated_sha256: shown.bound.mutatedSha256,
+        changed_bytes: { start: bound.body.start, end: bound.body.end },
+        checkout_unchanged: true
+      };
     }
     const args = [
       "--root",
@@ -1808,9 +2239,17 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
 
     const scriptPath = dynamicProofSpikePath();
     const startedAt = Date.now();
-    const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, { cwd: sourceRoot });
-    oracle = parseDynamicProofJson(run.stdout, run.stderr);
-    oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
+    if (bound) {
+      args.push(...bound.args);
+      const boundRun = runBoundSpike(deps.dynamicProofRunner ?? defaultDynamicProofRunner, args, sourceRoot, targetAbs, targetRel, bound.target.file_sha256, bound.body);
+      oracle = boundRun.oracle;
+      oracle.diagnostics = runnerProcessDiagnostics(boundRun.run, args, sourceRoot, scriptPath, startedAt, oracle);
+      mutationRoute = "bound";
+    } else {
+      const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, { cwd: sourceRoot });
+      oracle = parseDynamicProofJson(run.stdout, run.stderr);
+      oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
+    }
   }
   const closed = dynamicProofSucceeded(oracle);
   const baselineGreen = oracle.baseline?.exitCode === 0 && oracle.baseline?.timedOut !== true;
@@ -1856,6 +2295,7 @@ export function opDynamicProof(root: string, opts: DynamicProofOptions, deps: Op
       status: oracle.status,
       proven: oracle.proven,
       reason: oracle.reason,
+      ...(mutationRoute ? { mutation_route: mutationRoute } : {}),
       runner: oracle.runner,
       replacementMode: oracle.replacementMode,
       test: oracle.test,
@@ -1965,6 +2405,16 @@ export function opProveLoop(root: string, opts: ProveLoopOptions, deps: Operatio
   }
 
   const setupCommands = (opts.setup_commands ?? []).map((command, index) => validateSetupCommand(command, index));
+  // A named refusal that is already certain (an unsupported shape, a stale record) comes
+  // before setup touches the checkout. Anything else the proof would reject is still its
+  // own to report after setup, exactly as before. Without setup the proof checks at once.
+  if (setupCommands.length > 0) {
+    try {
+      proofPreflight(root, opts, graph, target, language);
+    } catch (error) {
+      if (error instanceof ProofRefusalError) throw error;
+    }
+  }
   const sourceRoot = resolve(opts.source ?? root);
   const setup = runProveLoopSetup(sourceRoot, setupCommands, opts.setup_timeout_ms);
   if (!setup.ok) {
@@ -1998,7 +2448,9 @@ export function opProveLoop(root: string, opts: ProveLoopOptions, deps: Operatio
       vitest_config: opts.vitest_config,
       jest_config: opts.jest_config,
       test_env: opts.test_env,
-      run_id: opts.run_id
+      run_id: opts.run_id,
+      // A record is a claim to be checked, never dropped on the way through.
+      ...(opts.target_record !== undefined ? { target_record: opts.target_record } : {})
     },
     deps
   );

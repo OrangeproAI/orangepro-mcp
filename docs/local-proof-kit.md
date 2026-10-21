@@ -61,6 +61,7 @@ opro jobs [<id>]                # list background jobs, or show one (status + ou
 opro explain <generated_test_id># which evidence anchors grounded a test
 opro update                     # incremental, non-destructive refresh
 opro changed --base main        # changed files + affected behaviors/tests
+opro changed-targets --base <sha> --merged <sha>   # read-only: map a merged change's lines to exact functions (JS/TS)
 opro export --out orangepro-evidence-pack.json
 opro analyze . --no-coverage-html # skip the behavior report HTML (it is written by default)
 opro export --format graph-html # write just the explorer (orangepro-graph.html)
@@ -245,6 +246,44 @@ presentation labels over the same statuses above; they change no classification,
 
 LLM, similarity inference, and static hard TESTED_BY/COVERS edges are candidate or
 associated signals until a dynamic targeted proof closes.
+
+### JavaScript and TypeScript: what is seen, and what is counted
+
+Besides `export function`, `export const … = () =>`, exported classes and
+`exports.name = function`, the analyzer sees five more ways of making a function public:
+
+| Way | Example | Symbol |
+|---|---|---|
+| Export list | `export { load, save as persist }` | `load`, `save` (alias `persist`) |
+| Prototype method | `Stack.prototype.push = function () {}` (with `Stack` exported) | `Stack.push` |
+| Exported-object method | `var api = module.exports = {}; api.fetch = function () {}` | `api.fetch` |
+| Object-literal export | `module.exports = { load, count() {}, first: function () {} }` | `load`, `count`, `first` |
+| Unnamed default export | `export default function () {}` | `default` |
+
+Seeing a function does not count it. A function made visible this way is counted as a
+behavior only when it is public (the same path, owner, name and public-entry rules as any
+other function; an entry file that hands a file out as `exports.name = require("./x")`
+makes that file public), is not documented `@private` / `@internal` by its own JSDoc, and
+does not have a trivial body. A trivial body is empty, returns or stores a value
+unchanged, or passes its own parameters straight to a counted function in the same file.
+Anything that computes, compares or decides counts; when it is unclear, it counts. What
+is not counted stays in the graph with `denominator_reason_code` `trivial_body` or
+`documented_private`. Functions that were already counted are never re-judged.
+
+Shapes the analyzer recognises but does not map are listed, per file, under
+`analysis.not_supported` in `graph.json` (for example a getter set up through a helper
+function, a property whose name is built at run time, a function attached to an exported
+function, or an unnamed `module.exports = function () {}`), and `opro analyze` prints
+one summary line for them. They are disclosed, not silently missing.
+
+`opro changed-targets --base <sha> --merged <sha>` maps the changed lines of a merged
+change to the exact functions they fall in, and to the counted functions that call a
+changed helper. Lines that belong to no function, or that cannot be followed to a counted
+function, are reported as `unknown` and mark the run incomplete: they are never reported
+as low risk. Each target is a record of the function's exact bytes and hashes. `opro prove
+--target-record <file>` re-derives the record from the file before trusting it, and for a
+prototype or exported-object method changes the function by its exact position rather
+than by searching for its name; `--preview` shows that change without running a test.
 
 ### Dynamic proof language profiles
 

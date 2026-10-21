@@ -22,6 +22,7 @@ import { globToRegExp, loadRiskConfig } from "./score/riskConfig.js";
 import { resolveProviderConfig } from "./localConfig.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
 import { resolveContained } from "./reprove/paths.js";
+import { mutationRouteFor } from "./contracts/targetRecord.js";
 import { buildRtm } from "./rtm.js";
 import { loadLedger, proofEdgesFor, targetLanguage } from "./ledger.js";
 import { reportProgress } from "./util/progress.js";
@@ -194,6 +195,9 @@ function matchesProvableLanguageShape(node: GraphNode, opts?: { allowGoMethod?: 
  * by the frozen oracle, never false-Proven. Guards deliberately KEPT:
  *   - `infra_behavior_surface` still excludes plumbing (getters/registry accessors) — a
  *     hard edge does not buy an infra symbol an attempt (waste, and preserves the #4 bar);
+ *   - `trivial_body` and `documented_private` are refused as well: a function left
+ *     uncounted for either reason is not a proof target on any lane (the strict
+ *     predicate already refuses every reason code);
  *   - the language + oracle-shape filter (never hand a class container down).
  * This is also the ONLY caller that admits Go receiver METHODS (`allowGoMethod`): it is
  * reached solely behind a hard TESTED_BY/COVERS edge, and the analyzer mints a method
@@ -203,8 +207,40 @@ function matchesProvableLanguageShape(node: GraphNode, opts?: { allowGoMethod?: 
  */
 function isEligibleHardExistingTarget(node: GraphNode | undefined): boolean {
   if (!node) return false;
-  if (node.properties.denominator_reason_code === "infra_behavior_surface") return false;
+  const reasonCode = node.properties.denominator_reason_code;
+  if (reasonCode === "infra_behavior_surface" || reasonCode === "trivial_body" || reasonCode === "documented_private") return false;
   return matchesProvableLanguageShape(node, { allowGoMethod: true });
+}
+
+/**
+ * A TS/JS function the proof runner refuses by shape: an object-literal property
+ * written `name: function` / `name: (…) =>`, a method with a quoted key, an unnamed
+ * default export, or a newly visible function the name search does not find at its
+ * own definition. The name search cannot find it and can change a different function,
+ * so no lane starts a runner for it. Decided by re-parsing the file, never from a
+ * flag on the node.
+ */
+const UNSUPPORTED_SHAPE_SKIP_REASON =
+  "unsupported_shape: written as an object-literal `name: function` property, a method with a quoted key or an unnamed default export, or a newly visible function the search by name does not find at its own definition; the proof runner cannot change it by position yet, so no proof was attempted.";
+
+function unsupportedShapeProbe(sourceRoot: string): (symId: string) => boolean {
+  const seen = new Map<string, boolean>();
+  return (symId) => {
+    const known = seen.get(symId);
+    if (known !== undefined) return known;
+    const match = /^sym:(.+)#([^#]+)$/.exec(symId);
+    let unsupported = false;
+    if (match && isTsJsFile(match[1]!)) {
+      try {
+        unsupported = mutationRouteFor(readFileSync(resolveContained(sourceRoot, match[1]!)), match[2]!) === "unsupported_shape";
+      } catch {
+        // An unreadable target is not this refusal; the prove path reports what is wrong with it.
+        unsupported = false;
+      }
+    }
+    seen.set(symId, unsupported);
+    return unsupported;
+  };
 }
 
 /** Go `_test.go` top-level test-name regex (matches `extractTestNames`'s Go pattern). */
@@ -1073,6 +1109,8 @@ function proveExistingAssociatedTests(
   const excludedTargets = new Set<string>();
   const runnerCrashes = new Map<string, number>();
   const crashBlocked = new Map<string, { language: string; root: string; skipped: number; lastError: string }>();
+  const isUnsupportedShape = unsupportedShapeProbe(sourceRoot);
+  const unsupportedShapeTargets = new Set<string>();
   let diskFull: string | undefined;
 
   const changed = opts.changedFiles && opts.changedFiles.length > 0 ? new Set(opts.changedFiles) : null;
@@ -1152,6 +1190,13 @@ function proveExistingAssociatedTests(
     } else if (isJava) {
       nativeTestRun = javaTestForTarget(nodeById, graph, symId);
       if (!nativeTestRun) continue;
+    }
+    // A shape every prove path refuses: skip it by name before a runner is started,
+    // and without counting an attempt.
+    if (!isGo && !isJava && !isPython && isUnsupportedShape(symId)) {
+      if (!unsupportedShapeTargets.has(symId)) reportProgress(`proof skipped: ${symId}: unsupported_shape`);
+      unsupportedShapeTargets.add(symId);
+      continue;
     }
     attempted++;
     if (!isPython) nonPythonCountedAttempts++;
@@ -1270,6 +1315,15 @@ function proveExistingAssociatedTests(
       reason: `the proof runner crashed ${RUNNER_CRASH_LIMIT} times in a row without returning a result; ${block.skipped} remaining linked target${block.skipped === 1 ? " was" : "s were"} not attempted in this root. Last error: ${block.lastError}`,
       language: block.language,
       project_root: block.root
+    });
+  }
+  for (const symId of unsupportedShapeTargets) {
+    skipped.push({
+      target_symbol: symId,
+      title: symId,
+      reason: UNSUPPORTED_SHAPE_SKIP_REASON,
+      language: targetLanguage(symId),
+      category: "mutation_unsupported"
     });
   }
   if (excludedTargets.size > 0) {
@@ -1425,8 +1479,21 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
   let attempted = 0;
   let baselineGreenTargets = 0;
 
+  const isUnsupportedShape = unsupportedShapeProbe(sourceRoot);
+  // The existing-tests lane may already have named the same function; say it once.
+  const shapeSkipReported = new Set(ex.skipped.filter((s) => s.reason === UNSUPPORTED_SHAPE_SKIP_REASON).map((s) => s.target_symbol));
   for (let start = 0; start < candidates.length && attempted < autoLimit && baselineGreenTargets < generationLimit; start += GEN_WINDOW) {
-    const window = candidates.slice(start, start + GEN_WINDOW);
+    // A shape every prove path refuses is skipped by name here, before a test is drafted
+    // for it or a runner is started. Every other candidate keeps its place in the window.
+    const window = candidates.slice(start, start + GEN_WINDOW).filter((g) => {
+      if (!isUnsupportedShape(g.id)) return true;
+      if (!shapeSkipReported.has(g.id)) {
+        shapeSkipReported.add(g.id);
+        skipped.push({ target_symbol: g.id, title: g.title, reason: UNSUPPORTED_SHAPE_SKIP_REASON, language: targetLanguage(g.id), category: "mutation_unsupported" });
+      }
+      return false;
+    });
+    if (window.length === 0) continue;
     const need = Math.max(1, Math.min(GEN_WINDOW, generationLimit - baselineGreenTargets));
     const windowIds = window.map((g) => g.id);
     const gen = await generate(

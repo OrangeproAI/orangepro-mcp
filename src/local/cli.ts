@@ -32,11 +32,14 @@ import {
   writeCompareReport
 } from "./operations.js";
 import type { GenerateComparison } from "./operations.js";
+import { ProofRefusalError, type DynamicProofOptions, type ProveLoopOptions } from "./operations.js";
+import type { TargetRecord } from "./contracts/targetRecord.js";
 import { dominantBlockReason } from "./viz/behaviorReportData.js";
 import { coverageRevealLine } from "./viz/coverageReveal.js";
 import { shortReportPath } from "./viz/shortReport.js";
 import { autoProve, isRoastSurvivor } from "./autoProve.js";
 import type { AutoProveAttempt } from "./autoProve.js";
+import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
 import { runExportCli } from "./exportCli.js";
 import { startLocalMcpServer } from "./mcp.js";
@@ -141,14 +144,19 @@ Usage:
   opro doctor [--proof] [--json]   # --proof: why top targets are not Dynamically Proven
   opro update [--force] [--json]
   opro changed --base <ref> [--json]
+  opro changed-targets --base <sha> --merged <sha> [--range] [--limit 3] [--json]
+    # read-only: maps the lines one merged change touched to exact functions and prints a target record for each selected one;
+    # needs the graph, HEAD and a clean checkout at the merged commit; --range accepts a base that is not its first parent
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
   opro record --target-symbol sym:file#Symbol [--test path] [--agent-pass true|false] [--evidence-ids id1,id2] [--provider openai] [--model gpt-5.3-codex] [--prompt-version v1] [--json]
     # record writes static reprove diagnostics only; public Proven requires \`opro prove\`
-  opro prove --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--target-file path] [--method name] [--replacement-mode return-json|promise-json] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--json]
+  opro prove --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--target-file path] [--method name] [--replacement-mode return-json|promise-json] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--target-record file.json] [--preview] [--json]
     # runs the dynamic targeted-proof oracle and writes a metadata-only ledger certificate only when baseline-green → mutant assertion-fail closes
-  opro prove-loop --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--setup 'npm run build'] [--setup 'npm ci'] [--setup-timeout-ms 120000] [--source path] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--json]
+    # --target-record: a changed-target record, rebuilt from the file, git and the graph and refused on any difference
+    # --preview: for a JS method changed by its exact position, print the diff only (no test run, no ledger record; --test not needed)
+  opro prove-loop --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--setup 'npm run build'] [--setup 'npm ci'] [--setup-timeout-ms 120000] [--source path] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--target-record file.json] [--json]
     # trusted-local wrapper: runs each --setup command in the source checkout, then \`opro prove\` (unchanged oracle + cert), then refreshes the behavior report; setup failure returns unrunnable (never Proven)
   opro recipe db-sqljs --target-symbol sym:file#Class.method --entity file#Entity --out orangepro_generated/<name>.sqljs.spec.ts [--source path] [--seed-field name] [--json]
     # writes a REAL NestJS+TypeORM sqljs integration spec (in-memory) + setup profile; makes a DB-backed baseline runnable so \`opro prove-loop\` can close Proven. Never mocks the target.
@@ -192,6 +200,21 @@ const DEFAULT_MARKDOWN_RTM_LIMIT = 500;
 
 function printJson(value: unknown): void {
   out(JSON.stringify(value, null, 2));
+}
+
+/**
+ * --target-record <file.json>: a changed-target record, for `prove` and `prove-loop`.
+ * The operation rebuilds it from the file, git and the graph before using it; here it
+ * may only name the symbol when --target-symbol is left out.
+ */
+function readTargetRecordFlag(cwd: string, flag: string | boolean | undefined): TargetRecord | undefined {
+  if (flag === undefined) return undefined;
+  if (typeof flag !== "string") throw new Error("--target-record requires a path to a record file (JSON)");
+  try {
+    return JSON.parse(readFileSync(resolve(cwd, flag), "utf8")) as TargetRecord;
+  } catch (e) {
+    throw new Error(`--target-record ${flag} could not be read as JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 function installCliProgress(label: string): () => void {
@@ -524,6 +547,11 @@ async function main(): Promise<number> {
           }
           out(`  behavior anchors:        ${res.behavior_anchors_count}`);
           out(`  files scanned:           ${res.analysis.files_scanned ?? "?"}`);
+          if (res.analysis.not_supported) {
+            const ns = res.analysis.not_supported;
+            const byCode = Object.entries(ns.by_code).map(([code, count]) => `${count} ${code}`).join(", ");
+            out(`  not supported (JS/TS):   ${ns.total} export shape(s) seen but not mapped — ${byCode}`);
+          }
           if (res.analysis.runtime_coverage) {
             const rc = res.analysis.runtime_coverage;
             out(`  runtime covered:         ${rc.covered_symbols}/${rc.total_eligible_symbols} (${rc.covered_pct}%)`);
@@ -697,6 +725,19 @@ async function main(): Promise<number> {
       return 0;
     }
 
+    case "changed-targets": {
+      const res = opChangedTargets(cwd, {
+        base: typeof flags.base === "string" ? flags.base : undefined,
+        merged: typeof flags.merged === "string" ? flags.merged : undefined,
+        range: asBool(flags.range, false),
+        limit: numericFlag(flags.limit)
+      });
+      if (json) printJson(res);
+      else for (const line of renderChangedTargets(res)) out(line);
+      // A refusal is not a result: scripts must not read it as "no targets".
+      return res.status === "refused" ? 1 : 0;
+    }
+
     case "score": {
       const res = opScore(cwd);
       if (json) printJson(res);
@@ -790,8 +831,15 @@ async function main(): Promise<number> {
     if (flags.runner !== undefined && !proofRunner) {
       throw new Error("--runner must be one of: auto, vitest, jest, mocha, pytest");
       }
-      const res = opDynamicProof(cwd, {
-        target_symbol: typeof flags["target-symbol"] === "string" ? flags["target-symbol"] : undefined,
+      const targetRecord = readTargetRecordFlag(cwd, flags["target-record"]);
+      const recordSymbol: unknown = (targetRecord as { identity?: { symbol_id?: unknown } } | undefined)?.identity?.symbol_id;
+      const proveOpts: Omit<DynamicProofOptions, "preview"> = {
+        target_symbol:
+          typeof flags["target-symbol"] === "string"
+            ? flags["target-symbol"]
+            : typeof flags.target !== "string" && typeof recordSymbol === "string"
+              ? recordSymbol
+              : undefined,
         target_id: typeof flags.target === "string" ? flags.target : undefined,
         source: typeof flags.source === "string" ? flags.source : undefined,
         test_path: typeof flags.test === "string" ? flags.test : "",
@@ -806,8 +854,26 @@ async function main(): Promise<number> {
         vitest_config: typeof flags["vitest-config"] === "string" ? flags["vitest-config"] : undefined,
         jest_config: typeof flags["jest-config"] === "string" ? flags["jest-config"] : undefined,
         test_env: asList(flags["test-env"]),
-        run_id: typeof flags["run-id"] === "string" ? flags["run-id"] : undefined
-      });
+        run_id: typeof flags["run-id"] === "string" ? flags["run-id"] : undefined,
+        ...(targetRecord !== undefined ? { target_record: targetRecord } : {})
+      };
+      let res;
+      try {
+        // --preview: the diff the mutation would make, and nothing else (no test run, no ledger record).
+        res = asBool(flags.preview, false) ? opDynamicProof(cwd, { ...proveOpts, preview: true }) : opDynamicProof(cwd, proveOpts);
+      } catch (e) {
+        // A named refusal keeps its code in the JSON error envelope.
+        if (json && e instanceof ProofRefusalError) {
+          printJson({ error: e.message, refusal: e.code });
+          return 1;
+        }
+        throw e;
+      }
+      if ("preview" in res) {
+        if (json) printJson(res);
+        else process.stdout.write(res.diff);
+        return 0;
+      }
       if (json) printJson(res);
       else {
         out(`Dynamic proof: ${res.record.run_id}`);
@@ -837,8 +903,20 @@ async function main(): Promise<number> {
     if (flags.runner !== undefined && !proofRunner) {
       throw new Error("--runner must be one of: auto, vitest, jest, mocha, pytest");
       }
-      const res = opProveLoop(cwd, {
-        target_symbol: typeof flags["target-symbol"] === "string" ? flags["target-symbol"] : undefined,
+      // The loop always runs the test and writes the ledger: a diff-only run is `opro prove --preview`.
+      if (flags.preview !== undefined) {
+        throw new Error("--preview is not available for prove-loop, which always runs the test; use `opro prove --preview` to see the diff only.");
+      }
+      // The record is loaded and passed exactly as `opro prove` does it.
+      const targetRecord = readTargetRecordFlag(cwd, flags["target-record"]);
+      const recordSymbol: unknown = (targetRecord as { identity?: { symbol_id?: unknown } } | undefined)?.identity?.symbol_id;
+      const loopOpts: ProveLoopOptions = {
+        target_symbol:
+          typeof flags["target-symbol"] === "string"
+            ? flags["target-symbol"]
+            : typeof flags.target !== "string" && typeof recordSymbol === "string"
+              ? recordSymbol
+              : undefined,
         target_id: typeof flags.target === "string" ? flags.target : undefined,
         source: typeof flags.source === "string" ? flags.source : undefined,
         test_path: typeof flags.test === "string" ? flags.test : "",
@@ -855,8 +933,20 @@ async function main(): Promise<number> {
         test_env: asList(flags["test-env"]),
         run_id: typeof flags["run-id"] === "string" ? flags["run-id"] : undefined,
         setup_commands: collectSetupCommands(rest),
-        setup_timeout_ms: numericFlag(flags["setup-timeout-ms"])
-      });
+        setup_timeout_ms: numericFlag(flags["setup-timeout-ms"]),
+        ...(targetRecord !== undefined ? { target_record: targetRecord } : {})
+      };
+      let res;
+      try {
+        res = opProveLoop(cwd, loopOpts);
+      } catch (e) {
+        // A named refusal keeps its code in the JSON error envelope, as for `opro prove`.
+        if (json && e instanceof ProofRefusalError) {
+          printJson({ error: e.message, refusal: e.code });
+          return 1;
+        }
+        throw e;
+      }
       if (json) printJson(res);
       else if ("status" in res) {
         out("Prove-loop: unrunnable (oracle not run; ledger untouched)");

@@ -62,7 +62,10 @@ import { createRequire } from "node:module";
 // v18: TS/JS extracts direct callable CommonJS exports.
 // v19: chained assignments (`exports = module.exports = fn`) also expose the
 // callable subject; warm v18 entries can still omit conventional CJS entries.
-export const PARSER_VERSION = 19;
+// v20: TS/JS sees five more export shapes (export lists, prototype methods,
+// exported-object methods, object-literal exports, unnamed defaults) and
+// carries per-symbol body/doc traits; warm v19 entries lack all of them.
+export const PARSER_VERSION = 20;
 
 /** Tool package version, folded into the cache guard so UPGRADES auto-invalidate
  *  the cache — bumping PARSER_VERSION by hand is a discipline; this is a lock.
@@ -78,6 +81,9 @@ export const TOOL_VERSION: string = (() => {
 })();
 
 const SYMBOL_KINDS = new Set(["function", "class", "const", "method"]);
+const SEEN_BY = new Set(["export_list", "prototype_method", "exported_object_method", "object_literal_export", "unnamed_default_export"]);
+const SHAPE_FORMS = new Set(["export_list", "prototype", "member", "literal_inline", "literal_reference", "unnamed_default"]);
+const TRIVIAL_BODIES = new Set(["empty", "stored_value", "stores_parameter"]);
 
 interface ParseEntry {
   symbols?: SymbolExtraction;
@@ -105,6 +111,29 @@ function validSymbols(v: unknown): SymbolExtraction | null {
     if (sym.callable !== undefined && typeof sym.callable !== "boolean") return null;
     if (sym.trivial_accessor !== undefined && typeof sym.trivial_accessor !== "boolean") return null;
     if (sym.member_of !== undefined && typeof sym.member_of !== "string") return null;
+    if (sym.seen_by !== undefined && (typeof sym.seen_by !== "string" || !SEEN_BY.has(sym.seen_by))) return null;
+    if (sym.shape_form !== undefined && (typeof sym.shape_form !== "string" || !SHAPE_FORMS.has(sym.shape_form))) return null;
+    if (sym.aliases !== undefined && (!Array.isArray(sym.aliases) || sym.aliases.some((a) => typeof a !== "string" || a.length === 0))) return null;
+    if (sym.documented_private !== undefined && typeof sym.documented_private !== "boolean") return null;
+    if (sym.own_name_exported !== undefined && typeof sym.own_name_exported !== "boolean") return null;
+    if (sym.unbound_name !== undefined && typeof sym.unbound_name !== "boolean") return null;
+    if (sym.trivial_body !== undefined && (typeof sym.trivial_body !== "string" || !TRIVIAL_BODIES.has(sym.trivial_body))) return null;
+    if (sym.pass_through !== undefined) {
+      const pt = sym.pass_through as Record<string, unknown> | null;
+      if (!pt || typeof pt !== "object" || (pt.via !== "free" && pt.via !== "this") || typeof pt.callee !== "string" || pt.callee.length === 0) return null;
+    }
+  }
+  if (o.not_supported !== undefined) {
+    if (!Array.isArray(o.not_supported)) return null;
+    for (const e of o.not_supported) {
+      if (!e || typeof e !== "object") return null;
+      const entry = e as Record<string, unknown>;
+      if (typeof entry.code !== "string" || entry.code.length === 0) return null;
+      if (entry.owner !== undefined && typeof entry.owner !== "string") return null;
+      if (entry.name !== undefined && typeof entry.name !== "string") return null;
+      if (typeof entry.start_line !== "number" || !Number.isFinite(entry.start_line)) return null;
+      if (typeof entry.end_line !== "number" || !Number.isFinite(entry.end_line)) return null;
+    }
   }
   return o as unknown as SymbolExtraction;
 }

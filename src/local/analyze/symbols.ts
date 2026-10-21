@@ -1,5 +1,21 @@
 import ts from "typescript";
 import { redactSecrets } from "../util/redact.js";
+import {
+  bodyTraits,
+  findExportShapes,
+  isDocumentedPrivate,
+  parseErrorCount,
+  topFunctionBindings,
+  type ExistingSymbol,
+  type ExportShape,
+  type ExportShapeResult,
+  type FunctionLikeNode,
+  type NotSupportedEntry,
+  type PassThrough,
+  type SeenBy,
+  type ShapeForm,
+  type TrivialBody
+} from "./exportShapes.js";
 
 export interface ExtractedSymbol {
   name: string;
@@ -26,6 +42,34 @@ export interface ExtractedSymbol {
    * has-test, not hard-confirmed, until a member-aware confirmer exists.
    */
   member_of?: string;
+  /**
+   * TS/JS only: which of the five export shapes (exportShapes.ts) made this
+   * symbol visible. Absent for the declaration-based rules — a symbol both
+   * produce keeps the declaration-based record and gains only `aliases`.
+   */
+  seen_by?: SeenBy;
+  /** TS/JS only: how a `seen_by` function is written (drives caller identity and proof routing). */
+  shape_form?: ShapeForm;
+  /** TS/JS only: other public names of the same function (`Owner.alias` for members, else the exported name). */
+  aliases?: string[];
+  /** TS/JS only: the last JSDoc block before the definition tags it `@private` / `@internal`. */
+  documented_private?: boolean;
+  /** TS/JS only: the AST proved the body merely moves a value (empty, returns a stored value, stores a parameter). */
+  trivial_body?: TrivialBody;
+  /** TS/JS only: the body is one `return callee(<own parameters, in order>)`. */
+  pass_through?: PassThrough;
+  /**
+   * TS/JS only, `false` when a function made visible by reference is NOT exported
+   * under its own name (`export { impl as run }`): another file can import `run`,
+   * never `impl`.
+   */
+  own_name_exported?: boolean;
+  /**
+   * TS/JS only: the symbol's name is an export KEY, not a module binding
+   * (`exports.send = function () {}`): a free call `send()` in the same file does
+   * not call it.
+   */
+  unbound_name?: boolean;
 }
 
 export const MAX_SYMBOLS_PER_FILE = 1000;
@@ -184,12 +228,50 @@ function unwrapInitializer(e: ts.Expression): ts.Expression {
   }
 }
 
+interface SymbolTraits {
+  documented_private: boolean;
+  trivial_body?: TrivialBody;
+  pass_through?: PassThrough;
+}
+
+/** Parse-local node references for span reporting; never serialized. */
+interface SymbolSite {
+  sf: ts.SourceFile;
+  /** Node whose text is "the definition": the top-level statement, the property, or the declaration. */
+  anchor: ts.Node;
+  fn?: FunctionLikeNode;
+  targets?: string[];
+  ownerBinding?: ExportShape["ownerBinding"];
+}
+
 interface TsJsSymbol {
   kind: ExtractedSymbol["symbol_kind"];
   callable: boolean;
   member_of?: string;
   start_line?: number;
   end_line?: number;
+  seen_by?: SeenBy;
+  shape_form?: ShapeForm;
+  aliases?: string[];
+  /** `null` = the two grammar passes disagreed, so nothing is claimed. */
+  traits?: SymbolTraits | null;
+  site?: SymbolSite;
+  own_name_exported?: boolean;
+  /** Every record of the name came from an export key, none from a declaration. */
+  unbound_name?: boolean;
+}
+
+interface TsJsExtraction {
+  symbols: Map<string, TsJsSymbol>;
+  notSupported: NotSupportedEntry[];
+}
+
+interface RecordSource {
+  sf: ts.SourceFile;
+  anchor: ts.Node;
+  fn?: FunctionLikeNode;
+  /** The name recorded is an export key (`exports.name = function`), not a declaration's own name. */
+  exportKey?: boolean;
 }
 
 function hasExportModifier(n: ts.FunctionDeclaration | ts.ClassDeclaration | ts.VariableStatement): boolean {
@@ -255,37 +337,65 @@ function isComponentLikeConst(name: string, init: ts.Expression | undefined): bo
  * never sees the filename; call-wrapped factories (memo(() => {}), styled(...))
  * stay non-callable, which is the documented v1 policy.
  */
-function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
+function collectTsJsExports(content: string): TsJsExtraction {
   const acc = new Map<string, TsJsSymbol>();
   const nodeLines = (sf: ts.SourceFile, node: ts.Node): Pick<ExtractedSymbol, "start_line" | "end_line"> => ({
     start_line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
     end_line: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1
   });
+  const topFunctionsBySf = new Map<ts.SourceFile, Set<string>>();
+  const traitsOf = (src: RecordSource | undefined): SymbolTraits | undefined => {
+    if (!src?.fn) return undefined;
+    let topFns = topFunctionsBySf.get(src.sf);
+    if (!topFns) {
+      topFns = topFunctionBindings(src.sf);
+      topFunctionsBySf.set(src.sf, topFns);
+    }
+    return { documented_private: isDocumentedPrivate(src.sf, src.anchor), ...bodyTraits(src.fn, topFns) };
+  };
   const record = (
     name: string,
     kind: ExtractedSymbol["symbol_kind"],
     callable: boolean,
     member_of?: string,
-    lines?: Pick<ExtractedSymbol, "start_line" | "end_line">
+    lines?: Pick<ExtractedSymbol, "start_line" | "end_line">,
+    src?: RecordSource
   ): void => {
     const prev = acc.get(name);
+    // A grammar pass with parse errors mis-reads where functions start and end (plain
+    // TS on a file with JSX). It may still NAME the symbol, as 0.2.58 does, but its
+    // spans and body judgements are never used: those come from a clean pass or not at all.
+    const trusted = src !== undefined && parseErrorCount(src.sf) === 0 ? src : undefined;
+    const traits = traitsOf(trusted);
+    const site: SymbolSite | undefined = trusted ? { sf: trusted.sf, anchor: trusted.anchor, ...(trusted.fn ? { fn: trusted.fn } : {}) } : undefined;
+    const exportKey = src?.exportKey === true;
     if (!prev) {
       acc.set(name, {
         kind,
         callable,
         ...(member_of ? { member_of } : {}),
         ...(lines?.start_line ? { start_line: lines.start_line } : {}),
-        ...(lines?.end_line ? { end_line: lines.end_line } : {})
+        ...(lines?.end_line ? { end_line: lines.end_line } : {}),
+        ...(traits ? { traits } : {}),
+        ...(site ? { site } : {}),
+        ...(exportKey ? { unbound_name: true } : {})
       });
       return;
     }
+    // Traits are claimed only when every record of the name agrees on them.
+    const mergedTraits =
+      prev.traits === undefined ? traits : traits === undefined || JSON.stringify(prev.traits) === JSON.stringify(traits) ? prev.traits : null;
     // OR callability across the two grammar passes; prefer a real fn/class kind.
     acc.set(name, {
       kind: prev.kind === "const" && kind !== "const" ? kind : prev.kind,
       callable: prev.callable || callable,
       ...(prev.member_of ?? member_of ? { member_of: prev.member_of ?? member_of } : {}),
       ...(prev.start_line ?? lines?.start_line ? { start_line: prev.start_line ?? lines?.start_line } : {}),
-      ...(prev.end_line ?? lines?.end_line ? { end_line: prev.end_line ?? lines?.end_line } : {})
+      ...(prev.end_line ?? lines?.end_line ? { end_line: prev.end_line ?? lines?.end_line } : {}),
+      ...(mergedTraits !== undefined ? { traits: mergedTraits } : {}),
+      // An overload signature is recorded first and has no body: the definition is the one that does.
+      ...(prev.site ?? site ? { site: prev.site?.fn || !site?.fn ? (prev.site ?? site) : site } : {}),
+      ...(prev.unbound_name && exportKey ? { unbound_name: true } : {})
     });
   };
   // Methods of a class body → qualified `Class.method` member symbols. Only the
@@ -304,61 +414,71 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
         false)
     );
   };
-  const recordClassMethods = (sourceFile: ts.SourceFile, node: ts.ClassDeclaration, className: string): void => {
-    if (membersDone.has(className)) return;
-    membersDone.add(className);
+  // Public methods with a runtime BODY: abstract methods, ambient declarations,
+  // and overload SIGNATURES have none — they are contracts, not testable
+  // behavior. The overload IMPLEMENTATION (which has the body) still counts.
+  const publicMethods = (node: ts.ClassDeclaration): Array<ts.MethodDeclaration & { name: ts.Identifier }> => {
     // A `declare class` declares an ambient shape — none of its members have a
     // runtime implementation to test.
-    if (ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((mod) => mod.kind === ts.SyntaxKind.DeclareKeyword)) return;
+    if (ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((mod) => mod.kind === ts.SyntaxKind.DeclareKeyword)) return [];
+    const out: Array<ts.MethodDeclaration & { name: ts.Identifier }> = [];
     for (const m of node.members) {
-      // Require a runtime BODY: abstract methods, ambient declarations, and
-      // overload SIGNATURES have none — they are contracts, not testable
-      // behavior. The overload IMPLEMENTATION (which has the body) still counts.
-      if (
-        ts.isMethodDeclaration(m) &&
-        m.body &&
-        m.name &&
-        ts.isIdentifier(m.name) &&
-        m.name.text !== "constructor" &&
-        !isInternalMember(m)
-      ) {
-        record(`${className}.${m.name.text}`, "method", false, className, nodeLines(sourceFile, m));
+      if (ts.isMethodDeclaration(m) && m.body && m.name && ts.isIdentifier(m.name) && m.name.text !== "constructor" && !isInternalMember(m)) {
+        out.push(m as ts.MethodDeclaration & { name: ts.Identifier });
       }
     }
+    return out;
   };
-  for (const scriptKind of [ts.ScriptKind.TS, ts.ScriptKind.TSX]) {
-    const sf = ts.createSourceFile(
-      scriptKind === ts.ScriptKind.TS ? "symbols.ts" : "symbols.tsx",
-      content,
-      ts.ScriptTarget.Latest,
-      false,
-      scriptKind
-    );
+  const recordClassMethods = (sourceFile: ts.SourceFile, node: ts.ClassDeclaration, className: string): void => {
+    if (membersDone.has(className)) {
+      // Recorded once, as 0.2.58 does. A later pass adds no member; it may only supply
+      // the definition site of a member the first pass named from a failed parse.
+      for (const m of publicMethods(node)) {
+        const memberName = `${className}.${m.name.text}`;
+        const known = acc.get(memberName);
+        if (known && !known.site) record(memberName, "method", false, className, nodeLines(sourceFile, m), { sf: sourceFile, anchor: m, fn: m });
+      }
+      return;
+    }
+    membersDone.add(className);
+    for (const m of publicMethods(node)) {
+      record(`${className}.${m.name.text}`, "method", false, className, nodeLines(sourceFile, m), { sf: sourceFile, anchor: m, fn: m });
+    }
+  };
+  const passes = [ts.ScriptKind.TS, ts.ScriptKind.TSX].map((scriptKind) =>
+    ts.createSourceFile(scriptKind === ts.ScriptKind.TS ? "symbols.ts" : "symbols.tsx", content, ts.ScriptTarget.Latest, false, scriptKind)
+  );
+  for (const sf of passes) {
     // Local declarations (exported OR not) so `const X = …; export default X` —
     // the common React component shape — resolves to its real subject. Default
     // exports (`export default <expr>`) are collected and resolved after the
     // pass, since the subject const may be declared before OR after them.
     // Local declarations eligible to be a default-export behavior subject:
     // functions/classes always; consts only when component-like (isComponentLikeConst).
-    const localDecls = new Map<string, { kind: ExtractedSymbol["symbol_kind"]; eligible: boolean; callable: boolean; lines?: Pick<ExtractedSymbol, "start_line" | "end_line"> }>();
+    const localDecls = new Map<
+      string,
+      { kind: ExtractedSymbol["symbol_kind"]; eligible: boolean; callable: boolean; lines?: Pick<ExtractedSymbol, "start_line" | "end_line">; src: RecordSource }
+    >();
     const classNodes = new Map<string, ts.ClassDeclaration>(); // for default-subject member extraction
     const defaultExprs: ts.Expression[] = [];
-    const commonJsAssignments: Array<{ exportName: string | null; expression: ts.Expression }> = [];
+    const commonJsAssignments: Array<{ exportName: string | null; expression: ts.Expression; statement: ts.Statement }> = [];
     for (const stmt of sf.statements) {
       if (ts.isFunctionDeclaration(stmt) && stmt.name) {
         const lines = nodeLines(sf, stmt);
-        localDecls.set(stmt.name.text, { kind: "function", eligible: true, callable: true, lines });
-        if (hasExportModifier(stmt)) record(stmt.name.text, "function", false, undefined, lines);
+        const src: RecordSource = { sf, anchor: stmt, ...(stmt.body ? { fn: stmt } : {}) };
+        localDecls.set(stmt.name.text, { kind: "function", eligible: true, callable: true, lines, src });
+        if (hasExportModifier(stmt)) record(stmt.name.text, "function", false, undefined, lines, src);
       } else if (ts.isClassDeclaration(stmt) && stmt.name) {
         // A `declare class` is an ambient TYPE shape with no runtime implementation
         // to test — skip it entirely (neither the class node nor its members are
         // behavior, and it must not become a default-export subject).
         if (ts.canHaveModifiers(stmt) && ts.getModifiers(stmt)?.some((mod) => mod.kind === ts.SyntaxKind.DeclareKeyword)) continue;
         const lines = nodeLines(sf, stmt);
-        localDecls.set(stmt.name.text, { kind: "class", eligible: true, callable: true, lines });
+        const src: RecordSource = { sf, anchor: stmt };
+        localDecls.set(stmt.name.text, { kind: "class", eligible: true, callable: true, lines, src });
         classNodes.set(stmt.name.text, stmt);
         if (hasExportModifier(stmt)) {
-          record(stmt.name.text, "class", false, undefined, lines);
+          record(stmt.name.text, "class", false, undefined, lines, src);
           recordClassMethods(sf, stmt, stmt.name.text); // exported class → its methods are behaviors
         }
       } else if (ts.isVariableStatement(stmt) && (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0) {
@@ -368,8 +488,9 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
           const init = decl.initializer ? unwrapInitializer(decl.initializer) : undefined;
           const callable = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init));
           const lines = nodeLines(sf, decl);
-          localDecls.set(decl.name.text, { kind: "const", eligible: isComponentLikeConst(decl.name.text, init), callable, lines });
-          if (exported) record(decl.name.text, "const", callable, undefined, lines); // regular exports keep the strict callable rule
+          const src: RecordSource = { sf, anchor: stmt, ...(init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ? { fn: init } : {}) };
+          localDecls.set(decl.name.text, { kind: "const", eligible: isComponentLikeConst(decl.name.text, init), callable, lines, src });
+          if (exported) record(decl.name.text, "const", callable, undefined, lines, src); // regular exports keep the strict callable rule
         }
       } else if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
         // `export default <expr>` — NOT `export = …` (CommonJS). Re-export barrels
@@ -386,8 +507,8 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
               && ts.isIdentifier(left.expression.expression)
               && left.expression.expression.text === "module"
               && left.expression.name.text === "exports";
-            if (directDefault) commonJsAssignments.push({ exportName: null, expression: assignment.right });
-            else if (namedOnExports || namedOnModule) commonJsAssignments.push({ exportName: left.name.text, expression: assignment.right });
+            if (directDefault) commonJsAssignments.push({ exportName: null, expression: assignment.right, statement: stmt });
+            else if (namedOnExports || namedOnModule) commonJsAssignments.push({ exportName: left.name.text, expression: assignment.right, statement: stmt });
           }
           assignment = ts.isBinaryExpression(assignment.right) && assignment.right.operatorToken.kind === ts.SyntaxKind.EqualsToken
             ? assignment.right
@@ -404,7 +525,7 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
       if (!name) continue;
       const d = localDecls.get(name);
       if (!d || !d.eligible) continue;
-      record(name, d.kind, d.kind === "const", undefined, d.lines); // component-like const → callable
+      record(name, d.kind, d.kind === "const", undefined, d.lines, d.src); // component-like const → callable
       if (d.kind === "class") {
         const node = classNodes.get(name);
         if (node) recordClassMethods(sf, node, name); // default-exported class → its methods
@@ -418,26 +539,138 @@ function collectTsJsExports(content: string): Map<string, TsJsSymbol> {
       if (ts.isIdentifier(expr)) {
         const d = localDecls.get(expr.text);
         if (!d || !d.callable) continue;
-        record(expr.text, d.kind, d.kind === "const", undefined, d.lines);
+        record(expr.text, d.kind, d.kind === "const", undefined, d.lines, d.src);
         if (d.kind === "class") {
           const node = classNodes.get(expr.text);
           if (node) recordClassMethods(sf, node, expr.text);
         }
       } else if (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr)) {
         const name = assignment.exportName ?? (ts.isFunctionExpression(expr) && expr.name ? expr.name.text : undefined);
-        if (name) record(name, "function", false, undefined, nodeLines(sf, expr));
+        if (name) record(name, "function", false, undefined, nodeLines(sf, expr), { sf, anchor: assignment.statement, fn: expr, exportKey: true });
       } else if (ts.isClassExpression(expr) && expr.name) {
         record(expr.name.text, "class", false, undefined, nodeLines(sf, expr));
       }
     }
   }
-  return acc;
+
+  // The five export shapes (exportShapes.ts), on top of what the rules above
+  // emit. A grammar pass with parse errors is ignored; when both are clean they
+  // must agree, otherwise the file gains no new symbols (hard symbols cannot guess).
+  const existing = new Map<string, ExistingSymbol>();
+  for (const [name, sym] of acc) existing.set(name, { kind: sym.kind, callable: sym.callable });
+  const shapeRuns = passes.map((sf) => {
+    let result: ExportShapeResult;
+    let scanned = true;
+    try {
+      result = findExportShapes(sf, existing);
+    } catch {
+      // A scan that could not finish (a pathologically deep file) is not a clean answer.
+      result = { shapes: [], notSupported: [] };
+      scanned = false;
+    }
+    return { sf, clean: scanned && parseErrorCount(sf) === 0, result };
+  });
+  const signature = (run: (typeof shapeRuns)[number]): string =>
+    JSON.stringify([
+      run.result.shapes.map((sh) => [sh.name, sh.form, sh.kind, sh.aliases, sh.node.getStart(run.sf), sh.node.getEnd(), sh.anchor.getStart(run.sf)]),
+      run.result.notSupported
+    ]);
+  const cleanRuns = shapeRuns.filter((run) => run.clean);
+  const chosen = cleanRuns.length === 1 || (cleanRuns.length === 2 && signature(cleanRuns[0]) === signature(cleanRuns[1])) ? cleanRuns[0] : null;
+  const notSupported: NotSupportedEntry[] = [];
+  if (!chosen) {
+    if (shapeRuns.some((run) => run.result.shapes.length > 0)) notSupported.push({ code: "parse_disagreement", start_line: 1, end_line: 1 });
+    return { symbols: acc, notSupported };
+  }
+  const sf = chosen.sf;
+  notSupported.push(...chosen.result.notSupported);
+  const addAliases = (sym: TsJsSymbol, aliases: readonly string[]): void => {
+    if (aliases.length === 0) return;
+    sym.aliases = [...new Set([...(sym.aliases ?? []), ...aliases])];
+  };
+  for (const shape of chosen.result.shapes) {
+    const prev = acc.get(shape.name);
+    if (prev) {
+      // A declaration-based rule (or an earlier shape) already emits this name:
+      // that record stays exactly as it is and only gains the extra public names.
+      addAliases(prev, shape.aliases);
+      continue;
+    }
+    if (ts.isClassDeclaration(shape.node)) {
+      acc.set(shape.name, {
+        kind: "class",
+        callable: false,
+        ...nodeLines(sf, shape.node),
+        seen_by: shape.seenBy,
+        shape_form: shape.form,
+        ...(shape.aliases.length ? { aliases: [...shape.aliases] } : {}),
+        site: { sf, anchor: shape.anchor }
+      });
+      for (const m of publicMethods(shape.node)) {
+        const memberName = `${shape.name}.${m.name.text}`;
+        if (acc.has(memberName)) continue;
+        const src: RecordSource = { sf, anchor: m, fn: m };
+        const traits = traitsOf(src);
+        acc.set(memberName, {
+          kind: "method",
+          callable: false,
+          member_of: shape.name,
+          ...nodeLines(sf, m),
+          seen_by: shape.seenBy,
+          ...(traits ? { traits } : {}),
+          site: { sf, anchor: m, fn: m }
+        });
+      }
+      continue;
+    }
+    const fn = shape.node;
+    const traits = traitsOf({ sf, anchor: shape.anchor, fn });
+    acc.set(shape.name, {
+      kind: shape.kind,
+      callable: shape.kind === "const",
+      ...(shape.memberOf ? { member_of: shape.memberOf } : {}),
+      ...nodeLines(sf, shape.declaration ?? fn),
+      seen_by: shape.seenBy,
+      shape_form: shape.form,
+      ...(shape.aliases.length ? { aliases: [...shape.aliases] } : {}),
+      ...(shape.ownNameExported === false ? { own_name_exported: false } : {}),
+      ...(traits ? { traits } : {}),
+      site: {
+        sf,
+        anchor: shape.anchor,
+        fn,
+        ...(shape.targets ? { targets: shape.targets } : {}),
+        ...(shape.ownerBinding ? { ownerBinding: shape.ownerBinding } : {})
+      }
+    });
+  }
+  return { symbols: acc, notSupported };
 }
+
+// Cheap gate: any "export" followed by whitespace or `{` (so `export\tfunction`,
+// `export\nclass` and `export{ a }` are NOT skipped), or a CommonJS export.
+const TSJS_EXPORT_GATE_RE = /export[\s{]|module\s*\.\s*exports|exports\s*\./;
 
 export interface SymbolExtraction {
   symbols: ExtractedSymbol[];
   /** True when MAX_SYMBOLS_PER_FILE cut real candidates — callers must disclose. */
   truncated: boolean;
+  /** TS/JS only: export shapes the extractor deliberately does not turn into symbols. Omitted when empty. */
+  not_supported?: NotSupportedEntry[];
+}
+
+/** Serializable extras a TS/JS symbol carries beyond name/kind/lines. */
+function tsJsExtras(sym: TsJsSymbol): Partial<ExtractedSymbol> {
+  return {
+    ...(sym.seen_by ? { seen_by: sym.seen_by } : {}),
+    ...(sym.shape_form ? { shape_form: sym.shape_form } : {}),
+    ...(sym.aliases?.length ? { aliases: sym.aliases } : {}),
+    ...(sym.traits?.documented_private ? { documented_private: true } : {}),
+    ...(sym.traits?.trivial_body ? { trivial_body: sym.traits.trivial_body } : {}),
+    ...(sym.traits?.pass_through ? { pass_through: sym.traits.pass_through } : {}),
+    ...(sym.own_name_exported === false ? { own_name_exported: false } : {}),
+    ...(sym.unbound_name ? { unbound_name: true } : {})
+  };
 }
 
 /**
@@ -449,13 +682,15 @@ export interface SymbolExtraction {
 export function extractSymbolsWithMeta(content: string, language?: string): SymbolExtraction {
   const byName = new Map<string, ExtractedSymbol>();
   let truncated = false;
+  let notSupported: NotSupportedEntry[] = [];
   const lineOf = (index: number): number => content.slice(0, Math.max(0, index)).split(/\r?\n/).length;
   const consider = (
     name: string,
     kind: ExtractedSymbol["symbol_kind"],
     callable?: boolean,
     member_of?: string,
-    lines?: Pick<ExtractedSymbol, "start_line" | "end_line">
+    lines?: Pick<ExtractedSymbol, "start_line" | "end_line">,
+    extras?: Partial<ExtractedSymbol>
   ): void => {
     const existing = byName.get(name);
     if (existing) {
@@ -473,15 +708,16 @@ export function extractSymbolsWithMeta(content: string, language?: string): Symb
     if (lines?.start_line) sym.start_line = lines.start_line;
     if (lines?.end_line) sym.end_line = lines.end_line;
     if (member_of) sym.member_of = member_of;
+    if (extras) Object.assign(sym, extras);
     byName.set(name, sym);
   };
   const family = symbolLangFamily(language);
   if (family === "tsjs") {
-    // TS/JS from the AST — comment/string-safe. Cheap gate: any "export"
-    // followed by whitespace (matches the old `export\s+`, so `export\tfunction`
-    // / `export\nclass` are NOT skipped).
-    if (/export\s|module\s*\.\s*exports|exports\s*\./.test(content)) {
-      for (const [name, sym] of collectTsJsExports(content)) consider(name, sym.kind, sym.callable, sym.member_of, sym);
+    // TS/JS from the AST — comment/string-safe.
+    if (TSJS_EXPORT_GATE_RE.test(content)) {
+      const extraction = collectTsJsExports(content);
+      for (const [name, sym] of extraction.symbols) consider(name, sym.kind, sym.callable, sym.member_of, sym, tsJsExtras(sym));
+      notSupported = extraction.notSupported;
     }
   } else if (family !== "none") {
     // Blank comments/strings/docstrings first so a `def`/`class`/`func` inside
@@ -495,11 +731,82 @@ export function extractSymbolsWithMeta(content: string, language?: string): Symb
       }
     }
   }
-  return { symbols: [...byName.values()], truncated };
+  return { symbols: [...byName.values()], truncated, ...(notSupported.length ? { not_supported: notSupported } : {}) };
 }
 
 export function extractSymbols(content: string, language?: string): ExtractedSymbol[] {
   return extractSymbolsWithMeta(content, language).symbols;
+}
+
+/** Where one TS/JS symbol is defined, as half-open UTF-16 offsets into the content. */
+export interface FunctionSite {
+  name: string;
+  symbol_kind: ExtractedSymbol["symbol_kind"];
+  member_of?: string;
+  seen_by?: SeenBy;
+  shape_form?: ShapeForm;
+  aliases?: string[];
+  /** How the owner is bound, for a member made visible by an export shape. */
+  owner_binding?: string;
+  /** Assignment targets written before the function, as source text (`res.set`, `View.prototype.render`). */
+  targets?: string[];
+  /** The definition: the top-level statement, the object-literal property, or the declaration. */
+  statement: [number, number];
+  /** The function-like node (absent for a class). */
+  fn?: [number, number];
+  /** How the function-like node is written. */
+  fn_kind?: "declaration" | "expression" | "arrow" | "method";
+  /** For a method: its name is written as a plain identifier (`name(…) {`), not a string, number or computed key. */
+  key_is_identifier?: boolean;
+  /** The `{ … }` body (absent for an expression-bodied arrow). */
+  body?: [number, number];
+  start_line?: number;
+  end_line?: number;
+}
+
+/**
+ * Exact definition spans for every TS/JS symbol the extractor emits for
+ * `content`, re-derived from the source — so a caller can bind a symbol to its
+ * bytes without trusting anything stored on a graph node.
+ */
+export function listFunctionSites(content: string): { sites: FunctionSite[]; not_supported: NotSupportedEntry[] } {
+  if (!TSJS_EXPORT_GATE_RE.test(content)) return { sites: [], not_supported: [] };
+  const extraction = collectTsJsExports(content);
+  const sites: FunctionSite[] = [];
+  for (const [name, sym] of extraction.symbols) {
+    const site = sym.site;
+    if (!site) continue;
+    const span = (node: ts.Node): [number, number] => [node.getStart(site.sf), node.getEnd()];
+    const body = site.fn?.body && ts.isBlock(site.fn.body) ? site.fn.body : undefined;
+    sites.push({
+      name,
+      symbol_kind: sym.kind,
+      ...(sym.member_of ? { member_of: sym.member_of } : {}),
+      ...(sym.seen_by ? { seen_by: sym.seen_by } : {}),
+      ...(sym.shape_form ? { shape_form: sym.shape_form } : {}),
+      ...(sym.aliases?.length ? { aliases: sym.aliases } : {}),
+      ...(site.ownerBinding ? { owner_binding: site.ownerBinding } : {}),
+      ...(site.targets ? { targets: site.targets } : {}),
+      statement: span(site.anchor),
+      ...(site.fn
+        ? {
+            fn: span(site.fn),
+            fn_kind: ts.isArrowFunction(site.fn)
+              ? ("arrow" as const)
+              : ts.isFunctionExpression(site.fn)
+                ? ("expression" as const)
+                : ts.isMethodDeclaration(site.fn)
+                  ? ("method" as const)
+                  : ("declaration" as const),
+            ...(ts.isMethodDeclaration(site.fn) ? { key_is_identifier: ts.isIdentifier(site.fn.name) } : {})
+          }
+        : {}),
+      ...(body ? { body: span(body) } : {}),
+      ...(sym.start_line ? { start_line: sym.start_line } : {}),
+      ...(sym.end_line ? { end_line: sym.end_line } : {})
+    });
+  }
+  return { sites, not_supported: extraction.notSupported };
 }
 
 const TEST_NAME_PATTERNS: RegExp[] = [
