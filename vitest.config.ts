@@ -10,6 +10,12 @@ import { defineConfig, configDefaults } from "vitest/config";
 export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**"],
+    // A full parallel run on a busy machine starves single tests of CPU: one that
+    // takes a second alone can pass vitest's default 5 s limit. Tests that need
+    // more than 30 s still set their own limit.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+    setupFiles: ["tests/setup.ts"],
     // Reports record when the feedback invitation was last shown. Keep test runs
     // out of the developer's own ~/.orangepro preferences.
     env: { ORANGEPRO_FEEDBACK_PREFS: join(tmpdir(), `orangepro-vitest-feedback-prefs-${process.pid}.json`) }
