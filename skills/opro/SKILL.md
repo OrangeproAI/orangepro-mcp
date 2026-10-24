@@ -1,6 +1,6 @@
 ---
 name: opro
-description: Use when generating grounded tests or doing PR/branch test-review for a LOCAL repo with OrangePro (the `opro` / `orangepro-local` CLI + MCP). Builds a local evidence graph from a checkout, targets the behaviors a diff touches, and returns runnable, source-referenced test drafts with run hints — BYOK, no source upload.
+description: Use when generating grounded tests or reviewing which behaviors a branch's changes affect for a LOCAL repo with OrangePro (the `opro` / `orangepro-local` CLI + MCP). Builds a local evidence graph from a checkout, targets the behaviors a diff touches, and returns runnable, source-referenced test drafts with run hints — BYOK, no source upload.
 ---
 
 # opro — OrangePro
@@ -24,7 +24,7 @@ opro analyze .                 # build/refresh the evidence graph (reads source 
 opro generate --base <ref>     # generate ONLY for behaviors the diff vs <ref> touches
 ```
 
-`--base <ref>` is the default, **non-mutating** path for PR and branch review. It uses a
+`--base <ref>` is the default, **non-mutating** path for reviewing a branch's changes. It uses a
 read-only diff against `<ref>` (e.g. `--base main`). It does not change your working
 tree, switch branches, or pull anything. Use it for almost everything.
 
@@ -55,7 +55,7 @@ make it "run"; fix the import from the real module or leave it as a draft for re
 
 | Situation | Command |
 |---|---|
-| Review a PR / branch without disturbing the tree | `opro generate --base <pr-base>` |
+| Review a branch's changes without disturbing the tree | `opro generate --base <pr-base>` |
 | Test the current branch's diff vs its base | `opro generate --changed` |
 | Generate for a specific behavior id | `opro generate --target REQ-001` |
 | See readiness / coverage / gaps | `opro score`, `opro gaps`, `opro status` |

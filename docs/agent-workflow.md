@@ -55,7 +55,7 @@ Start:
 3. Use its graph_html_path, rtm path, and next_actions as the test plan.
 4. If AI grounding is skipped, continue with the deterministic graph instead of asking the user for extra commands.
 
-For PR work:
+For changes since a base ref (OrangePro itself runs on the merged base build, after merge and before release; it is not a PR gate or a release gate):
 1. Call orangepro_generate_tests with base_ref=main.
 2. Use the changed behaviors returned by orangepro_start as context.
 3. Use only generated tests that include run_hints.
@@ -90,7 +90,7 @@ opro export --format graph-html --out .orangepro/graph.html
 ```
 
 `generate --base main` is read-only: it uses `git diff` and does not check out a
-PR. `generate --pr <n>` is the mutating escape hatch and should only be used when
+branch. `generate --pr <n>` is the mutating escape hatch and should only be used when
 the developer explicitly allows the working tree to switch.
 
 ## What Counts
@@ -116,7 +116,7 @@ For repos that use an `AGENTS.md`, keep the OrangePro instruction short:
 ## OrangePro Test Workflow
 
 - Run `opro` before adding tests. It writes graph, RTM, optional AI weak grounding when configured, and next actions.
-- For PR work, run `opro generate --base main --single --limit 3`.
+- For changes since `main`, run `opro generate --base main --single --limit 3`.
 - For baseline gaps, run `opro gaps --limit 10`, pick one target, then run
   `opro generate --target <target-id> --single --limit 1`.
 - Write only tests that include `run_hints`; drafts are context, not runnable claims.

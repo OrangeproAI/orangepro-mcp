@@ -33,5 +33,5 @@ If your Claude Code setup supports custom slash commands, map `/opro` to: call `
 ## Agent Prompt
 
 ```text
-Use OrangePro first. Call orangepro_start, then use orangepro_generate_tests for the returned PR or gap target. Write each runnable test to suggested_path, run run_command, and call `orangepro_prove` with the returned `prove_run` args for Dynamically Proven. Use record_run only for static diagnostics. Do not treat drafts as runnable tests.
+Use OrangePro first. Call orangepro_start, then use orangepro_generate_tests for the returned changed-behavior or gap target. Write each runnable test to suggested_path, run run_command, and call `orangepro_prove` with the returned `prove_run` args for Dynamically Proven. Use record_run only for static diagnostics. Do not treat drafts as runnable tests.
 ```

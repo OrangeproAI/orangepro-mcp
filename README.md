@@ -376,12 +376,12 @@ One row per test, UTF-8. The first 12 columns are for import; the rest keep the 
 </details>
 
 <details>
-<summary><strong>PR workflow</strong></summary>
+<summary><strong>Changes since a base ref</strong></summary>
 
 ```bash
 opro generate --base main     # tests for what this branch changed (read-only git diff)
 opro generate --changed       # current branch vs its base
-opro generate --pr 1234       # checks out PR #1234 (asks first; refuses on a dirty tree)
+opro generate --pr 1234       # checks out PR #1234 (asks first; refuses on a dirty tree); changes your working tree, use only when you mean to
 ```
 </details>
 
