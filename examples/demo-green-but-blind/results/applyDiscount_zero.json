@@ -1,0 +1,79 @@
+{
+  "ledger_path": "/workspace/demo-green-but-blind/.orangepro/ledger.json",
+  "record": {
+    "run_id": "run:000002",
+    "target_symbol": "sym:src/pricing.ts#applyDiscount",
+    "pre_edges": [],
+    "new_edges": [],
+    "closed": false,
+    "evidence_ids": [],
+    "language": "typescript",
+    "dynamic_proof": {
+      "proof_kind": "dynamic_targeted",
+      "baseline_green": true,
+      "mutant_failed_assertion": false,
+      "target_not_mocked": false,
+      "sentinel": "return-json",
+      "runner": "vitest",
+      "test_path": "test/pricing.test.ts",
+      "mutant_status": "associated_survived",
+      "oracle_version": "orangepro.targeted_mutation_oracle.v3",
+      "run_fingerprint": "sha256:149300360f48ba462e534625d4fe3c1b412aa34066c65e69a45ff3fafb8c9293",
+      "command": "/usr/local/bin/node /home/box/.npm/_npx/992252a1aa6d763b/node_modules/@orangepro/orangepro-mcp/scripts/spikes/dynamic-proof-spike.mjs --root /workspace/demo-green-but-blind --test test/pricing.test.ts --target src/pricing.ts --method applyDiscount --replacement return 0; --replacement-mode return-json --runner auto --json",
+      "cwd": "/workspace/demo-green-but-blind",
+      "exit_code": 0,
+      "duration_ms": 878,
+      "stdout_tail": [],
+      "stderr_tail": []
+    },
+    "artifact_identity": {
+      "schema_version": "orangepro.artifact_identity.v1",
+      "repository_snapshot": "sha256:b75f5193b94357b03c1c6222c2e025a04b56c27a616206d11dfdc4cd77f3f4ca",
+      "analysis_fingerprint": "sha256:b6cbaaa847bf29fd43bcd0cd602d9ec60aa997d8390a12c98d52a3a8addce985",
+      "ranking_fingerprint": "sha256:dac67450384836d3eb761201aafff85dc4b34d4ebb2db31eafd188d9974eb926",
+      "run_fingerprint": "sha256:149300360f48ba462e534625d4fe3c1b412aa34066c65e69a45ff3fafb8c9293",
+      "analyzer_version": "orangepro.analyzer.v10",
+      "graph_schema_version": "orangepro.local_graph.v3",
+      "ors_version": "orangepro.ors.stable_population.v3",
+      "oracle_version": "orangepro.targeted_mutation_oracle.v3",
+      "risk_config_hash": "75541945c73b",
+      "tool_version": "0.2.58",
+      "git_commit": "d26dedc6abcb686586bad24d9506a2fab6f0c154",
+      "git_dirty": true
+    },
+    "target_fingerprint": "sha256:96a82bc3c5f47a5f4ed72ac75bc54ce214dfdde464a5c1651e48124428ea899e",
+    "status": "unproven",
+    "reason": "mutated target did not change the test outcome",
+    "ts": "2026-10-24T02:44:33.752Z",
+    "pre_edge_count": 0
+  },
+  "oracle": {
+    "status": "associated_survived",
+    "proven": false,
+    "reason": "mutated target did not change the test outcome",
+    "runner": "vitest",
+    "replacementMode": "return-json",
+    "test": "test/pricing.test.ts",
+    "target": "src/pricing.ts",
+    "method": "applyDiscount",
+    "diagnostics": {
+      "command": "/usr/local/bin/node /home/box/.npm/_npx/992252a1aa6d763b/node_modules/@orangepro/orangepro-mcp/scripts/spikes/dynamic-proof-spike.mjs --root /workspace/demo-green-but-blind --test test/pricing.test.ts --target src/pricing.ts --method applyDiscount --replacement return 0; --replacement-mode return-json --runner auto --json",
+      "cwd": "/workspace/demo-green-but-blind",
+      "exit_code": 0,
+      "duration_ms": 878,
+      "stdout_tail": [],
+      "stderr_tail": []
+    },
+    "baseline": {
+      "exitCode": 0,
+      "timedOut": false,
+      "failureSummary": null
+    },
+    "mutant": {
+      "exitCode": 0,
+      "timedOut": false,
+      "assertionFailure": false
+    },
+    "medianProofMs": 418
+  }
+}

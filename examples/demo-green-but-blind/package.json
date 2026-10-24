@@ -1,0 +1,2 @@
+{ "name": "demo-green-but-blind", "version": "0.0.1", "type": "module", "private": true,
+  "scripts": { "test": "vitest run" }, "devDependencies": { "vitest": "^2.1.0" } }
