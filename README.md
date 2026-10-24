@@ -389,8 +389,8 @@ opro generate --pr 1234       # checks out PR #1234 (asks first; refuses on a di
 
 ## Hosted platform
 This repository is the free local tool. The [OrangePro platform](https://orangepro.ai) adds:
-- a persistent graph across PRs and repositories;
-- CI gates on evidence and risk changes;
+- a persistent graph across changes and repositories;
+- alerts when evidence and risk change on the merged build (report-only by default);
 - requirement and incident correlation;
 - team dashboards.
 
