@@ -6,10 +6,11 @@ import { defineConfig, configDefaults } from "vitest/config";
 // local proof-kit tests — they are not themselves runnable test suites and must
 // not be picked up by vitest's `*.test.ts` glob (e.g. a fixture importing a
 // `.scss` would trip vite's CSS preprocessor, and compare outputs live under
-// `.orangepro/`). Keep vitest's defaults otherwise.
+// `.orangepro/`). Projects under examples/ are separate and run from their own
+// folder. Keep vitest's defaults otherwise.
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**"],
+    exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**", "examples/**"],
     // A full parallel run on a busy machine starves single tests of CPU: one that
     // takes a second alone can pass vitest's default 5 s limit. Tests that need
     // more than 30 s still set their own limit.
