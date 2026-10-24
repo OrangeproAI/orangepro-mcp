@@ -1,0 +1,7 @@
+# Jekyll config for GitHub Pages (minimal theme). Custom domain docs.orangepro.ai (see CNAME). Pages not enabled by this commit.
+title: OrangePro
+description: OrangePro shows which behaviors your tests protect, and which they do not, using targeted mutation proof.
+url: https://docs.orangepro.ai
+baseurl: ""
+theme: jekyll-theme-minimal
+plugins: [jekyll-sitemap]

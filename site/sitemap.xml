@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Static sitemap. If the jekyll-sitemap plugin is used it generates this and this file should be dropped. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://docs.orangepro.ai/</loc></url>
+  <url><loc>https://docs.orangepro.ai/getting-started</loc></url>
+  <url><loc>https://docs.orangepro.ai/agents</loc></url>
+  <url><loc>https://docs.orangepro.ai/how-it-works</loc></url>
+</urlset>
