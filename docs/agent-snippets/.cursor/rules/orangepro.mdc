@@ -1,0 +1,31 @@
+---
+description: Use the OrangePro MCP (orangepro-local) to check whether tests protect a behavior, using targeted mutation proof. Apply after code or test changes.
+globs:
+alwaysApply: false
+---
+
+# OrangePro
+
+OrangePro breaks a function in an isolated copy and checks that its test fails (targeted mutation proof). It runs on the merged base build, after merge and before release. It is not a PR gate or a release gate. Proof uses no AI model.
+
+MCP config (`~/.cursor/mcp.json` or Settings → MCP):
+```json
+{ "mcpServers": { "orangepro-local": { "command": "npx", "args": ["-y", "@orangepro/mcp-server@latest", "mcp"] } } }
+```
+
+## When
+After you change code or write tests, before you say the tests are good; or when asked which behaviors are unprotected.
+
+## How
+1. `orangepro_start` on this checkout; follow `next_actions`.
+2. `orangepro_find_test_gaps`; pick the top gap.
+3. Write a test at the suggested path; run it from the owning package.
+4. `orangepro_prove_loop` (or `orangepro_prove`) for that behavior.
+5. Report Proven, Not proven, or Unrunnable as returned. If nothing moved, say so.
+
+## Rules
+- Never weaken, delete, skip or loosen a test or assertion to get a result.
+- Write only tests with `run_hints`. Drafts and AI links are context, not proof.
+- Do not call a behavior Proven unless OrangePro reports it Proven.
+- Do not claim OrangePro prevents production issues.
+- Never commit keys or MCP config files that contain keys.
