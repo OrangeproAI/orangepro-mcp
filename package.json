@@ -26,7 +26,21 @@
     "behavior-coverage",
     "integration-tests",
     "dynamic-proof",
-    "code-analysis"
+    "code-analysis",
+    "mutation-testing",
+    "targeted-mutation-proof",
+    "test-quality",
+    "typescript",
+    "javascript",
+    "python",
+    "go",
+    "java",
+    "jest",
+    "vitest",
+    "pytest",
+    "claude-code",
+    "cursor",
+    "ai-coding-agents"
   ],
   "files": [
     "dist/local",

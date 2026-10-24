@@ -1,6 +1,12 @@
-# @orangepro/mcp-server
+# OrangePro
 
-Compatibility launcher for the OrangePro CLI and local stdio MCP server.
+OrangePro shows which behaviors your tests protect, and which they do not. It breaks a function in an isolated copy and checks that the test fails (targeted mutation proof). It runs on the merged base build, after merge and before release.
+
+```bash
+npx -y @orangepro/mcp-server@latest start .
+```
+
+`@orangepro/mcp-server` is the launcher for the OrangePro CLI and local stdio MCP server.
 
 ```bash
 # Analyze the current repository, prove eligible existing tests, and render the report.
