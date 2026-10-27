@@ -55,7 +55,8 @@ export interface ProofRowResult {
 export interface VerificationReceipt {
   version: typeof VERIFICATION_RECEIPT_VERSION;
   evidence_kind: "runtime_observation";
-  tool: { name: string; version: string };
+  /** `build_sha256`: the stamped build that made the receipt (P0.6), null when run from source. */
+  tool: { name: string; version: string; build_sha256: string | null };
   run_ids: { fault: string; brief: string; verify: string; export: string };
   run_manifests: Array<{ run_id: string; sha256: string }>;
   source: {

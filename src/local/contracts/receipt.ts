@@ -62,7 +62,8 @@ export interface ContainerProfile {
 export interface RunProfile {
   version: typeof RUN_PROFILE_VERSION;
   run_id: string;
-  tool: { name: string; version: string };
+  /** `build_sha256`: the stamped build that ran (P0.6), null when run from source. */
+  tool: { name: string; version: string; build_sha256?: string | null };
   fixture_manifest_sha256: string;
   /** `source.pr.number` of the fixture, when it records one. */
   source_pr: number | null;

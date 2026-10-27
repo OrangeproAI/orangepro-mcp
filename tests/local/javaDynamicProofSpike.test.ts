@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -118,6 +118,22 @@ describe.skipIf(!HAS_JAVA_MAVEN)("java dynamic proof spike (J-1)", () => {
       ["-q", "test", "-Dtest=ai.orangepro.fixture.CalculatorTest#addsTwoNumbers", "-Dsurefire.failIfNoSpecifiedTests=false", `-Dmaven.repo.local=${SHARED_M2}`],
       { cwd: warmRepo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
     );
+  }, TEST_TIMEOUT);
+
+  it("copies a symlinked source root, never writing the mutant through it (context 13.2-21)", () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), "opro-java-linkroot-"));
+    const repo = path.join(tmp, "module");
+    cpSync(path.join(fixtures, "proven"), repo, { recursive: true });
+    const linked = path.join(tmp, "linked");
+    symlinkSync(repo, linked, "dir");
+    const target = path.join(repo, "src/main/java/ai/orangepro/fixture/Calculator.java");
+    const before = readFileSync(target);
+
+    const { verdict } = runSpike(linked, { testMethod: "addsTwoNumbers", method: "add" });
+
+    expect(verdict.status).toBe("proven");
+    expect(readFileSync(target)).toEqual(before);
+    rmSync(tmp, { recursive: true, force: true });
   }, TEST_TIMEOUT);
 
   it("proves a simplest-shape method 0->1 when the sentinel kills a value assertion", () => {

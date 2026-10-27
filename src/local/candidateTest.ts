@@ -43,6 +43,7 @@ import { resolveTargetSymbol } from "./ledger.js";
 import { defaultDynamicProofRunner, ProofRefusalError, proofPreflight } from "./operations.js";
 import { toWorkspaceRel } from "./reprove/paths.js";
 import { ORANGEPRO_VERSION } from "./version.js";
+import { checkBuild } from "./buildInfo.js";
 import { loadGraph, workspacePaths } from "./workspace.js";
 
 // Milestone A3: one new test for a fault the existing tests missed.
@@ -667,7 +668,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     const profile: RunProfile = {
       version: RUN_PROFILE_VERSION,
       run_id: runId,
-      tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION },
+      tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
       fixture_manifest_sha256: sha256Hex(run.fixtureBytes),
       source_pr: fixture.prNumber,
       merged_commit: run.record.identity.merged_commit,

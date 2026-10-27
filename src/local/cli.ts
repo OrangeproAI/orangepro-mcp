@@ -73,6 +73,8 @@ import {
 import { runGenerateJob } from "./jobs/runner.js";
 import type { GenerateOptions } from "./types.js";
 import { ORANGEPRO_VERSION } from "./version.js";
+import { buildLabel, checkBuild } from "./buildInfo.js";
+import { loadRiskConfig } from "./score/riskConfig.js";
 import { feedbackPrefsPath, feedbackUrl, invitationCooldownDays, readFeedbackPrefs, setInvitations } from "./feedback.js";
 
 function out(line = ""): void {
@@ -274,6 +276,13 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // P0.6: run only the build the stamp names; a build changed or mixed after it was made is refused.
+  const build = checkBuild();
+  if (build.status === "stale") {
+    err(`OrangePro refused to run: this build is stale or mixed, because ${build.reason}. Reinstall the package, or rebuild it with npm run build.`);
+    return 2;
+  }
+
   // Preload configured tree-sitter grammars before analysis so the sync analyzer
   // can extract via AST. Idempotent; only the analysis commands pay for it.
   if (command === "start" || command === "roast" || command === "analyze" || command === "update" || command === "generate" || command === "record" || command === "prove" || command === "prove-loop") {
@@ -311,6 +320,7 @@ async function main(): Promise<number> {
       if (json) printJson(res);
       else if (res.reuse?.status === "reused") {
         out("OrangePro start: nothing changed since the last run.");
+        out(`  build:          ${buildLabel()}`);
         out(`  ${res.next_actions[0] ?? ""}`);
         if (res.behavior_coverage_path) {
           out(`  detailed report: ${res.behavior_coverage_path}`);
@@ -319,6 +329,10 @@ async function main(): Promise<number> {
         out("  To analyse again anyway: opro start --fresh");
       } else {
         out("OrangePro start complete.");
+        const ranking = loadRiskConfig(resolve(source));
+        const excluded = ranking.config.classification.rank_exclude_paths;
+        out(`  build:          ${buildLabel()}`);
+        out(`  ranking config: ${ranking.hash}; rank-exclude paths: ${excluded.length > 0 ? excluded.join(", ") : "none"}`);
         out(`  graph:          ${res.analyze.graph_path}`);
         if (res.behavior_coverage_path) {
           out(`  behavior coverage: ${res.behavior_coverage_path}`);

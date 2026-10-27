@@ -26,7 +26,7 @@ const sourceSchema = z
     source_type: z.string().min(1),
     display_name: z.string(),
     content_hash: z.string(),
-    metadata: z.record(z.unknown())
+    metadata: z.record(z.string(), z.unknown())
   })
   .strict();
 
@@ -36,7 +36,7 @@ const entitySchema = z
     entity_type: z.string().min(1),
     review_status: z.enum(["local_reviewed", "auto_detected", "inferred", "ai_suggested"]),
     confidence: z.number().min(0).max(1),
-    properties: z.record(z.unknown()),
+    properties: z.record(z.string(), z.unknown()),
     provenance: provenanceSchema
   })
   .strict();
