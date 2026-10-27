@@ -30,7 +30,7 @@
 // artifacts — it emits a JSON verdict; the orchestrator is the sole interpreter and
 // the only place proof is minted.
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,12 +126,15 @@ function resolveInside(root, relOrAbs) {
 function copyModuleRoot(root, label) {
   const tmpRoot = mkdtempSync(path.join(tmpdir(), `opro-go-proof-${label}-`));
   const repoRoot = path.join(tmpRoot, "module");
+  // A root given as a symbolic link would be copied as that link, and the mutation written into the
+  // user's own file: copy the folder it points to.
+  const realRoot = realpathSync(root);
   try {
-    cpSync(root, repoRoot, {
+    cpSync(realRoot, repoRoot, {
       recursive: true,
       filter(source) {
         const name = path.basename(source);
-        if (source !== root && lstatSync(source).isSymbolicLink()) {
+        if (source !== realRoot && lstatSync(source).isSymbolicLink()) {
           return false;
         }
         return name !== "node_modules" && name !== ".git" && name !== ".orangepro";

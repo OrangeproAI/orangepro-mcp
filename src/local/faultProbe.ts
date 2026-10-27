@@ -40,6 +40,7 @@ import { resolveContained, toWorkspaceRel } from "./reprove/paths.js";
 import { redactSecrets } from "./util/redact.js";
 import type { Clock } from "./util/time.js";
 import { ORANGEPRO_VERSION } from "./version.js";
+import { checkBuild } from "./buildInfo.js";
 import { loadGraph, workspacePaths } from "./workspace.js";
 
 // `opro probe-fault` (milestone A2): one exact, recorded fault inside a function a change
@@ -832,7 +833,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     const profile: RunProfile = {
       version: RUN_PROFILE_VERSION,
       run_id: runId,
-      tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION },
+      tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
       fixture_manifest_sha256: sha256Hex(opts.fixture_bytes),
       source_pr: fixture.prNumber,
       merged_commit: record.identity.merged_commit,

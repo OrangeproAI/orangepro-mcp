@@ -2,7 +2,7 @@
 // Python dynamic-proof mechanism. It proves only a targeted sentinel mutation killed
 // by the exact pytest assertion, and otherwise fails closed with redacted diagnostics.
 
-import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -59,10 +59,14 @@ function contained(root, rel) {
 }
 
 function copyRoot(root, dest) {
-  cpSync(root, dest, {
+  // Copy the folder a symbolic-link root points to, and no link inside it: a link would be copied as a
+  // link, and the mutation written through it into the user's own files.
+  const realRoot = realpathSync(root);
+  cpSync(realRoot, dest, {
     recursive: true,
     dereference: false,
     filter(src) {
+      if (src !== realRoot && lstatSync(src).isSymbolicLink()) return false;
       const base = path.basename(src);
       // Cargo build output is not source and may be written concurrently by a
       // native extension build. Keep Cargo manifests and the source itself.

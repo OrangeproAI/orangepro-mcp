@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -49,6 +49,29 @@ describe("python proof environment", () => {
 });
 
 describe.skipIf(!HAS_UV)("python dynamic proof spike (R7.1)", () => {
+  it("copies a symlinked source root, and no link inside it, never writing the mutant through either (context 13.2-21)", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "app.py": "def answer() -> int:\n    return 42\n",
+      "tests/test_app.py": "from app import answer\n\ndef test_answer():\n    assert answer() == 42\n"
+    });
+    const holder = mkdtempSync(path.join(tmpdir(), "python-proof-link-"));
+    const outside = mkdtempSync(path.join(tmpdir(), "python-proof-outside-"));
+    writeFileSync(path.join(outside, "keep.py"), "VALUE = 1\n");
+    symlinkSync(outside, path.join(fixture, "vendor"), "dir");
+    const linked = path.join(holder, "linked");
+    symlinkSync(fixture, linked, "dir");
+    const before = readFileSync(path.join(fixture, "app.py"));
+    try {
+      const verdict = runSpike(linked, { test: "tests/test_app.py::test_answer", target: "app.py", func: "answer" });
+      expect(verdict.status, JSON.stringify(verdict)).toBe("proven");
+      expect(readFileSync(path.join(fixture, "app.py"))).toEqual(before);
+      expect(readFileSync(path.join(outside, "keep.py"), "utf8")).toBe("VALUE = 1\n");
+    } finally {
+      for (const dir of [fixture, holder, outside]) rmSync(dir, { recursive: true, force: true });
+    }
+  }, TEST_TIMEOUT);
+
   it("proves a typed scalar function and discloses identical runner diagnostics", () => {
     const fixture = tempPythonProject({
       "pyproject.toml": UV_PROJECT,

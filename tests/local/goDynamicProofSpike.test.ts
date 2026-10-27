@@ -423,6 +423,20 @@ describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
     expect(verdict.status).toBe("proven");
     expect(verdict.proven).toBe(true);
   }, TEST_TIMEOUT);
+
+  it("copies a symlinked source root, never writing the mutant through it (context 13.2-21)", async () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), "opro-go-linkroot-"));
+    const repo = path.join(tmp, "module");
+    cpSync(path.join(fixtures, "proven"), repo, { recursive: true });
+    const linked = path.join(tmp, "linked");
+    symlinkSync(repo, linked, "dir");
+    const before = readFileSync(path.join(repo, "compute.go"));
+
+    const { verdict } = await runSpike(linked);
+
+    expect(verdict.status).toBe("proven");
+    expect(readFileSync(path.join(repo, "compute.go"))).toEqual(before);
+  }, TEST_TIMEOUT);
 });
 
 describe("go dynamic proof spike: failed copy cleanup (0.2.47)", () => {
