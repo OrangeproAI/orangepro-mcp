@@ -67,6 +67,10 @@ export const CANDIDATE_REFUSALS = [
 
 // Which command is refusing: both share the fault-run checks.
 let refusingCommand = "verify-test";
+/** For commands built on these checks (export-tests): their refusals name themselves. */
+export function setRefusingCommand(name: string): void {
+  refusingCommand = name;
+}
 const refuse = (code: (typeof CANDIDATE_REFUSALS)[number] | string, detail: string): never => {
   throw new ProbeFaultRefusal(code, detail, refusingCommand);
 };
@@ -91,7 +95,7 @@ interface StageCounts {
   pending: number;
 }
 
-interface FaultRun {
+export interface FaultRun {
   dir: string;
   manifestSha: string;
   runId: string;
@@ -111,7 +115,7 @@ interface FaultRun {
 const readJson = (path: string): any => JSON.parse(readFileSync(path, "utf8"));
 
 /** A run folder named on the command line: a direct child of proof-runs, a real folder, not a link to somewhere else. */
-function runFolderOf(root: string, given: string, code: "fault_run_invalid" | "brief_invalid"): string {
+export function runFolderOf(root: string, given: string, code: string): string {
   const runsDir = join(workspacePaths(root).dir, "proof-runs");
   const dir = resolve(root, given);
   const rel = relative(runsDir, dir);
@@ -123,7 +127,7 @@ function runFolderOf(root: string, given: string, code: "fault_run_invalid" | "b
 }
 
 /** A finished probe-fault run, read only after its manifest verifies, and only when its fault survived. */
-function loadFaultRun(root: string, fromRun: string): FaultRun {
+export function loadFaultRun(root: string, fromRun: string): FaultRun {
   const dir = runFolderOf(root, fromRun, "fault_run_invalid");
   const check = verifyRunFolder(dir);
   if (!check.ok) return refuse("fault_run_invalid", `${fromRun}: ${check.message}`);
@@ -163,7 +167,7 @@ function loadFaultRun(root: string, fromRun: string): FaultRun {
   };
 }
 
-function allowedPaths(fixtureBytes: Buffer): { patterns: string[]; never: string[] } {
+export function allowedPaths(fixtureBytes: Buffer): { patterns: string[]; never: string[] } {
   const manifest = JSON.parse(fixtureBytes.toString("utf8")) as { allowed_patch_paths?: { patterns?: unknown; never?: unknown } };
   const patterns = manifest.allowed_patch_paths?.patterns;
   const never = manifest.allowed_patch_paths?.never ?? [];
@@ -174,13 +178,13 @@ function allowedPaths(fixtureBytes: Buffer): { patterns: string[]; never: string
 }
 
 /** `test/*.js` and `test/**` style patterns: `*` stays inside one folder, `**` crosses folders. */
-function globMatches(pattern: string, path: string): boolean {
+export function globMatches(pattern: string, path: string): boolean {
   const re = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
   return new RegExp(`^${re}$`).test(path);
 }
 
 /** The selected test files as the checkout holds them, each checked to be a regular file of the checkout with the fault run's bytes. */
-function selectedFiles(run: FaultRun, sourceRoot: string): Array<{ path: string; sha256: string; bytes: Buffer }> {
+export function selectedFiles(run: FaultRun, sourceRoot: string): Array<{ path: string; sha256: string; bytes: Buffer }> {
   return run.profile.selected_tests.map((test) => {
     const abs = join(sourceRoot, test.path);
     const regular = insideRepoPath(test.path) && existsSync(abs) && lstatSync(abs).isFile() && realInside(sourceRoot, abs);
@@ -349,7 +353,7 @@ export interface VerifyTestResult {
   verdict: CandidateVerdict;
 }
 
-interface EarlierAttempt {
+export interface EarlierAttempt {
   run_id: string;
   attempt: number;
   result: string;
@@ -363,7 +367,7 @@ interface EarlierAttempt {
  * fault (same fault record and target record), in which the new test's file ran. A run blocked before
  * any test ran is not an attempt.
  */
-function earlierAttempts(runsDir: string, faultRecordSha: string, targetRecordSha: string): EarlierAttempt[] {
+export function earlierAttempts(runsDir: string, faultRecordSha: string, targetRecordSha: string): EarlierAttempt[] {
   const found: EarlierAttempt[] = [];
   for (const name of readdirSync(runsDir).sort()) {
     const dir = join(runsDir, name);
@@ -394,7 +398,7 @@ function lineAround(bytes: Buffer, at: number): string {
  * site, and the fault with the original line's text kept there. Behavior is unchanged, so a test of
  * the behavior gives the same result; a test that reads the code's text does not.
  */
-function textControls(original: Buffer, fault: Buffer, site: { start: number; end: number }, replacement: string): { originalText: Buffer; faultText: Buffer } {
+export function textControls(original: Buffer, fault: Buffer, site: { start: number; end: number }, replacement: string): { originalText: Buffer; faultText: Buffer } {
   const comment = (text: string): Buffer => Buffer.from(`/* ${text.replace(/\*\//g, "* /")} */`, "utf8");
   const faultEnd = site.start + Buffer.byteLength(replacement, "utf8");
   return {
@@ -695,7 +699,7 @@ interface CandidateOutcome {
   otherFailures: CandidateVerdict["other_failures_on_fault"];
 }
 
-function issueOf(stage: StageObservation | undefined): string | null {
+export function issueOf(stage: StageObservation | undefined): string | null {
   if (!stage) return "not_run";
   if (stage.boundary.failures.length > 0) return "boundary_check_failed";
   if (!stage.stopped) return "container_not_stopped";
@@ -708,7 +712,7 @@ function issueOf(stage: StageObservation | undefined): string | null {
   return null;
 }
 
-function atDeclared(test: ObservedTest | undefined, assertion: AssertionRecord): boolean {
+export function atDeclared(test: ObservedTest | undefined, assertion: AssertionRecord): boolean {
   if (!test?.failure || !test.failure.at_assertion || NOT_AN_ASSERTION_ERRORS.has(test.failure.name ?? "")) return false;
   const at = frameLocation(test.failure.first_frame);
   return at !== null && at.file === assertion.assertion.file && at.line === assertion.assertion.line;

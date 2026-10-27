@@ -354,6 +354,20 @@ result does not establish: a test written to tamper with its own runner is not s
 patch is reviewed before it is delivered. The exit code is 0 for every result; the `result` field
 decides. The checkout is not changed.
 
+`opro export-tests --from-run <verify-test run>` turns a `verified_gap` run into what a reviewer gets.
+It writes `orangepro-tests.patch`, rebuilt from the verified bytes: one allowed test file, lines added
+only, and checked to give those exact bytes both by OrangePro's reading and under `git apply`. The
+fault stays separate in `diagnostic-fault.patch` and is never to be merged. It then replays the patch
+on a fresh copy of the merged commit inside the container: the existing whole suite, the whole suite
+with the patch, the same with the fault, and the new test's file after the original bytes are
+restored. It writes `verification-receipt.json`, which is built only from the run folders, each
+checked against its manifest, and in which the verify run's result is recomputed from its own stage
+files. The receipt records the proof contract's rows A–H, each met or not with the stage files that
+show it, and is `verified_gap` only when all eight are met; the generation (who wrote the test) and
+the adoption ("not delivered") are separate fields. A one-page `summary.html` shows the merged
+change, the behavior, what the old tests did, the new test and its result, the patch and the
+reviewer's action, then the limits and every stage. The checkout is not changed.
+
 ### Dynamic proof language profiles
 
 Dynamic targeted proof ships as per-ecosystem **profiles**, all passing the same trust

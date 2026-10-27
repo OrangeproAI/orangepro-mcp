@@ -32,7 +32,13 @@ export const STAGE_NAMES = [
   "candidate_fault_text_control",
   "candidate_restored",
   "candidate_original_text_control",
-  "full_suite_with_candidate"
+  "full_suite_with_candidate",
+  // A4 (export-tests): a fresh copy of the commit: the existing whole suite, then with the test-only patch,
+  // then with the patch on the same fault, then the new test's file after the original bytes are restored.
+  "fresh_full_suite",
+  "fresh_full_suite_with_patch",
+  "fresh_fault_full_suite_with_patch",
+  "fresh_restored_test_file"
 ] as const;
 export type StageName = (typeof STAGE_NAMES)[number];
 
