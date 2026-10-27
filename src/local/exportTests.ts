@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { dockerExecutor, WORK_OUT } from "./boundary.js";
-import { applyAdditivePatch, parseAdditivePatch } from "./candidatePatch.js";
+import { applyAdditivePatch, parseAdditivePatch, readNewTest } from "./candidatePatch.js";
 import {
   allowedPaths,
   atDeclared,
@@ -187,6 +187,8 @@ export function computeRows(input: {
   originalSha: string;
   mutatedSha: string;
   restoreConfirmed: boolean;
+  /** The columns where the declared assertion call names its check (row H matches them, as verify-test does). */
+  declaredColumns: number[];
 }): ProofRowResult[] {
   const { fault, verify, fresh } = input;
   const assertion = verify.run.assertion;
@@ -224,7 +226,7 @@ export function computeRows(input: {
     ),
     row(
       "H",
-      Boolean(h && issueOf(h) === null && h.copy_target_sha256 === input.mutatedSha && h.tests!.executed === input.baseline + 1 && hFailed.length === 1 && isMine(hFailed[0]!) && atDeclared(hFailed[0], assertion)) &&
+      Boolean(h && issueOf(h) === null && h.copy_target_sha256 === input.mutatedSha && h.tests!.executed === input.baseline + 1 && hFailed.length === 1 && isMine(hFailed[0]!) && atDeclared(hFailed[0], assertion, input.declaredColumns)) &&
         input.restoreConfirmed &&
         clean(hr) &&
         hr!.copy_target_sha256 === input.originalSha &&
@@ -288,8 +290,13 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
 
   // ── orangepro-tests.patch: rebuilt from the verified bytes, one allowed test file, added lines only, the same under git ──
   const originalTest = readFileSync(testAbs);
-  const verifiedTest = asExport(() => applyAdditivePatch(originalTest, parseAdditivePatch(verify.candidate))).bytes;
+  const verifiedApplied = asExport(() => applyAdditivePatch(originalTest, parseAdditivePatch(verify.candidate)));
+  const verifiedTest = verifiedApplied.bytes;
   if (sha256Hex(verifiedTest) !== verify.assertion.candidate.files[0]?.sha256_after) refuse("patch_invalid", "the verify run's candidate no longer gives the bytes it verified.");
+  // The columns where the declared assertion call names its check, read as verify-test read them.
+  const declaredLine = verify.assertion.assertion.line;
+  const declaredColumns = [...(asExport(() => readNewTest({ path: testPath, patched: verifiedTest, original: originalTest, added: verifiedApplied.added })).assertionPositions.get(declaredLine) ?? [])];
+  if (declaredColumns.length === 0) refuse("run_invalid", `line ${declaredLine} of the verified test is not where an assertion call names its check.`);
   const allowed = asExport(() => allowedPaths(run.fixtureBytes));
   if (!allowed.patterns.some((p) => globMatches(p, testPath)) || allowed.never.some((p) => globMatches(p, testPath))) refuse("patch_invalid", `${testPath} is not a test file the fixture allows a patch to touch.`);
   const mode = git(sourceRoot, ["ls-files", "-s", "--", testPath]).split(/\s+/)[0];
@@ -317,7 +324,8 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   if (!replanned.ok || replanned.plan.mutated_file_sha256 !== run.faultRecord.mutated_file_sha256) refuse("stale_checkout", "the fault planned now is not the fault the run recorded.");
   const plan = replanned.ok ? replanned.plan : (null as never);
   const originalSha = run.faultRecord.file_sha256;
-  const controls = textControls(fileBytes, plan.mutated, plan.site.bytes, plan.replacement_text);
+  const controls = textControls(run.record.identity.file, fileBytes, plan.mutated, plan);
+  if (!controls) return refuse("run_invalid", `the fault ${run.faultRecord.operator.id} has no text controls, so its verify run cannot have been verified.`);
   const fixture = asExport(() => readFixture(run.fixtureBytes));
   if (fixture.baselinePassing === null) refuse("run_invalid", "the fixture records no baseline count.");
   const recomputed = classifyCandidate({
@@ -337,7 +345,9 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
       full_suite_with_candidate: originalSha
     },
     copyWriteFailed: null,
-    checkoutUnchanged: true
+    checkoutUnchanged: true,
+    declaredColumns,
+    faultRunScope: run.classification.scope
   }).result;
   if (recomputed !== verify.verdict.result) refuse("run_invalid", `the verify run's result (${verify.verdict.result}) does not follow from its own stage files (${recomputed}).`);
   const mochaVersion = String((readJson(mochaPackage) as { version?: unknown }).version ?? "unknown");
@@ -425,7 +435,8 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     baseline: fixture.baselinePassing!,
     originalSha,
     mutatedSha: plan.mutated_file_sha256,
-    restoreConfirmed
+    restoreConfirmed,
+    declaredColumns
   });
   const blocked = Object.values(stages).some((s) => s && (s.boundary.failures.length > 0 || !s.stopped)) || !checkoutAfter;
   const firstUnmet = rows.find((r) => !r.met);
@@ -433,7 +444,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   const fixtureManifest = JSON.parse(run.fixtureBytes.toString("utf8")) as { origin?: unknown; source?: { previous_base_sha?: string; pr?: { number?: number; head_sha?: string } }; dependencies?: { lockfile_sha256?: string } };
   const installedTree = existsSync(join(nodeModules, ".package-lock.json")) ? sha256Hex(readFileSync(join(nodeModules, ".package-lock.json"))) : null;
   const firstFresh = stages.fresh_full_suite;
-  const attempts = earlierAttempts(join(paths.dir, "proof-runs"), run.faultRecordSha, run.profile.target_record_sha256);
+  const attempts = earlierAttempts(join(paths.dir, "proof-runs"), run.faultKey);
   const receipt: VerificationReceipt = {
     version: VERIFICATION_RECEIPT_VERSION,
     evidence_kind: "runtime_observation",

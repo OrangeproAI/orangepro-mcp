@@ -116,11 +116,16 @@ export function verifyRunFolder(runDir: string): RunCheck {
   if (manifest?.version !== RUN_MANIFEST_VERSION || !Array.isArray(manifest.files)) {
     return { ok: false, message: `MANIFEST.json is not a ${RUN_MANIFEST_VERSION} manifest.` };
   }
+  for (const entry of manifest.files as unknown[]) {
+    const path = (entry as { path?: unknown } | null)?.path;
+    if (typeof path !== "string" || typeof (entry as { sha256?: unknown }).sha256 !== "string" || isAbsolute(path) || path.split(/[\\/]/).some((part) => part === ".." || part === "." || part === "")) {
+      return { ok: false, message: `MANIFEST.json lists an entry that is not a file inside the run folder: ${JSON.stringify(path ?? entry)}.` };
+    }
+    const st = existsSync(join(runDir, path)) ? lstatSync(join(runDir, path)) : null;
+    if (st && !st.isFile()) return { ok: false, message: `${path} is listed in MANIFEST.json but is not a regular file.` };
+  }
   const listed = new Set(manifest.files.map((entry) => entry.path));
   for (const entry of manifest.files) {
-    if (typeof entry?.path !== "string" || isAbsolute(entry.path) || entry.path.split(/[\\/]/).some((part) => part === ".." || part === "")) {
-      return { ok: false, message: `MANIFEST.json lists a path outside the run folder: ${JSON.stringify(entry?.path)}.` };
-    }
     const abs = join(runDir, entry.path);
     if (!existsSync(abs)) return { ok: false, message: `${entry.path} is listed in MANIFEST.json but missing.` };
     if (sha256Hex(readFileSync(abs)) !== entry.sha256) return { ok: false, message: `${entry.path} does not match its hash in MANIFEST.json.` };

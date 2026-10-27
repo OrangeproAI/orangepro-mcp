@@ -1,8 +1,9 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import ts from "typescript";
 import { dockerExecutor, WORK_OUT } from "./boundary.js";
-import { applyAdditivePatch, parseAdditivePatch, readNewTest } from "./candidatePatch.js";
+import { applyAdditivePatch, gitAppliedBytes, parseAdditivePatch, parsesAs, readNewTest } from "./candidatePatch.js";
 import {
   ASSERTION_RECORD_VERSION,
   CANDIDATE_VERDICT_VERSION,
@@ -22,6 +23,7 @@ import type { TargetRecord } from "./contracts/targetRecord.js";
 import {
   containerProfile,
   createStageRunner,
+  frameColumn,
   frameLocation,
   insideRepoPath,
   makeMountsFor,
@@ -96,6 +98,8 @@ interface StageCounts {
 }
 
 export interface FaultRun {
+  /** The fault itself, whatever run recorded it: target, operator, site and bytes, never the rationale. */
+  faultKey: string;
   dir: string;
   manifestSha: string;
   runId: string;
@@ -123,6 +127,9 @@ export function runFolderOf(root: string, given: string, code: string): string {
   if (!existsSync(dir) || lstatSync(dir).isSymbolicLink() || !lstatSync(dir).isDirectory() || dirname(realpathSync(dir)) !== realpathSync(runsDir)) {
     refuse(code, `${given} is not a folder of ${toWorkspaceRel(root, runsDir)} (missing, or a link to somewhere else).`);
   }
+  const check = verifyRunFolder(dir);
+  if (!check.ok) return refuse(code, `${given}: ${check.message}`);
+  if (check.manifest.run_id !== basename(dir)) refuse(code, `${given}: its MANIFEST.json names another run (${check.manifest.run_id}).`);
   return dir;
 }
 
@@ -142,6 +149,14 @@ export function loadFaultRun(root: string, fromRun: string): FaultRun {
   if (classification.reason === "full_suite_failed_off_assertion") {
     refuse("no_gap", `in ${fromRun} another existing test failed on the fault when the whole suite ran (not at its own line), so a new test cannot be shown to be the one that catches it.`);
   }
+  const unverifiable: Record<string, string> = {
+    full_suite_red_on_original: "the whole suite did not pass on the original",
+    full_suite_count_differs: "the whole suite's count on the original is not the fixture's baseline",
+    full_suite_lacks_selected: "the whole suite did not run every selected test"
+  };
+  if (classification.reason && unverifiable[classification.reason]) {
+    refuse("fault_run_invalid", `in ${fromRun} ${unverifiable[classification.reason]}, so the whole suite with a new test cannot be checked; fix the fixture or run probe-fault again.`);
+  }
   const oracleCheck = checkOracle(readJson(join(dir, "oracle.json")));
   if (!oracleCheck.ok) refuse("fault_run_invalid", oracleCheck.message);
   const counts: Record<string, StageCounts> = {};
@@ -150,7 +165,9 @@ export function loadFaultRun(root: string, fromRun: string): FaultRun {
     const t = (readJson(join(dir, "stages", `${stage}.json`)) as StageObservation).tests;
     if (t) counts[stage] = { executed: t.executed, passed: t.passed, failed: t.failed, pending: t.pending };
   }
+  const fault = readJson(join(dir, "fault-record.json")) as FaultRecord;
   return {
+    faultKey: faultKeyOf(fault),
     dir,
     manifestSha: sha256Hex(readFileSync(join(dir, "MANIFEST.json"))),
     runId: check.manifest.run_id,
@@ -204,10 +221,10 @@ const RULES = (run: FaultRun): string[] => [
   `Put everything the test needs inside that one it(…) call, next to the tests it belongs with (${run.profile.selected_tests.map((test) => test.path).join(", ")}), in the same style as its neighbours.`,
   "Go through the public entry point the oracle names, as the neighbouring tests do. Use only modules the file already loads.",
   "Assert the oracle's expected result. Never assert what the faulty code returns, and never read the code's own text: the fault is shown so you know what must be caught, not as an expected value.",
-  `Change only objects the test creates itself. Never replace, stub or assign to ${run.record.identity.name}, anything it is defined on, or anything it uses; never use .only, .skip or .retries.`,
-  "Do not use process, require.cache, globalThis, eval or Function: a test of the behavior does not need them, and verify-test refuses them.",
+  `Change only what the test declares itself, and only direct members, one level and named in the code (local.name or local['name']), of a local it makes itself: an object or array literal, a function or class, Object.create(…), new Object() with no argument, or new of a built-in such as Error, Date, Map, Set, Array, URL or a typed array. Values from other calls (an app from express(), a handler's req or res) and anything from outside the test are read-only to it: never replace, stub or assign to ${run.record.identity.name}, anything it is defined on, or anything it uses. Never write, define or give an object the members stack, stackTraceLimit, prepareStackTrace, captureStackTrace or __proto__. Never use .only, .skip or .retries.`,
+  "Do not use process, globalThis, global, module, exports, eval, Function, Reflect or Proxy; require other than require('…') of a module the file already loads; this inside a nested function; a with statement; or the members constructor, caller, callee, __proto__, __defineGetter__, __defineSetter__, __lookupGetter__, __lookupSetter__, captureStackTrace or prepareStackTrace. A test of the behavior does not need them, and verify-test refuses them.",
   "Keep the test plain: a title like its neighbours', no tool name and no generated-by comment in the code. Attribution goes in the assertion record.",
-  "Write assertion-record.json from the template: the one assertion call inside the new test whose failure must catch the fault, the line its called name is on, that line's text, what it checks, and the sha256 of your patch and of the file after it.",
+  "Write assertion-record.json from the template: the one assertion call inside the new test whose failure must catch the fault, the line its called name is on (put that call on a line of its own, without other statements), that line's text, what it checks, and the sha256 of your patch and of the file after it.",
   "The full title is the suite titles and the test's own, joined by single spaces, as Mocha reports it (see full_title_example).",
   "The record is frozen before any stage runs; a changed candidate needs a new record and counts as a new attempt, and a repair keeps the first attempt's declared assertion and condition.",
   "Leave the checkout unchanged: make the patch, then restore the file (for example git diff > candidate.patch, then git checkout -- <file>)."
@@ -274,7 +291,7 @@ export function opTestBrief(root: string, opts: { from_run: string; source?: str
   const runDir = join(workspacePaths(root).dir, "proof-runs", runId);
   if (existsSync(runDir)) throw new Error(`${runDir} already exists.`);
   mkdirSync(runDir, { recursive: true });
-  writeFileAtomic(join(runDir, "fault-run.json"), recordBytes(tagged("test_brief", run, {})));
+  writeFileAtomic(join(runDir, "fault-run.json"), recordBytes(tagged("test_brief", run, { source: opts.source ?? null })));
   writeFileAtomic(join(runDir, "brief", "generation-request.json"), recordBytes(request));
   writeFileAtomic(join(runDir, "brief", "brief.md"), briefMarkdown(request, toWorkspaceRel(root, run.dir), toWorkspaceRel(root, runDir), opts.source ?? null));
   writeRunManifest(runDir, runId, ORANGEPRO_VERSION);
@@ -362,19 +379,28 @@ export interface EarlierAttempt {
   condition: string;
 }
 
+/** The fault itself, whatever run recorded it: target, operator, site and bytes, never the rationale. */
+export function faultKeyOf(fault: FaultRecord): string {
+  return recordSha256({ symbol_id: fault.symbol_id, file: fault.file, file_sha256: fault.file_sha256, operator: fault.operator, site: fault.site.bytes, mutated_file_sha256: fault.mutated_file_sha256 });
+}
+
 /**
  * The candidates already run on this fault: finished verify-test runs, in any fault run of the same
- * fault (same fault record and target record), in which the new test's file ran. A run blocked before
- * any test ran is not an attempt.
+ * fault (the same target, operator, site and bytes, whatever the rationale), in which the new test's
+ * file ran. A run blocked before any test ran is not an attempt.
  */
-export function earlierAttempts(runsDir: string, faultRecordSha: string, targetRecordSha: string): EarlierAttempt[] {
+export function earlierAttempts(runsDir: string, faultKey: string): EarlierAttempt[] {
   const found: EarlierAttempt[] = [];
   for (const name of readdirSync(runsDir).sort()) {
     const dir = join(runsDir, name);
     try {
       if (!lstatSync(dir).isDirectory() || !existsSync(join(dir, "MANIFEST.json"))) continue;
-      const tag = readJson(join(dir, "fault-run.json")) as { kind?: string; fault_record_sha256?: string; target_record_sha256?: string };
-      if (tag.kind !== "verify_test" || tag.fault_record_sha256 !== faultRecordSha || tag.target_record_sha256 !== targetRecordSha) continue;
+      const tag = readJson(join(dir, "fault-run.json")) as { kind?: string; fault_key?: string; fault_run?: { run_id?: string } };
+      if (tag.kind !== "verify_test") continue;
+      // A verify run made before fault_key was recorded is keyed from its own fault run.
+      const faultRunId = tag.fault_run?.run_id;
+      const key = tag.fault_key ?? (faultRunId && basename(faultRunId) === faultRunId ? faultKeyOf(readJson(join(runsDir, faultRunId, "fault-record.json")) as FaultRecord) : null);
+      if (key !== faultKey) continue;
       const verdict = readJson(join(dir, "classification.json")) as CandidateVerdict;
       if ((verdict.observed?.candidate_original?.executed ?? 0) === 0) continue;
       const record = readJson(join(dir, "assertion-record.json")) as AssertionRecord;
@@ -386,25 +412,89 @@ export function earlierAttempts(runsDir: string, faultRecordSha: string, targetR
   return found.sort((a, b) => a.attempt - b.attempt || a.run_id.localeCompare(b.run_id));
 }
 
-/** The line holding the site, as text, for a comment that keeps it in the file without running it. */
-function lineAround(bytes: Buffer, at: number): string {
-  const start = at > 0 ? bytes.lastIndexOf(0x0a, at - 1) + 1 : 0;
-  const stop = bytes.indexOf(0x0a, at);
-  return bytes.subarray(start, stop < 0 ? bytes.length : stop).toString("utf8").replace(/\r$/, "").trim();
+/**
+ * The two text controls. Each keeps one version's behavior and puts the other version's code beside
+ * it, before and after, as live code that never runs: `(0 ? other : 1 ? kept : other)`. A test of the
+ * behavior gives the same result as without the control; a test that follows the code's text (with
+ * or without comments, by first, last or nearest occurrence) does not. Null when the operator has no
+ * control, or when a control does not parse exactly as its kept version with the site replaced by the
+ * conditional: without semicolons a leading `(` can join the line before and change the behavior.
+ */
+export function textControls(path: string, original: Buffer, fault: Buffer, plan: { operator: string; site: { bytes: { start: number; end: number } }; replacement_text: string }): { originalText: Buffer; faultText: Buffer } | null {
+  const { start, end } = plan.site.bytes;
+  const cond = (other: string, kept: string): Buffer => Buffer.from(`(0 ? ${other} : 1 ? ${kept} : ${other})`, "utf8");
+  let originalText: Buffer;
+  let faultText: Buffer;
+  // Where the kept versions' site ends, and how long each conditional is, for the shape check.
+  let originalSiteEnd: number;
+  let faultSiteEnd: number;
+  if (plan.operator === "rounding_floor_ceil") {
+    const o = original.subarray(start, end).toString("utf8");
+    const r = plan.replacement_text;
+    const faultEnd = start + Buffer.byteLength(r, "utf8");
+    originalText = Buffer.concat([original.subarray(0, start), cond(r, o), original.subarray(end)]);
+    faultText = Buffer.concat([fault.subarray(0, start), cond(o, r), fault.subarray(faultEnd)]);
+    originalSiteEnd = end;
+    faultSiteEnd = faultEnd;
+  } else if (plan.operator === "negation_removal") {
+    // The operand of the removed `!`, read on the original's syntax tree.
+    const text = original.toString("utf8");
+    const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    const charStart = original.subarray(0, start).toString("utf8").length;
+    let operand: ts.Expression | null = null;
+    const visit = (node: ts.Node): void => {
+      if (!operand && ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken && node.getStart(source) === charStart) operand = node.operand;
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    if (!operand) return null;
+    const x = (operand as ts.Expression).getText(source);
+    const opEnd = Buffer.byteLength(text.slice(0, (operand as ts.Expression).end), "utf8");
+    const faultOpEnd = opEnd - (end - start);
+    originalText = Buffer.concat([original.subarray(0, start), cond(x, `!${x}`), original.subarray(opEnd)]);
+    faultText = Buffer.concat([fault.subarray(0, start), cond(`!${x}`, x), fault.subarray(faultOpEnd)]);
+    originalSiteEnd = opEnd;
+    faultSiteEnd = faultOpEnd;
+  } else {
+    return null;
+  }
+  if (!parsesAs(path, originalText.toString("utf8")) || !parsesAs(path, faultText.toString("utf8"))) return null;
+  const originalCond = originalText.length - original.length + (originalSiteEnd - start);
+  const faultCond = faultText.length - fault.length + (faultSiteEnd - start);
+  if (!sameShape(path, original, start, originalSiteEnd, originalText, start + originalCond)) return null;
+  if (!sameShape(path, fault, start, faultSiteEnd, faultText, start + faultCond)) return null;
+  return { originalText, faultText };
 }
 
 /**
- * The two text controls: the original with the faulty line's text kept in a comment just after the
- * site, and the fault with the original line's text kept there. Behavior is unchanged, so a test of
- * the behavior gives the same result; a test that reads the code's text does not.
+ * Whether `control` parses exactly as `kept`, apart from the site: the node spanning the site in `kept`
+ * and the node spanning the conditional in `control` are each one marker, and every other node, name and
+ * literal is the same, in the same order. The same comparison planFault makes for the fault.
  */
-export function textControls(original: Buffer, fault: Buffer, site: { start: number; end: number }, replacement: string): { originalText: Buffer; faultText: Buffer } {
-  const comment = (text: string): Buffer => Buffer.from(`/* ${text.replace(/\*\//g, "* /")} */`, "utf8");
-  const faultEnd = site.start + Buffer.byteLength(replacement, "utf8");
-  return {
-    originalText: Buffer.concat([original.subarray(0, site.end), comment(lineAround(fault, site.start)), original.subarray(site.end)]),
-    faultText: Buffer.concat([fault.subarray(0, faultEnd), comment(lineAround(original, site.start)), fault.subarray(faultEnd)])
+function sameShape(path: string, kept: Buffer, siteStart: number, keptSiteEnd: number, control: Buffer, controlSiteEnd: number): boolean {
+  const shape = (bytes: Buffer, from: number, to: number): string[] | null => {
+    const text = bytes.toString("utf8");
+    const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    const s = bytes.subarray(0, from).toString("utf8").length;
+    const e = bytes.subarray(0, to).toString("utf8").length;
+    const out: string[] = [];
+    let found = false;
+    const visit = (node: ts.Node): void => {
+      if (!found && !ts.isSourceFile(node) && node.getStart(sf) === s && node.end === e) {
+        out.push("site");
+        found = true;
+        return;
+      }
+      const raw = ts.isSourceFile(node) ? undefined : (node as { text?: unknown }).text;
+      out.push(`${node.kind}:${typeof raw === "string" ? raw : ""}`);
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    return found ? out : null;
   };
+  const a = shape(kept, siteStart, keptSiteEnd);
+  const b = shape(control, siteStart, controlSiteEnd);
+  return a !== null && b !== null && a.length === b.length && a.every((entry, i) => entry === b[i]);
 }
 
 const LIMITS = [
@@ -424,10 +514,13 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   const requestPath = join(briefDir, "brief", "generation-request.json");
   const briefTagPath = join(briefDir, "fault-run.json");
   if (!existsSync(requestPath) || !existsSync(briefTagPath)) refuse("brief_invalid", `${opts.brief} is not a test-brief run.`);
-  const briefTag = readJson(briefTagPath) as { kind?: string; fault_run?: { manifest_sha256?: string } };
+  const briefTag = readJson(briefTagPath) as { kind?: string; fault_run?: { manifest_sha256?: string }; source?: string | null };
   if (briefTag.kind !== "test_brief" || briefTag.fault_run?.manifest_sha256 !== run.manifestSha) refuse("brief_invalid", "the brief was written for another fault run.");
   const requestBytes = readFileSync(requestPath);
-  if (!requestBytes.equals(recordBytes(buildGenerationRequest(run, sourceRoot)))) {
+  const rebuilt = buildGenerationRequest(run, sourceRoot);
+  const briefMdBytes = existsSync(join(briefDir, "brief", "brief.md")) ? readFileSync(join(briefDir, "brief", "brief.md")) : Buffer.alloc(0);
+  const briefMdRebuilt = Buffer.from(briefMarkdown(rebuilt, toWorkspaceRel(root, run.dir), toWorkspaceRel(root, briefDir), briefTag.source ?? null), "utf8");
+  if (!requestBytes.equals(recordBytes(rebuilt)) || !briefMdBytes.equals(briefMdRebuilt)) {
     refuse("brief_invalid", "the brief is not the one test-brief writes for this fault run and this checkout (edited, or written by another version).");
   }
   const requestSha = sha256Hex(requestBytes);
@@ -441,7 +534,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
 
   // Attempts are counted per fault, over every fault run of it, from the runs in which a candidate actually ran.
   const runsDir = join(workspacePaths(root).dir, "proof-runs");
-  const earlier = earlierAttempts(runsDir, run.faultRecordSha, run.profile.target_record_sha256);
+  const earlier = earlierAttempts(runsDir, run.faultKey);
   if (earlier.length >= MAX_CANDIDATE_ATTEMPTS) {
     refuse("attempts_exhausted", `${earlier.length} candidates already ran on this fault (counting every probe-fault run of it); the limit is ${MAX_CANDIDATE_ATTEMPTS}.`);
   }
@@ -462,6 +555,10 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   if (!target) refuse("candidate_invalid", `${patch.path} is not one of the test files the fault run selected; the new test goes beside them.`);
   const applied = applyAdditivePatch(target!.bytes, patch);
   const afterSha = sha256Hex(applied.bytes);
+  const byGit = gitAppliedBytes(applied.path, target!.bytes, opts.candidate_bytes);
+  if (!byGit || !byGit.equals(applied.bytes)) {
+    refuse("candidate_invalid", `git applies this patch ${byGit ? "differently" : "not at all"}, so it would not deliver the bytes that are verified; make it with git diff against the commit's ${applied.path}.`);
+  }
   const newTest = readNewTest({ path: applied.path, patched: applied.bytes, original: target!.bytes, added: applied.added });
   const declaredFiles = assertion.candidate.files;
   if (declaredFiles.length !== 1 || declaredFiles[0]!.path !== applied.path || declaredFiles[0]!.sha256_after !== afterSha) {
@@ -469,7 +566,8 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   }
   if (assertion.test.file !== applied.path) refuse("assertion_invalid", `the new test's file ${assertion.test.file} is not the file the patch changes.`);
   const declaredLine = assertion.assertion.line;
-  if (declaredLine < newTest.start || declaredLine > newTest.end || !newTest.assertionLines.has(declaredLine)) {
+  const declaredColumns = [...(newTest.assertionPositions.get(declaredLine) ?? [])];
+  if (declaredLine < newTest.start || declaredLine > newTest.end || declaredColumns.length === 0) {
     refuse("assertion_invalid", `line ${declaredLine} is not where an assertion call inside the new it(…) call (lines ${newTest.start}–${newTest.end}) names its check.`);
   }
   const patchedLines = applied.bytes.toString("utf8").split("\n");
@@ -499,7 +597,8 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   }
   const plan = replanned.plan;
   const originalSha = run.faultRecord.file_sha256;
-  const controls = textControls(fileBytes, plan.mutated, plan.site.bytes, plan.replacement_text);
+  const controls = textControls(run.record.identity.file, fileBytes, plan.mutated, plan);
+  if (!controls) refuse("fault_mismatch", `no text control can be made for the ${plan.operator} fault in ${run.record.identity.file}, so a test that follows the code's text could not be told apart.`);
   const fixture = asThisCommand(() => readFixture(run.fixtureBytes));
   if (fixture.baselinePassing === null) refuse("fault_run_invalid", "the fixture records no baseline count, so the whole suite with the new test cannot be checked.");
   const nodeModules = join(sourceRoot, "node_modules");
@@ -524,6 +623,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       join(runDir, "fault-run.json"),
       recordBytes(
         tagged("verify_test", run, {
+          fault_key: run.faultKey,
           fault_record_sha256: run.faultRecordSha,
           target_record_sha256: run.profile.target_record_sha256,
           brief_run: { run_id: briefCheck.ok ? briefCheck.manifest.run_id : null, manifest_sha256: sha256Hex(readFileSync(join(briefDir, "MANIFEST.json"))) },
@@ -532,6 +632,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       )
     );
     writeFileAtomic(join(runDir, "generation-request.json"), requestBytes);
+    writeFileAtomic(join(runDir, "brief.md"), briefMdBytes);
     writeFileAtomic(join(runDir, "candidate.patch"), opts.candidate_bytes);
     writeFileAtomic(join(runDir, "assertion-record.json"), recordBytes(assertion));
     const assertionSha = recordSha256(assertion);
@@ -612,11 +713,11 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       if (!go("candidate_original_repeat", "original", fileArgv)) return;
       if (!go("candidate_fault", "mutant", fileArgv) || !go("candidate_fault_repeat", "mutant", fileArgv)) return;
       if (!go("fault_full_suite_with_candidate", "mutant", fullArgv)) return;
-      if (!put(controls.faultText)) return void (copyWriteFailed = "fault_text");
+      if (!put(controls!.faultText)) return void (copyWriteFailed = "fault_text");
       if (!go("candidate_fault_text_control", "mutant", fileArgv, true)) return;
       if (!put(fileBytes) || sha256Hex(readFileSync(targetInCopy)) !== originalSha) return void (copyWriteFailed = "restore");
       if (!go("candidate_restored", "mutant", fileArgv, false)) return;
-      if (!put(controls.originalText)) return void (copyWriteFailed = "original_text");
+      if (!put(controls!.originalText)) return void (copyWriteFailed = "original_text");
       if (!go("candidate_original_text_control", "mutant", fileArgv, false)) return;
       go("full_suite_with_candidate", "original", fullArgv);
     };
@@ -635,9 +736,9 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     candidate_fault: plan.mutated_file_sha256,
     candidate_fault_repeat: plan.mutated_file_sha256,
     fault_full_suite_with_candidate: plan.mutated_file_sha256,
-    candidate_fault_text_control: sha256Hex(controls.faultText),
+    candidate_fault_text_control: sha256Hex(controls!.faultText),
     candidate_restored: originalSha,
-    candidate_original_text_control: sha256Hex(controls.originalText),
+    candidate_original_text_control: sha256Hex(controls!.originalText),
     full_suite_with_candidate: originalSha
   };
   const outcome = classifyCandidate({
@@ -647,7 +748,9 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     priorIds: run.originalSelected.filter((test) => test.file === applied.path).map((test) => `${test.file}\u0000${test.full_title}`),
     expectedTargetSha,
     copyWriteFailed,
-    checkoutUnchanged
+    checkoutUnchanged,
+    declaredColumns,
+    faultRunScope: run.classification.scope
   });
   const changedBy = fixture.prNumber !== null ? `PR #${fixture.prNumber}` : `the change ${run.record.selection.base_commit.slice(0, 12)}..${run.record.identity.merged_commit.slice(0, 12)}`;
   const assisted = assertion.generation.assisted || run.oracle.assisted.flag;
@@ -712,10 +815,12 @@ export function issueOf(stage: StageObservation | undefined): string | null {
   return null;
 }
 
-export function atDeclared(test: ObservedTest | undefined, assertion: AssertionRecord): boolean {
+/** The failure was raised at the declared assertion: its file, its line, and the column where that assertion call names its check. */
+export function atDeclared(test: ObservedTest | undefined, assertion: AssertionRecord, columns: number[]): boolean {
   if (!test?.failure || !test.failure.at_assertion || NOT_AN_ASSERTION_ERRORS.has(test.failure.name ?? "")) return false;
   const at = frameLocation(test.failure.first_frame);
-  return at !== null && at.file === assertion.assertion.file && at.line === assertion.assertion.line;
+  const column = frameColumn(test.failure.first_frame);
+  return at !== null && at.file === assertion.assertion.file && at.line === assertion.assertion.line && column !== null && columns.includes(column);
 }
 
 /** Each test's outcome in a stage, with the line a failure was raised at: what a repeat must reproduce. */
@@ -737,6 +842,10 @@ export function classifyCandidate(input: {
   /** A rewrite of the faulty copy's target file that could not be confirmed, if any. */
   copyWriteFailed: "fault_text" | "restore" | "original_text" | null;
   checkoutUnchanged: boolean;
+  /** The 1-based columns on the declared line where an assertion call names its check. */
+  declaredColumns: number[];
+  /** The fault run's scope: "full_suite" when the whole suite was already seen to pass on this fault. */
+  faultRunScope: "selected" | "full_suite" | null;
 }): CandidateOutcome {
   const { stages, assertion } = input;
   const title = assertion.test.full_title;
@@ -772,7 +881,7 @@ export function classifyCandidate(input: {
   const caughtAtLine = (stage: StageObservation): boolean => {
     const t = stage.tests!;
     const mine = t.observed.find(isMine);
-    return ids(stage) === expectedIds && t.pending === 0 && !t.observed.some((test) => test.state === "failed" && test !== mine) && atDeclared(mine, assertion);
+    return ids(stage) === expectedIds && t.pending === 0 && !t.observed.some((test) => test.state === "failed" && test !== mine) && atDeclared(mine, assertion, input.declaredColumns);
   };
 
   // D: the original copy with the new test, then again.
@@ -800,11 +909,12 @@ export function classifyCandidate(input: {
   if (et.pending > 0 || mineE?.state === "pending") return out("inconclusive", "a_test_was_skipped_on_fault");
   if (mineE?.state === "passed") return out("not_caught", null);
   if (et.observed.some((test) => test.state === "failed" && test !== mineE)) return out("caught_off_assertion", "other_tests_failed");
-  if (!atDeclared(mineE, assertion)) return out("caught_off_assertion", "not_at_the_declared_line");
+  if (!atDeclared(mineE, assertion, input.declaredColumns)) return out("caught_off_assertion", "not_at_the_declared_line");
   const er = stages.candidate_fault_repeat;
   const erIssue = issueOf(er);
   if (erIssue) return out("inconclusive", `fault_repeat_${erIssue}`);
   if (outcomes(er) !== outcomes(e)) return out("inconclusive", "candidate_not_deterministic");
+  if (!atDeclared(er!.tests!.observed.find(isMine), assertion, input.declaredColumns)) return out("inconclusive", "candidate_not_deterministic");
 
   // E2: the whole suite with the new test on the fault: one failure, the new test, at its line.
   const e2 = stages.fault_full_suite_with_candidate;
@@ -814,8 +924,13 @@ export function classifyCandidate(input: {
   const failedE2 = e2t.observed.filter((test) => test.state === "failed");
   const mineE2 = failedE2.find(isMine);
   otherFailures = failedE2.filter((test) => test !== mineE2).map((test) => ({ file: test.file, full_title: test.full_title }));
-  if (e2t.executed === input.baseline + 1 && mineE2 && atDeclared(mineE2, assertion) && otherFailures.length > 0) return out("inconclusive", "existing_tests_also_catch");
-  if (e2t.executed !== input.baseline + 1 || failedE2.length !== 1 || !mineE2 || !atDeclared(mineE2, assertion)) return out("inconclusive", "fault_full_suite_differs");
+  if (e2t.executed === input.baseline + 1 && mineE2 && atDeclared(mineE2, assertion, input.declaredColumns) && otherFailures.length > 0) {
+    // The fault run saw the whole suite pass on this fault, or these tests also fail with the new test on the original:
+    // then the new test makes them fail, they do not catch the fault.
+    const failsOnOriginal = (stages.full_suite_with_candidate?.tests?.observed ?? []).some((test) => test.state === "failed" && otherFailures.some((other) => other.file === test.file && other.full_title === test.full_title));
+    return out("inconclusive", input.faultRunScope === "full_suite" || failsOnOriginal ? "new_test_breaks_other_tests" : "existing_tests_also_catch");
+  }
+  if (e2t.executed !== input.baseline + 1 || failedE2.length !== 1 || !mineE2 || !atDeclared(mineE2, assertion, input.declaredColumns)) return out("inconclusive", "fault_full_suite_differs");
 
   // The fault with the original line's text kept in a comment: a test of the behavior still fails at its line.
   if (input.copyWriteFailed === "fault_text") return out("inconclusive", "text_control_not_written");
@@ -864,9 +979,10 @@ const CANDIDATE_REASON_WORDS: Record<string, string> = {
   other_tests_failed: "other tests failed on the fault too",
   not_at_the_declared_line: "the new test failed on the fault, but not at its declared line",
   existing_tests_also_catch: "existing tests outside the selected files also fail on the fault, so they catch it already",
+  new_test_breaks_other_tests: "other tests fail once the new test runs beside them, so the new test interferes with them",
   fault_full_suite_differs: "the whole suite with the new test did not fail on the fault at the new test alone",
   text_control_not_written: "a text control could not be written into the copy",
-  mutation_aware: "the new test's result changed when only a comment holding the other version's text was added, so it reads the code's text rather than testing its behavior",
+  mutation_aware: "the new test's result changed when only the other version's code was added beside the site, never run, so it follows the code's text rather than testing its behavior",
   restore_not_verified: "restoring the original bytes could not be confirmed",
   restored_failed: "the new test's file did not pass after restoring the original",
   full_suite_with_candidate_differs: "the whole suite with the new test did not pass, or did not count one more test"
@@ -878,9 +994,9 @@ const STAGE_WORDS: Record<string, string> = {
   fault: "on the fault",
   fault_repeat: "on the fault, the second time",
   fault_full_suite: "for the whole suite on the fault",
-  fault_text_control: "on the fault with the original's text in a comment",
+  fault_text_control: "on the fault with the original's code beside it, never run",
   restored: "after restoring the original",
-  original_text_control: "on the original with the fault's text in a comment",
+  original_text_control: "on the original with the fault's code beside it, never run",
   full_suite: "for the whole suite on the original"
 };
 const ISSUE_WORDS: Record<string, string> = {
@@ -910,7 +1026,7 @@ function candidateStatement(
   const words = candidateReasonWords(outcome.reason);
   let sentence: string;
   if (outcome.result === "verified_gap") {
-    sentence = `A new test catches a fault ${ctx.missedBy} missed, ${where}: "${ctx.title}" passes on the original and after the fault is removed, and fails at its own assertion (${ctx.at}) on the fault; with it, the whole suite fails on the fault at that test alone. Each result held when run again, and under two text controls.`;
+    sentence = `A new test catches a fault ${ctx.missedBy} missed, ${where}: "${ctx.title}" passes on the original and after the fault is removed, and fails at its own assertion (${ctx.at}) on the fault; with it, the whole suite fails on the fault at that test alone. Each result held when run again, and with the other version's code kept beside the site, never run.`;
   } else if (outcome.result === "not_caught") {
     sentence = `The new test "${ctx.title}" passes with the fault ${where}: it does not catch it.`;
   } else if (outcome.result === "candidate_failed") {
@@ -918,7 +1034,7 @@ function candidateStatement(
   } else if (outcome.result === "caught_off_assertion") {
     sentence = `No claim: ${words}.`;
   } else {
-    const others = outcome.otherFailures.length > 0 && outcome.reason === "existing_tests_also_catch" ? ` (${outcome.otherFailures.map((test) => `"${test.full_title}"`).join(", ")})` : "";
+    const others = outcome.otherFailures.length > 0 && (outcome.reason === "existing_tests_also_catch" || outcome.reason === "new_test_breaks_other_tests") ? ` (${outcome.otherFailures.map((test) => `"${test.full_title}"`).join(", ")})` : "";
     sentence = `No claim about the new test ${where}: ${words}${others}.`;
   }
   if (!ctx.assisted) return sentence;
