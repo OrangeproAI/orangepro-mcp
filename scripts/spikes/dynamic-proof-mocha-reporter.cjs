@@ -50,10 +50,14 @@ function ancestorTitles(test) {
   return titles;
 }
 
+// Mocha marks a hook with type "hook". The title is consulted only when no type is given at all: a test
+// whose title happens to start with "before" or "after" is a test.
 function isHookFailure(test) {
   const type = String(test?.type ?? "");
-  const title = String(test?.title ?? "");
-  return type === "hook" || /^(?:"?(?:before|after)(?: each| all)?)/i.test(title);
+  if (type) {
+    return type === "hook";
+  }
+  return /^"(?:before|after)(?: each| all)?" hook/i.test(String(test?.title ?? ""));
 }
 
 class DynamicProofMochaReporter {
@@ -74,6 +78,22 @@ class DynamicProofMochaReporter {
         fullName: typeof test?.fullTitle === "function" ? test.fullTitle() : test?.title ?? "",
         status: "passed",
         title: test?.title ?? "",
+        file: test?.file ?? null,
+        duration: typeof test?.duration === "number" ? test.duration : null,
+        failureMessages: [],
+        failureDetails: []
+      });
+    });
+
+    // A skipped or pending test did not run. It is listed so that a run of nothing is visible as such.
+    runner.on("pending", test => {
+      bucket(test).assertionResults.push({
+        ancestorTitles: ancestorTitles(test),
+        fullName: typeof test?.fullTitle === "function" ? test.fullTitle() : test?.title ?? "",
+        status: "pending",
+        title: test?.title ?? "",
+        file: test?.file ?? null,
+        duration: null,
         failureMessages: [],
         failureDetails: []
       });
@@ -85,6 +105,8 @@ class DynamicProofMochaReporter {
         fullName: typeof test?.fullTitle === "function" ? test.fullTitle() : test?.title ?? "",
         status: "failed",
         title: test?.title ?? "",
+        file: test?.file ?? null,
+        duration: typeof test?.duration === "number" ? test.duration : null,
         failurePhase: isHookFailure(test) ? "hook" : "test",
         failureMessages: [failureMessage(error)],
         failureDetails: [serializeError(error)]
@@ -92,7 +114,14 @@ class DynamicProofMochaReporter {
     });
 
     runner.once("end", () => {
-      const body = `${JSON.stringify({ testResults: Array.from(files.values()) }, null, 2)}\n`;
+      const stats = runner.stats ?? {};
+      const totals = {
+        tests: stats.tests ?? null,
+        passes: stats.passes ?? null,
+        failures: stats.failures ?? null,
+        pending: stats.pending ?? null
+      };
+      const body = `${JSON.stringify({ testResults: Array.from(files.values()), stats: totals }, null, 2)}\n`;
       if (process.env.OPRO_DYNAMIC_PROOF_REPORT) {
         writeFileSync(process.env.OPRO_DYNAMIC_PROOF_REPORT, body);
         return;

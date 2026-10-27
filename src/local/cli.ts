@@ -40,6 +40,8 @@ import { shortReportPath } from "./viz/shortReport.js";
 import { autoProve, isRoastSurvivor } from "./autoProve.js";
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
+import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
+import { systemClock } from "./util/time.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
 import { runExportCli } from "./exportCli.js";
 import { startLocalMcpServer } from "./mcp.js";
@@ -147,6 +149,10 @@ Usage:
   opro changed-targets --base <sha> --merged <sha> [--range] [--limit 3] [--json]
     # read-only: maps the lines one merged change touched to exact functions and prints a target record for each selected one;
     # needs the graph, HEAD and a clean checkout at the merged commit; --range accepts a base that is not its first parent
+  opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <fixture-manifest.json> --tests <file>[,<file>…] --witness <file> [--full-suite] [--rationale <text>] [--json]
+    # one exact fault inside a bound target, run against the named existing tests on an original and a faulty copy,
+    # every command inside the fixture's container (docker, network off); operators: rounding_floor_ceil, negation_removal;
+    # needs an installed checkout; writes .orangepro/proof-runs/<run-id>/ and prints caught / missed / no claim
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
@@ -736,6 +742,48 @@ async function main(): Promise<number> {
       else for (const line of renderChangedTargets(res)) out(line);
       // A refusal is not a result: scripts must not read it as "no targets".
       return res.status === "refused" ? 1 : 0;
+    }
+
+    case "probe-fault": {
+      const need = (flag: string): string => {
+        const value = flags[flag];
+        if (typeof value !== "string" || value.trim() === "") throw new Error(`probe-fault requires --${flag}`);
+        return value;
+      };
+      const readJson = (flag: string): unknown => {
+        try {
+          return JSON.parse(readFileSync(resolve(cwd, need(flag)), "utf8"));
+        } catch (e) {
+          throw new Error(`--${flag} ${String(flags[flag])} could not be read as JSON: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
+      let res;
+      try {
+        res = opProbeFault(
+          cwd,
+          {
+            target_record: readTargetRecordFlag(cwd, need("target-record")),
+            fault: need("fault"),
+            oracle: readJson("oracle"),
+            fixture_bytes: readFileSync(resolve(cwd, need("fixture"))),
+            tests: need("tests").split(","),
+            witness_bytes: readFileSync(resolve(cwd, need("witness"))),
+            full_suite: asBool(flags["full-suite"], false),
+            source: typeof flags.source === "string" ? flags.source : undefined,
+            rationale: typeof flags.rationale === "string" ? flags.rationale : undefined
+          },
+          { clock: systemClock }
+        );
+      } catch (e) {
+        if (json && (e instanceof ProofRefusalError || e instanceof ProbeFaultRefusal)) {
+          printJson({ error: e.message, refusal: e.code });
+          return 1;
+        }
+        throw e;
+      }
+      if (json) printJson(res);
+      else for (const line of renderProbeFault(res)) out(line);
+      return 0;
     }
 
     case "score": {

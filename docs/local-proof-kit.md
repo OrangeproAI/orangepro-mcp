@@ -62,6 +62,8 @@ opro explain <generated_test_id># which evidence anchors grounded a test
 opro update                     # incremental, non-destructive refresh
 opro changed --base main        # changed files + affected behaviors/tests
 opro changed-targets --base <sha> --merged <sha>   # read-only: map a merged change's lines to exact functions (JS/TS)
+opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <file> --tests <files> --witness <file>
+                                # one exact fault, the named existing tests on an original and a faulty copy, inside a container
 opro export --out orangepro-evidence-pack.json
 opro analyze . --no-coverage-html # skip the behavior report HTML (it is written by default)
 opro export --format graph-html # write just the explorer (orangepro-graph.html)
@@ -284,6 +286,31 @@ as low risk. Each target is a record of the function's exact bytes and hashes. `
 --target-record <file>` re-derives the record from the file before trusting it, and for a
 prototype or exported-object method changes the function by its exact position rather
 than by searching for its name; `--preview` shows that change without running a test.
+
+`opro probe-fault` asks one narrow question about one target: do the named existing tests
+notice one small, valid fault inside it? It takes a target record, a fault written as
+`<operator>@<byte offset>` (two operators exist: `rounding_floor_ceil`, which swaps
+`Math.floor` and `Math.ceil`, and `negation_removal`, which removes a unary `!`), an
+approved expected behavior (`oracle.json`) with a small witness script, the fixture manifest
+that describes how the repository runs its tests and in which container, and the test files.
+
+- The fault is checked before anything runs: it must be exactly one node of the operator's
+  kind, strictly inside the recorded function body, and the faulty file must still parse.
+- The proof script makes an original and a faulty copy from the commit's own files (never
+  untracked files such as a `.env`), and changes the faulty one by exact position. Every command
+  that runs the repository's code (Mocha with the options the fixture allows, never the
+  repository's own `.mocharc`; Node's syntax check; the witness) runs in a container with no
+  network, a read-only root and read-only copies, no capabilities, and one writable output folder.
+  A boundary check runs before every stage, in that stage's shape.
+- The witness must give the same answer twice on the original and a different one on the faulty
+  copy, or no claim is made.
+- The result is computed from the stage files: `caught_by_existing` (a selected test that passed
+  on the original fails on the fault at an assertion), `survived_unverified` with the scope it
+  covers (the selected tests, or the whole suite when `--full-suite` also ran on both copies), or
+  `invalid_mutation`, `inconclusive` or `blocked` with a reason. A run in which no test executed,
+  a test was skipped, or a different set of tests ran is never a survivor.
+- Everything is written to `.orangepro/proof-runs/<run-id>/`, with `MANIFEST.json` last. The
+  checkout is not changed. It needs Docker and an installed checkout (`node_modules/mocha`).
 
 ### Dynamic proof language profiles
 

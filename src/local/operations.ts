@@ -300,7 +300,12 @@ export const PROOF_REFUSAL_CODES = [
   "binding_not_confirmed",
   "write_outside_copy",
   "symlinked_target",
-  "checkout_modified"
+  "checkout_modified",
+  "edit_outside_body",
+  "edit_mismatch",
+  "operator_not_allowed",
+  "no_op_mutation",
+  "not_single_site"
 ] as const;
 export type ProofRefusalCode = (typeof PROOF_REFUSAL_CODES)[number];
 
@@ -558,7 +563,7 @@ function defaultDeps(): OperationDeps {
   return { clock: systemClock, env: process.env };
 }
 
-function dynamicProofSpikePath(): string {
+export function dynamicProofSpikePath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   return resolve(here, "..", "..", "scripts", "spikes", "dynamic-proof-spike.mjs");
 }
@@ -636,7 +641,7 @@ function dynamicProofSpikePathFor(language: string): string {
   return dynamicProofSpikePath();
 }
 
-function defaultDynamicProofRunner(args: string[], opts: { cwd?: string; scriptPath?: string } = {}): ReturnType<DynamicProofRunner> {
+export function defaultDynamicProofRunner(args: string[], opts: { cwd?: string; scriptPath?: string } = {}): ReturnType<DynamicProofRunner> {
   const script = opts.scriptPath ?? dynamicProofSpikePath();
   if (!existsSync(script)) {
     throw new Error(
@@ -945,7 +950,7 @@ function boundMutationArgs(target: TargetDescription, body: ByteSpan, targets: s
  * span that were sent: a runner that does not know the binding arguments falls
  * back to its name search, and its result must not be credited as bound.
  */
-function runBoundSpike(
+export function runBoundSpike(
   runner: DynamicProofRunner,
   args: string[],
   sourceRoot: string,
@@ -1909,13 +1914,13 @@ function pythonModuleRoot(sourceRoot: string, targetRel: string, testRel: string
   return testAbs === found || testAbs.startsWith(found + sep) ? found : stop;
 }
 
-interface TsJsProofPlan {
+export interface TsJsProofPlan {
   targetAbs: string;
   /** Present only for a function changed by its exact position. */
   bound?: { target: TargetDescription; body: ByteSpan; args: string[] };
 }
 
-interface ProofPreflight {
+export interface ProofPreflight {
   sourceRoot: string;
   symbolTarget: ReturnType<typeof symbolTargetParts>;
   /** TS/JS targets only. */
@@ -1929,7 +1934,7 @@ interface ProofPreflight {
  * runs the same checks before its setup commands, so a refusal that is already certain
  * (an unsupported shape, a stale record) comes before anything touches the checkout.
  */
-function proofPreflight(root: string, opts: DynamicProofOptions, graph: LocalGraph, target: string, language: string): ProofPreflight {
+export function proofPreflight(root: string, opts: DynamicProofOptions, graph: LocalGraph, target: string, language: string): ProofPreflight {
   const sourceRoot = resolve(opts.source ?? root);
   assertProofSourceMatchesGraph(sourceRoot, graph);
   const symbolTarget = symbolTargetParts(target);
