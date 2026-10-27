@@ -20,6 +20,7 @@ import {
   type TargetUncertainty,
   type ViaHelper
 } from "./contracts/targetRecord.js";
+import { canonicalJson } from "./contracts/io.js";
 import type { GraphNode, LocalGraph } from "./graph/ontology.js";
 import { builtInRankExclusion } from "./score/rankEligibility.js";
 import { rankRiskGaps } from "./score/risk.js";
@@ -1445,16 +1446,6 @@ function mapChange(root: string, opts: ChangedTargetsOptions, deps: ChangedTarge
   };
 }
 
-/** JSON with sorted keys, so two records compare by content. */
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined);
-    return `{${entries.sort(([a], [b]) => byCodeUnit(a, b)).map(([key, v]) => `${JSON.stringify(key)}:${canonical(v)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
 export type TargetRecordCheck =
   | { ok: true }
   | { ok: false; refused: ChangedTargetsRefusal | "record_version" | "record_not_found" | "record_mismatch"; message: string };
@@ -1498,7 +1489,7 @@ export function verifyTargetRecord(
     return { ok: false, refused: "record_not_found", message: `${record.identity.symbol_id} is not a target of this change as the file, git and the graph give it now.` };
   }
   for (const part of ["identity", "selection"] as const) {
-    if (canonical(again[part]) !== canonical(record[part])) {
+    if (canonicalJson(again[part]) !== canonicalJson(record[part])) {
       return { ok: false, refused: "record_mismatch", message: `The record's ${part} differs from what the file, git and the graph give now.` };
     }
   }

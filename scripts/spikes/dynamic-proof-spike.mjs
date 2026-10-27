@@ -21,6 +21,8 @@ function usage() {
     "--link-node-modules is a trusted-repo speed mode: source files are copied, but node_modules is symlinked and must not be treated as write-isolated.",
     "Bound mutation (a member written `owner.name = function` or `F.prototype.name = function`): pass --bound-file-sha256 <hex> --bound-statement-start <n> --bound-function-start <n> --bound-body-start <n> --bound-body-end <n> (raw-byte offsets, end exclusive) and one --bound-target <owner.name> per name. The function is then changed by its exact position, never by a name search; any disagreement is a named refusal.",
     "--preview (bound mutation only) prints the diff the mutation would make and stops: no copy, no test run. --test is not needed.",
+    "Exact edit inside a bound body: add --bound-edit-start <n> --bound-edit-end <n> --bound-edit-expect-sha256 <hex> --bound-edit-replacement <text>. Only a closed set of token changes is allowed (Math.floor <-> Math.ceil, removing a unary !); --replacement is not needed.",
+    "--prepare <empty dir> (bound mutation only) makes the original and the mutated copy under that folder, prints where they are, and runs no test. The caller runs the tests and removes the folder.",
     "Repo test lifecycle hooks and runner binaries are trusted in this spike; use it only for local measurement on trusted checkouts.",
     "This is a spike harness only; it does not write graph edges or product artifacts."
   ].join("\n");
@@ -64,8 +66,12 @@ function parseArgs(argv) {
     i += 1;
   }
   for (const required of ["root", "test", "target", "method", "replacement"]) {
-    // A preview runs no test.
-    if (required === "test" && args.preview) {
+    // A preview and a prepared copy run no test.
+    if (required === "test" && (args.preview || args.prepare !== undefined)) {
+      continue;
+    }
+    // An exact edit carries its own replacement bytes.
+    if (required === "replacement" && args.boundEditStart !== undefined) {
       continue;
     }
     if (!Object.prototype.hasOwnProperty.call(args, required)) {
@@ -665,7 +671,7 @@ function copyRuntimeAliasTarget(absTarget, dest, isFile) {
 // A failed copy (e.g. ENOSPC) must not leave a partial multi-GB sandbox behind:
 // remove this copy's temp dir before rethrowing.
 function copyFixtureRoot(root, label, options) {
-  const tmpRoot = mkdtempSync(path.join(tmpdir(), `opro-dynamic-proof-${label}-`));
+  const tmpRoot = mkdtempSync(path.join(options.parentDir ?? tmpdir(), `opro-dynamic-proof-${label}-`));
   try {
     return populateFixtureRoot(tmpRoot, root, options);
   } catch (error) {
@@ -945,8 +951,21 @@ const JS_IDENTIFIER = "[\\p{ID_Start}$_][\\p{ID_Continue}$\\u200c\\u200d]*";
 // `<owner>.<property>` or `<F>.prototype.<property>`: the only two shapes that reach this path.
 const BOUND_TARGET_RE = new RegExp(`^${JS_IDENTIFIER}(?:\\.prototype)?\\.${JS_IDENTIFIER}$`, "u");
 const BOUND_ARG_KEYS = ["boundFileSha256", "boundStatementStart", "boundFunctionStart", "boundBodyStart", "boundBodyEnd", "boundTarget"];
+const BOUND_EDIT_KEYS = ["boundEditStart", "boundEditEnd", "boundEditExpectSha256", "boundEditReplacement"];
+// The only edits allowed inside a bound body: the bytes found and the bytes written, as a pair. `word` edits
+// must start and end on a name boundary; the caller has already checked with a parser that the span is one
+// node of the right kind, and these checks repeat what can be seen in the bytes alone.
+const BOUND_EDIT_TOKENS = [
+  { original: "Math.floor", replacement: "Math.ceil", word: true },
+  { original: "Math.ceil", replacement: "Math.floor", word: true },
+  { original: "!", replacement: "", word: false }
+];
 const ASCII_WHITESPACE_BYTES = new Set([0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20]);
 const DIFF_CONTEXT_LINES = 3;
+
+function isNameByte(byte) {
+  return byte !== undefined && (/[A-Za-z0-9_$]/.test(String.fromCharCode(byte)) || byte > 0x7f);
+}
 
 function sha256Hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -974,6 +993,18 @@ function parseBinding(args) {
   }
   if (binding.targets.length === 0 || binding.targets.some(target => !BOUND_TARGET_RE.test(target))) {
     throw new BoundRefusal("invalid_binding", "at least one --bound-target is required, each written owner.property or Owner.prototype.property");
+  }
+  if (BOUND_EDIT_KEYS.some(key => args[key] !== undefined)) {
+    const edit = {
+      start: offset("boundEditStart"),
+      end: offset("boundEditEnd"),
+      expectSha256: String(args.boundEditExpectSha256 ?? ""),
+      replacement: args.boundEditReplacement
+    };
+    if (![edit.start, edit.end].every(Number.isSafeInteger) || !/^[0-9a-f]{64}$/.test(edit.expectSha256) || typeof edit.replacement !== "string") {
+      throw new BoundRefusal("invalid_binding", "an exact edit needs --bound-edit-start, --bound-edit-end (non-negative integers), --bound-edit-expect-sha256 (lowercase hex) and --bound-edit-replacement");
+    }
+    binding.edit = edit;
   }
   return binding;
 }
@@ -1057,6 +1088,9 @@ function planBoundMutation(original, binding, replacementBody) {
   if (original[bodyStart] !== 0x7b || rawBraceClose(original, bodyStart) !== bodyEnd - 1 || textClose !== bodyEnd - 1) {
     throw new BoundRefusal("brace_scan_mismatch", "a raw brace count from the body's opening brace does not end at the recorded end of the body");
   }
+  if (binding.edit) {
+    return planBoundEdit(original, binding);
+  }
   const lineStart = statementStart === 0 ? 0 : original.lastIndexOf(0x0a, statementStart - 1) + 1;
   let indentEnd = lineStart;
   while (indentEnd < statementStart && (original[indentEnd] === 0x20 || original[indentEnd] === 0x09)) {
@@ -1066,6 +1100,40 @@ function planBoundMutation(original, binding, replacementBody) {
   const replacement = Buffer.from(`{\n${indent}  ${replacementBody.trim()}\n${indent}}`, "utf8");
   const mutated = Buffer.concat([original.subarray(0, bodyStart), replacement, original.subarray(bodyEnd)]);
   return { original, mutated, replacementBytes: replacement.length };
+}
+
+// A few bytes strictly inside the body, which must be exactly the bytes the caller expects and one of the
+// allowed token changes. Everything planBoundMutation checks about the binding has already passed.
+function planBoundEdit(original, binding) {
+  const { bodyStart, bodyEnd } = binding;
+  const { start, end, expectSha256, replacement } = binding.edit;
+  if (!(bodyStart < start && start < end && end < bodyEnd - 1)) {
+    throw new BoundRefusal("edit_outside_body", "the edit does not lie strictly inside the recorded body");
+  }
+  const found = original.subarray(start, end);
+  if (sha256Hex(found) !== expectSha256) {
+    throw new BoundRefusal("edit_mismatch", "the bytes at the edit position are not the bytes the edit was planned for");
+  }
+  const token = BOUND_EDIT_TOKENS.find(entry => entry.original === found.toString("utf8") && entry.replacement === replacement);
+  if (!token) {
+    throw new BoundRefusal("operator_not_allowed", "the edit is not one of the allowed token changes");
+  }
+  if (token.word && (isNameByte(original[start - 1]) || original[start - 1] === 0x2e || isNameByte(original[end]))) {
+    throw new BoundRefusal("edit_mismatch", "the edited bytes are part of a longer name");
+  }
+  if (!token.word && original[end] === 0x3d) {
+    throw new BoundRefusal("edit_mismatch", "the `!` is part of an inequality operator, not a negation");
+  }
+  const mutated = Buffer.concat([original.subarray(0, start), Buffer.from(replacement, "utf8"), original.subarray(end)]);
+  if (mutated.equals(original)) {
+    throw new BoundRefusal("no_op_mutation", "the edit leaves the file unchanged");
+  }
+  return {
+    original,
+    mutated,
+    replacementBytes: Buffer.byteLength(replacement, "utf8"),
+    edit: { start, end, originalSha256: expectSha256, replacement }
+  };
 }
 
 function mutateBound(writeAbs, copy, binding, replacementBody) {
@@ -1088,9 +1156,11 @@ function boundSummary(binding, plan) {
   return {
     fileSha256: binding.fileSha256,
     mutatedSha256: sha256Hex(plan.mutated),
-    changedBytes: { start: binding.bodyStart, end: binding.bodyEnd },
+    // An exact edit changes only its own span; a whole-body replacement changes the body.
+    changedBytes: plan.edit ? { start: plan.edit.start, end: plan.edit.end } : { start: binding.bodyStart, end: binding.bodyEnd },
     replacementBytes: plan.replacementBytes,
-    targets: binding.targets
+    targets: binding.targets,
+    ...(plan.edit ? { edit: plan.edit, bodyBytes: { start: binding.bodyStart, end: binding.bodyEnd } } : {})
   };
 }
 
@@ -2528,12 +2598,47 @@ function redactSecrets(text) {
     .replace(/(sk-[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+/g, "$1[REDACTED]");
 }
 
+// Tests that ran to a pass or a failure, from the runner's report; null when there is no report to count.
+// Skipped and pending tests did not run.
+function executedTestCount(run) {
+  if (!Array.isArray(run.report?.testResults)) {
+    return null;
+  }
+  let executed = 0;
+  for (const suite of run.report.testResults) {
+    for (const assertion of Array.isArray(suite.assertionResults) ? suite.assertionResults : []) {
+      if (assertion.status === "passed" || (assertion.status === "failed" && assertion.failurePhase !== "hook")) {
+        executed += 1;
+      }
+    }
+  }
+  return executed;
+}
+
 function classify({ baseline, mutant, testRel, repoRoot }) {
   if (baseline.exitCode !== 0 || baseline.timedOut) {
     return {
       status: "unrunnable",
       proven: false,
       reason: "baseline test did not pass"
+    };
+  }
+  // A clean exit in which no test ran, or that left no report to show what ran (a process.exit in a hook
+  // ends the run before the reporter's last word), says nothing about the mutant: never "survived".
+  const baselineRan = executedTestCount(baseline);
+  const mutantRan = mutant.exitCode === 0 && !mutant.timedOut ? executedTestCount(mutant) : 1;
+  if (baselineRan === null || mutantRan === null) {
+    return {
+      status: "unrunnable",
+      proven: false,
+      reason: "the test runner left no report"
+    };
+  }
+  if (baselineRan === 0 || mutantRan === 0) {
+    return {
+      status: "unrunnable",
+      proven: false,
+      reason: "no test executed"
     };
   }
   if (mutant.exitCode === 0 && !mutant.timedOut) {
@@ -2567,7 +2672,7 @@ function runProof(args, root, binding) {
   const vitestConfigRel = args.vitestConfig ? path.relative(root, resolveInside(root, args.vitestConfig)) : null;
   const jestConfigRel = args.jestConfig ? path.relative(root, resolveInside(root, args.jestConfig)) : null;
   const timeoutMs = parseTimeoutMs(args.timeoutMs);
-  const replacementBody = buildReplacementBody(args.replacement, args.replacementMode);
+  const replacementBody = binding?.edit ? null : buildReplacementBody(args.replacement, args.replacementMode);
   const testEnv = parseTestEnv(args.testEnv);
   const workspaceRoot = detectWorkspaceRoot(root);
   const runner = detectRunner(root, { ...args, workspaceRoot, testAbs });
@@ -2637,13 +2742,18 @@ function boundAttempt(args, binding, givenRoot) {
   if (realpathSync(targetAbs) !== targetAbs) {
     throw new BoundRefusal("symlinked_target", `${args.target} is reached through a symbolic link`);
   }
-  let replacementBody;
-  try {
-    replacementBody = buildReplacementBody(args.replacement, args.replacementMode);
-  } catch (error) {
-    throw new BoundRefusal("invalid_binding", error instanceof Error ? error.message : String(error));
+  let replacementBody = null;
+  if (!binding.edit) {
+    try {
+      replacementBody = buildReplacementBody(args.replacement, args.replacementMode);
+    } catch (error) {
+      throw new BoundRefusal("invalid_binding", error instanceof Error ? error.message : String(error));
+    }
   }
   const plan = planBoundMutation(readFileSync(targetAbs), binding, replacementBody);
+  if (args.prepare !== undefined) {
+    return prepareCopies(args, root, targetAbs, binding, replacementBody);
+  }
   if (!args.preview) {
     insideOrRefuse(root, args.test, "--test");
     return runProof(args, root, binding);
@@ -2659,6 +2769,81 @@ function boundAttempt(args, binding, givenRoot) {
     bound: boundSummary(binding, plan),
     diff: unifiedDiff(targetRel, plan.original.toString("utf8"), plan.mutated.toString("utf8"))
   };
+}
+
+// The original and the mutated copy, side by side under the caller's empty folder, and nothing run. The
+// caller runs the tests (in its own boundary) and removes the folder. node_modules is never copied or
+// linked: the caller decides how dependencies are reached.
+function prepareCopies(args, root, targetAbs, binding, replacementBody) {
+  const parent = path.resolve(args.prepare);
+  if (!existsSync(parent) || !lstatSync(parent).isDirectory() || lstatSync(parent).isSymbolicLink() || readdirSync(parent).length > 0) {
+    throw new BoundRefusal("invalid_binding", "--prepare must name an existing, empty, real folder");
+  }
+  if (isInsideDir(root, realpathSync(parent))) {
+    throw new BoundRefusal("write_outside_copy", "--prepare must not be inside the source root");
+  }
+  const targetRel = path.relative(root, targetAbs);
+  const original = copyTrackedSnapshot(root, parent, "original");
+  const mutant = copyTrackedSnapshot(root, parent, "mutant");
+  const plan = mutateBound(path.join(mutant.repoRoot, targetRel), { tmpRoot: mutant.tmpRoot, checkoutAbs: targetAbs }, binding, replacementBody);
+  return {
+    status: "prepared",
+    proven: false,
+    reason: "copies prepared: no test was run",
+    target: targetRel,
+    method: args.method,
+    bound: boundSummary(binding, plan),
+    diff: unifiedDiff(targetRel, plan.original.toString("utf8"), plan.mutated.toString("utf8")),
+    copies: {
+      original: { root: original.repoRoot, mono: original.monoRoot },
+      mutant: { root: mutant.repoRoot, mono: mutant.monoRoot },
+      skipped: original.skipped
+    }
+  };
+}
+
+// The pinned snapshot: the files HEAD records under the source root, read from git's object store, never
+// from the working tree. An untracked file (a .env, a local .npmrc) never reaches a copy, and an edit made
+// in the checkout while the run is going cannot make the two copies differ. Symbolic links and submodules
+// are not written; they are listed so the caller can tell a selected file that is missing.
+function copyTrackedSnapshot(root, parentDir, label) {
+  const dir = mkdtempSync(path.join(parentDir, `opro-dynamic-proof-${label}-`));
+  const git = (args, input) => spawnSync("git", ["-c", "core.hooksPath=/dev/null", "-C", root, ...args], { input, maxBuffer: 1024 * 1024 * 1024 });
+  const prefixRun = git(["rev-parse", "--show-prefix"]);
+  const tree = prefixRun.status === 0 ? git(["ls-tree", "-r", "-z", "--full-name", "HEAD", "--", "."]) : prefixRun;
+  if (prefixRun.status !== 0 || tree.status !== 0) {
+    throw new BoundRefusal("invalid_binding", "--prepare needs the source root inside a git checkout with a HEAD commit");
+  }
+  const prefix = prefixRun.stdout.toString("utf8").trim();
+  const entries = tree.stdout.toString("utf8").split("\0").filter(Boolean).map(line => {
+    const tab = line.indexOf("\t");
+    const [mode, type, sha] = line.slice(0, tab).split(" ");
+    return { mode, type, sha, file: line.slice(tab + 1) };
+  });
+  const blobs = entries.filter(entry => entry.type === "blob" && (entry.mode === "100644" || entry.mode === "100755"));
+  const skipped = entries.filter(entry => !blobs.includes(entry)).map(entry => entry.file.slice(prefix.length));
+  const batch = blobs.length > 0 ? git(["cat-file", "--batch"], `${blobs.map(entry => entry.sha).join("\n")}\n`) : { status: 0, stdout: Buffer.alloc(0) };
+  if (batch.status !== 0) {
+    throw new BoundRefusal("invalid_binding", "git could not read the snapshot's files");
+  }
+  let at = 0;
+  for (const entry of blobs) {
+    const lineEnd = batch.stdout.indexOf(0x0a, at);
+    const [sha, type, size] = batch.stdout.subarray(at, lineEnd).toString("utf8").split(" ");
+    const length = Number(size);
+    if (sha !== entry.sha || type !== "blob" || !Number.isSafeInteger(length)) {
+      throw new BoundRefusal("invalid_binding", "git returned an object the snapshot did not ask for");
+    }
+    const rel = entry.file.slice(prefix.length);
+    if (!entry.file.startsWith(prefix) || rel === "" || path.isAbsolute(rel) || rel.split("/").includes("..")) {
+      throw new BoundRefusal("invalid_binding", `the snapshot lists a path outside the source root: ${entry.file}`);
+    }
+    const dest = path.join(dir, rel);
+    mkdirSync(path.dirname(dest), { recursive: true });
+    writeFileSync(dest, batch.stdout.subarray(lineEnd + 1, lineEnd + 1 + length), { mode: entry.mode === "100755" ? 0o755 : 0o644 });
+    at = lineEnd + 1 + length + 1;
+  }
+  return { tmpRoot: dir, repoRoot: dir, monoRoot: dir, skipped };
 }
 
 // On the bound path a path the caller named wrongly is a refusal like any other: named, and JSON when asked for.
@@ -2725,10 +2910,13 @@ function main() {
   if (args.preview && !binding) {
     throw new BoundRefusal("preview_requires_bound", "--preview needs the --bound-* arguments; the name search has no preview");
   }
+  if (!binding && (args.prepare !== undefined || BOUND_EDIT_KEYS.some(key => args[key] !== undefined))) {
+    throw new BoundRefusal("preview_requires_bound", "--prepare and an exact edit need the --bound-* arguments; the name search has neither");
+  }
   const output = binding ? runBound(args, binding) : runProof(args, nameSearchRoot(path.resolve(args.root)), null);
   if (args.json) {
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-  } else if (output.status === "preview") {
+  } else if (output.status === "preview" || output.status === "prepared") {
     process.stdout.write(output.diff);
   } else {
     process.stdout.write(`${output.status}: ${output.reason}\n`);
