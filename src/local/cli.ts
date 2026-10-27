@@ -42,6 +42,7 @@ import type { AutoProveAttempt } from "./autoProve.js";
 import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
 import { opTestBrief, opVerifyTest, renderTestBrief, renderVerifyTest } from "./candidateTest.js";
+import { opExportTests, renderExportTests } from "./exportTests.js";
 import { systemClock } from "./util/time.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
 import { runExportCli } from "./exportCli.js";
@@ -159,6 +160,9 @@ Usage:
   opro verify-test --from-run <probe-fault run folder> --brief <test-brief run folder> --candidate <patch> --assertion <assertion-record.json> [--source <checkout>] [--json]
     # the new test, as a patch that only adds one it(…) call, on the original, the same fault, two text controls, restored,
     # and the whole suite, inside the container; the result field decides (the exit code is 0 for every result)
+  opro export-tests --from-run <verify-test run folder> [--source <checkout>] [--json]
+    # from a verified_gap run: orangepro-tests.patch (test-only), diagnostic-fault.patch, a fresh replay inside the container
+    # (the whole suite, with the patch, with the patch on the same fault, restored), verification-receipt.json (rows A-H) and summary.html
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
@@ -790,6 +794,23 @@ async function main(): Promise<number> {
       if (json) printJson(res);
       else for (const line of renderProbeFault(res)) out(line);
       return 0;
+    }
+
+    case "export-tests": {
+      const fromRun = flags["from-run"];
+      if (typeof fromRun !== "string" || fromRun.trim() === "") throw new Error("export-tests requires --from-run");
+      try {
+        const res = opExportTests(cwd, { from_run: fromRun, source: typeof flags.source === "string" ? flags.source : undefined }, { clock: systemClock });
+        if (json) printJson(res);
+        else for (const line of renderExportTests(res)) out(line);
+        return 0;
+      } catch (e) {
+        if (json && (e instanceof ProofRefusalError || e instanceof ProbeFaultRefusal)) {
+          printJson({ error: e.message, refusal: e.code });
+          return 1;
+        }
+        throw e;
+      }
     }
 
     case "test-brief":
