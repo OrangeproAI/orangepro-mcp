@@ -8,7 +8,9 @@
 export const RUN_PROFILE_VERSION = "orangepro.run_profile.v1" as const;
 export const STAGE_OBSERVATION_VERSION = "orangepro.stage_observation.v1" as const;
 export const CLASSIFICATION_VERSION = "orangepro.fault_classification.v1" as const;
-export const FAULT_CLASSIFIER_VERSION = "orangepro.fault_classifier.v1" as const;
+// v2 (A3): "at an assertion" needs the failure's first stack frame in the test's own file; v1 also accepted
+// any AssertionError or any error carrying expected and actual.
+export const FAULT_CLASSIFIER_VERSION = "orangepro.fault_classifier.v2" as const;
 
 export const STAGE_NAMES = [
   "original_selected",
@@ -18,7 +20,19 @@ export const STAGE_NAMES = [
   "witness_fault",
   "fault_selected",
   "original_full_suite",
-  "fault_full_suite"
+  "fault_full_suite",
+  // A3 (verify-test): the new test on the original (twice), on the same fault (twice), the whole suite on the
+  // fault, the fault with the original text kept in a comment, restored, the original with the fault's text
+  // kept in a comment, and the whole suite with it on the original.
+  "candidate_original",
+  "candidate_original_repeat",
+  "candidate_fault",
+  "candidate_fault_repeat",
+  "fault_full_suite_with_candidate",
+  "candidate_fault_text_control",
+  "candidate_restored",
+  "candidate_original_text_control",
+  "full_suite_with_candidate"
 ] as const;
 export type StageName = (typeof STAGE_NAMES)[number];
 
@@ -59,6 +73,8 @@ export interface RunProfile {
   runner: { name: "mocha"; version: string };
   container: ContainerProfile;
   limits: { stage_deadline_ms: number };
+  /** verify-test only: the candidate and its assertion record, frozen before any stage, so every stage file commits to them. */
+  candidate?: { patch_sha256: string; assertion_record_sha256: string; generation_request_sha256: string };
 }
 
 export interface ObservedTest {
@@ -73,7 +89,11 @@ export interface ObservedTest {
     name: string | null;
     message: string;
     first_frame: string | null;
-    /** The A2 rule: an AssertionError, an error with expected/actual, or one raised on a line of the test's own file. */
+    /**
+     * Classifier v2 (A3): the first stack frame is a line of the test's own file, the error is not a
+     * TypeError/ReferenceError/SyntaxError/RangeError, and a rewritten stack's real origin is not repository
+     * code outside the test. classification.json names the classifier version.
+     */
     at_assertion: boolean;
   } | null;
 }
@@ -90,7 +110,7 @@ export interface StageObservation {
   stage: StageName;
   run_id: string;
   run_profile_sha256: string;
-  /** null for stages on the original copy. */
+  /** The fault record, when the copy's target bytes hold the fault; null on the original, after the restore, and on the original-text control. */
   fault_record_sha256: string | null;
   copy: "original" | "mutant";
   /** sha256 of the target file in the copy, read just before the stage ran. */

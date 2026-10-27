@@ -64,6 +64,9 @@ opro changed --base main        # changed files + affected behaviors/tests
 opro changed-targets --base <sha> --merged <sha>   # read-only: map a merged change's lines to exact functions (JS/TS)
 opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <file> --tests <files> --witness <file>
                                 # one exact fault, the named existing tests on an original and a faulty copy, inside a container
+opro test-brief --from-run <run>  # for a fault the existing tests missed: what a coding agent needs to write one new test
+opro verify-test --from-run <run> --brief <run> --candidate <patch> --assertion <file>
+                                # run the new test on the original, the same fault and the restored copy, inside a container
 opro export --out orangepro-evidence-pack.json
 opro analyze . --no-coverage-html # skip the behavior report HTML (it is written by default)
 opro export --format graph-html # write just the explorer (orangepro-graph.html)
@@ -305,12 +308,51 @@ that describes how the repository runs its tests and in which container, and the
 - The witness must give the same answer twice on the original and a different one on the faulty
   copy, or no claim is made.
 - The result is computed from the stage files: `caught_by_existing` (a selected test that passed
-  on the original fails on the fault at an assertion), `survived_unverified` with the scope it
+  on the original fails on the fault at an assertion: the error's first stack frame is in that
+  test's own file, it is not a `TypeError`, `ReferenceError`, `SyntaxError` or `RangeError`, and when
+  the stack was rewritten to start at the test's call, as supertest does, it was not really raised
+  in repository code outside the test), `survived_unverified` with the scope it
   covers (the selected tests, or the whole suite when `--full-suite` also ran on both copies), or
   `invalid_mutation`, `inconclusive` or `blocked` with a reason. A run in which no test executed,
   a test was skipped, or a different set of tests ran is never a survivor.
 - Everything is written to `.orangepro/proof-runs/<run-id>/`, with `MANIFEST.json` last. The
   checkout is not changed. It needs Docker and an installed checkout (`node_modules/mocha`).
+
+When the existing tests missed the fault, two more commands close the gap with one new test.
+`opro test-brief --from-run <run>` checks that run against its manifest and refuses unless its
+result is `survived_unverified` (and no other existing test failed on the fault when the whole
+suite ran). It writes a brief (`generation-request.json` and `brief.md`): the approved expected
+behavior, the fault, what the existing tests did on both copies, the selected test files as the
+commit has them, where the new test goes, and a template for the assertion record. It runs
+nothing. Whoever writes the test (a coding agent, a model, or a person) returns two files:
+
+- a patch, as `git diff` writes it, that only adds lines to one of the selected test files: one
+  new `it(…)` call with everything the test needs inside it. The test may change only objects it
+  creates itself, may load no module the file does not already load, and may not use `.only`,
+  `.skip`, `.retries`, `process`, `require.cache`, `eval` or the like. OrangePro applies the patch
+  itself, byte for byte, and reads the new test on its syntax tree; anything else is refused by name;
+- `assertion-record.json`, which names the new test (its full title, as Mocha reports it), the line
+  where its declared assertion call names its check, what it checks, and who wrote it and what they
+  saw (a test written by a coding agent or a person is marked assisted). The run profile, which
+  every stage file names, records the hash of this file and of the patch before any stage runs.
+
+`opro verify-test` checks both against the brief (rebuilt and compared byte for byte) and the fault
+run, re-plans the same fault and requires it to be the recorded one, then runs these stages in the
+container: the new test's file on the original, twice; on the fault, twice; the whole suite on the
+fault; the file on the fault with the original line's text kept in a comment; the file after the
+original bytes are written back (and hash-checked); the file on the original with the faulty
+line's text kept in a comment; and the whole suite on the original. The result is `verified_gap`
+only when the new test passes on the original and after restoring, fails at its declared line on
+the fault, gives the same results when run again, is the only test the whole suite fails on the
+fault, gives the same results when only a comment with the other version's text is added (which
+catches common ways a test can follow the code's text instead of its behavior, not every way), and
+the whole suite with it passes on the original with one more test. Otherwise it is `candidate_failed`, `not_caught`, `caught_off_assertion`,
+`inconclusive` or `blocked`, with a reason in plain words (`not_caught` needs none). A fault allows
+at most three candidates, counted over every probe-fault run of it, and a repair keeps the first
+attempt's declared assertion and condition. The verdict lists the earlier attempts and what the
+result does not establish: a test written to tamper with its own runner is not stopped, so the
+patch is reviewed before it is delivered. The exit code is 0 for every result; the `result` field
+decides. The checkout is not changed.
 
 ### Dynamic proof language profiles
 
