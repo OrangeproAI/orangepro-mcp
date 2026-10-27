@@ -234,20 +234,24 @@ function firstFrame(stack: unknown): string | null {
  * The file and line one V8 frame names. The file may hold spaces and parentheses:
  * `at fn (test/(group)/a b.test.js:4:12)`, `at test/x.js:4:12`, `at async file:///…/x.mjs:4:12`.
  */
-function frameParts(frame: string): { file: string; line: number } | null {
+function frameParts(frame: string): { file: string; line: number; column: number } | null {
   let match: RegExpExecArray | null = null;
   if (frame.endsWith(")")) {
-    // The location is in the last " (…)" whose content ends in :line:col; a function name may hold parentheses too.
-    for (let at = frame.lastIndexOf(" ("); at >= 0 && !match; at = frame.lastIndexOf(" (", at - 1)) {
-      match = /^ \((.+):(\d+):\d+\)$/.exec(frame.slice(at));
-      if (at === 0) break;
+    // The location is the first " (…)" whose content ends in :line:col; the path may itself hold " (" or ")".
+    for (let at = frame.indexOf(" ("); at >= 0 && !match; at = frame.indexOf(" (", at + 1)) {
+      match = /^ \((.+):(\d+):(\d+)\)$/.exec(frame.slice(at));
     }
   } else {
-    match = /^at (?:async )?(.+):(\d+):\d+$/.exec(frame);
+    match = /^at (?:async )?(.+):(\d+):(\d+)$/.exec(frame);
   }
   if (!match) return null;
   const file = match[1]!.startsWith("file://") ? fileURLToPath(match[1]!) : match[1]!;
-  return { file: posix.resolve(WORK_REPO, file), line: Number(match[2]) };
+  return { file: posix.resolve(WORK_REPO, file), line: Number(match[2]), column: Number(match[3]) };
+}
+
+/** The 1-based column one V8 frame names, or null. */
+export function frameColumn(frame: string | null): number | null {
+  return frame ? (frameParts(frame)?.column ?? null) : null;
 }
 
 /** Where one stack frame points: its file (as a repository path) and line, or null. */

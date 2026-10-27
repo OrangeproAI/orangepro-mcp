@@ -4,13 +4,15 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { applyAdditivePatch, parseAdditivePatch, readNewTest } from "../../src/local/candidatePatch.js";
+import { earlierAttempts, faultKeyOf, textControls } from "../../src/local/candidateTest.js";
 import { candidateReasonWords, classifyCandidate, opTestBrief, opVerifyTest, type VerifyTestResult } from "../../src/local/candidateTest.js";
 import { ASSERTION_RECORD_VERSION, checkAssertionRecord, type AssertionRecord } from "../../src/local/contracts/candidate.js";
 import { unifiedFileDiff } from "../../src/local/contracts/faultRecord.js";
 import { recordBytes, verifyRunFolder, writeRunManifest } from "../../src/local/contracts/io.js";
+
 import type { StageName, StageObservation } from "../../src/local/contracts/receipt.js";
 import type { ContainerExecutor } from "../../src/local/boundary.js";
-import { failedAtAssertion, frameLocation, ProbeFaultRefusal } from "../../src/local/faultProbe.js";
+import { failedAtAssertion, frameColumn, frameLocation, ProbeFaultRefusal } from "../../src/local/faultProbe.js";
 import type { DynamicProofRunner } from "../../src/local/operations.js";
 import { deps, hostExecutor, OFFSETS, PASSING_TESTS, passingProbe, probe, script, sha256, trackedChanges, workspace, type Workspace } from "./support/probeWorkspace.js";
 
@@ -208,6 +210,7 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
     const profile = JSON.parse(profileBytes.toString("utf8"));
     expect(profile.candidate).toEqual({ patch_sha256: sha256(patch), assertion_record_sha256: result.verdict.assertion_record_sha256, generation_request_sha256: run.requestSha });
     expect(readFileSync(path.join(dir, "generation-request.json"))).toEqual(readFileSync(path.join(run.w.repo, run.brief, "brief", "generation-request.json")));
+    expect(readFileSync(path.join(dir, "brief.md"))).toEqual(readFileSync(path.join(run.w.repo, run.brief, "brief", "brief.md")));
     const stage = (name: string): StageObservation => JSON.parse(readFileSync(path.join(dir, "stages", `${name}.json`), "utf8"));
     for (const ref of result.verdict.stages) expect(stage(ref.stage).run_profile_sha256).toBe(sha256(profileBytes));
     // RS-6: the restored stage and the original-text control carry no fault.
@@ -230,14 +233,18 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
     expect(verifyBody(`    assert.ok(true);\n    ${ASSERT_ONE}\n`, "assert.ok(true);").verdict).toMatchObject({ result: "caught_off_assertion", reason: "not_at_the_declared_line" });
   });
 
-  it("FP-1: a test that reads the target's own text instead of running it is mutation_aware, in both forms", () => {
+  it("FP-1, PR-1, CB-1: a test that reads the target's own text instead of running it is mutation_aware, in every form", () => {
     const present = verifyBody("    assert.ok(String(api.seconds).indexOf('Math.floor(value / 1000)') !== -1);\n", "assert.ok(String(api.seconds).indexOf('Math.floor(value / 1000)') !== -1);");
     expect(present.verdict).toMatchObject({ result: "inconclusive", reason: "mutation_aware" });
-    expect(present.verdict.observed.candidate_fault_text_control).toMatchObject({ new_test: "passed" });
+    expect(present.verdict.observed.candidate_original_text_control).toMatchObject({ new_test: "failed" });
+    const stripping = "assert.ok(String(api.seconds).replace(/\\/\\*[^]*?\\*\\//g, '').indexOf('Math.ceil') === -1);";
+    expect(verifyBody(`    ${stripping}\n`, stripping).verdict).toMatchObject({ result: "inconclusive", reason: "mutation_aware" });
+    const first = "assert.strictEqual(/Math\\.(\\w+)/.exec(String(api.seconds))[1], 'floor');";
+    expect(verifyBody(`    ${first}\n`, first).verdict).toMatchObject({ result: "inconclusive", reason: "mutation_aware" });
     const absent = verifyBody("    assert.ok(String(api.seconds).indexOf('Math.ceil') === -1);\n", "assert.ok(String(api.seconds).indexOf('Math.ceil') === -1);");
     expect(absent.verdict).toMatchObject({ result: "inconclusive", reason: "mutation_aware" });
     expect(absent.verdict.observed.candidate_original_text_control).toMatchObject({ new_test: "failed" });
-    expect(absent.verdict.statement).toContain("reads the code's text rather than testing its behavior");
+    expect(absent.verdict.statement).toContain("follows the code's text rather than testing its behavior");
   });
 
   it("a stage past its deadline is a timeout, never a result, and is said in plain words (RS-5)", () => {
@@ -251,7 +258,7 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
     expect(result.verdict.statement).not.toMatch(/original_timeout/);
   });
 
-  it("counts attempts per fault, over every probe-fault run of it, and refuses a fourth (FP-3, RS-1)", () => {
+  it("counts attempts per fault, over every probe-fault run of it whatever its rationale, and refuses a fourth (FP-3, RS-1, CB-2)", () => {
     const w = workspace();
     const first = briefFor(w, probe(w, ROUNDING, { full_suite: true }));
     const after = withTest(PASSING_TESTS, NEW_TEST.replace("1500), 1", "1500), 2"));
@@ -260,8 +267,8 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
       recordFor(run, patch, after, "assert.strictEqual(api.seconds(1500), 2);", { generation: { by: "host_agent", agent: "test agent", assisted: true, saw: ["the brief"], attempt } });
     for (const attempt of [1, 2, 3]) expect(verify(first, patch, failing(first, attempt)).verdict.result).toBe("candidate_failed");
     expect(refusalOf(() => verify(first, patch, failing(first, 4)))).toBe("assertion_invalid");
-    // A second probe-fault run of the very same fault does not start a new budget.
-    const second = briefFor(w, probe(w, ROUNDING, { full_suite: true }));
+    // A second probe-fault run of the very same fault, even with another rationale, does not start a new budget.
+    const second = briefFor(w, probe(w, ROUNDING, { full_suite: true, rationale: "the rounding direction of whole seconds" }));
     expect(messageOf(() => verify(second, patch, failing(second, 1)))).toMatch(/^verify-test refused \(attempts_exhausted\): 3 candidates already ran on this fault/);
   });
 
@@ -493,10 +500,11 @@ describe("the new test, read on the syntax tree", () => {
 
   it("FP-2: an assertion chain split over two lines is declared at the line its check is named on", () => {
     const { after, test } = read("    expect(api.seconds(1500))\n      .to.equal(1);\n");
-    expect(test.assertionLines.has(lineOf(after, ".to.equal(1)"))).toBe(true);
+    // `equal` names the check (column 11); the `.` before `to` is a property of the same assertion (FR-2, column 7).
+    expect([...test.assertionPositions.get(lineOf(after, ".to.equal(1)"))!].sort((a, b) => a - b)).toEqual([7, 11]);
     const supertest = read("    request(app)\n      .get('/')\n      .expect('Set-Cookie', /Max-Age=1/)\n      .expect(200, done);\n");
-    expect(supertest.test.assertionLines.has(lineOf(supertest.after, ".expect('Set-Cookie'"))).toBe(true);
-    expect(supertest.test.assertionLines.has(lineOf(supertest.after, ".get('/')"))).toBe(false);
+    expect([...supertest.test.assertionPositions.get(lineOf(supertest.after, ".expect('Set-Cookie'"))!]).toEqual([8]);
+    expect(supertest.test.assertionPositions.has(lineOf(supertest.after, ".get('/')"))).toBe(false);
   });
 });
 
@@ -530,7 +538,8 @@ describe("classifyCandidate — computed from the stage files", { timeout: 180_0
     const stages = Object.fromEntries(result.verdict.stages.map((ref) => [ref.stage, JSON.parse(readFileSync(path.join(dir, ref.path), "utf8"))])) as Record<StageName, StageObservation>;
     const expectedTargetSha = Object.fromEntries(Object.entries(stages).map(([name, stage]) => [name, stage.copy_target_sha256])) as Partial<Record<StageName, string>>;
     const priorIds = [`${TEST_FILE}\u0000api.seconds converts whole seconds`, `${TEST_FILE}\u0000api.seconds returns null for a value that is not a number`];
-    const base = { stages, assertion: record, baseline: 2, priorIds, expectedTargetSha, copyWriteFailed: null, checkoutUnchanged: true };
+    const declaredColumns = [frameColumn(stages.candidate_fault.tests!.observed.find((t) => t.full_title === FULL_TITLE)!.failure!.first_frame)!];
+    const base = { stages, assertion: record, baseline: 2, priorIds, expectedTargetSha, copyWriteFailed: null, checkoutUnchanged: true, declaredColumns, faultRunScope: "full_suite" as const };
     const edited = (name: StageName, change: (stage: any) => void) => {
       const copy = JSON.parse(JSON.stringify(stages[name]));
       change(copy);
@@ -592,7 +601,15 @@ describe("classifyCandidate — computed from the stage files", { timeout: 180_0
           shift(s.tests, -1, 1);
         })
       )
-    ).toMatchObject({ result: "inconclusive", reason: "existing_tests_also_catch" });
+    ).toMatchObject({ result: "inconclusive", reason: "new_test_breaks_other_tests" });
+    // CB-3: only when the fault run covered the selected tests alone can other failures be existing catches.
+    const scoped = edited("fault_full_suite_with_candidate", (s) => {
+      fail(s.tests.observed.find((t: any) => t.state === "passed"), 6);
+      shift(s.tests, -1, 1);
+    });
+    expect(classifyCandidate({ ...scoped, faultRunScope: "selected" })).toMatchObject({ result: "inconclusive", reason: "existing_tests_also_catch" });
+    // PR-8: the declared line with another column is not the declared assertion.
+    expect(classifyCandidate({ ...base, declaredColumns: [declaredColumns[0]! + 7] })).toMatchObject({ result: "caught_off_assertion", reason: "not_at_the_declared_line" });
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -612,5 +629,273 @@ describe("the brief from a fault run made in a separate workspace", { timeout: 1
     expect(existsSync(path.join(elsewhere, result.run_dir))).toBe(true);
     expect(messageOf(() => opTestBrief(elsewhere, { from_run: result.run_dir }, {}))).toContain("--source <checkout>");
     rmSync(elsewhere, { recursive: true, force: true });
+  });
+});
+
+describe("the fresh read's findings (round 2)", { timeout: 180_000 }, () => {
+  const readWith = (original: string, body: string) => {
+    const after = withTest(original, testWith(body));
+    const applied = applyAdditivePatch(Buffer.from(original), parseAdditivePatch(candidate(original, after)));
+    return { after, test: readNewTest({ path: TEST_FILE, patched: applied.bytes, original: Buffer.from(original), added: applied.added }) };
+  };
+  const refusedBody = (body: string, original = PASSING_TESTS): string => messageOf(() => readWith(original, body));
+
+  it.each([
+    ["PR-2: a spy reached through new Object(Math)", "    var M = new Object(Math);\n    M.ceil = function () { throw new Error('up'); };\n"],
+    ["PR-2: a block-scoped shadow", "    { let Math = {}; }\n    Math.ceil = function () { return 0; };\n"],
+    ["PR-2: a declaration in another function", "    function unused() { var api = {}; }\n    api.seconds = function () { return 1; };\n"],
+    ["PR-2: a parameter of the same name elsewhere", "    [].forEach(function (api) {});\n    api = { seconds: function () { return 1; } };\n"],
+    ["PR-2: a literal holding the shared object", "    var box = [api];\n    box[0].seconds = function () { return 1; };\n"],
+    ["PR-2: a class whose constructor returns the shared object", "    var x = new (class { constructor() { return api; } })();\n    x.seconds = function () { return 1; };\n"],
+    ["PR-2: a for-of target", "    for (api.seconds of [function () { return 1; }]);\n"],
+    ["PR-2: a for-in target", "    for (Math.ceil in { a: 1 });\n"],
+    ["PR-2: Object.assign through a comma", "    (0, Object.assign)(api, { seconds: null });\n"],
+    ["PR-2: Object.assign through .call", "    Object.assign.call(null, api, { seconds: null });\n"],
+    ["PR-2: Object['assign']", "    Object['assign'](api, { seconds: null });\n"],
+    ["PR-2: assign destructured from Object", "    var { assign } = Object;\n    assign(Math, { ceil: null });\n"],
+    ["PR-2: defineProperty through .call", "    Object.defineProperty.call(null, Math, 'ceil', { value: null });\n"],
+    ["PR-2: a local reassigned to the shared object", "    var o = {};\n    o = api;\n    o.seconds = null;\n"],
+    ["PR-3: constructor taken by destructuring", "    var { constructor: F } = function () {};\n"],
+    ["PR-3: constructor through a computed literal", "    var f = (function () {})['constr' + 'uctor'];\n"],
+    ["PR-3: this inside a nested function", "    var g = (function () { return this; })();\n"],
+    ["PR-3: this['skip']()", "    this['skip']();\n"],
+    ["PR-3: this['retries'](3)", "    this['retries'](3);\n"],
+    ["a forged stack", "    var e = new Error('x');\n    e.stack = 'Error';\n"],
+    ["PR-6: a value from a call the test did not make itself", "    var app = express();\n    app.locals.user = { name: 'tobi' };\n"]
+  ])("refuses %s", (_label, body) => {
+    expect(refusedBody(`${body}    ${ASSERT_ONE}\n`)).toMatch(/verify-test refused \(candidate_invalid\)/);
+  });
+
+  it("PR-6: the refusal states the real rule, and __dirname is allowed", () => {
+    expect(refusedBody(`    var app = express();\n    app.locals.user = 1;\n    ${ASSERT_ONE}\n`)).toContain("never a value it gets from a call it did not make");
+    expect(readWith(PASSING_TESTS, `    var fixtures = __dirname + '/fixtures';\n    ${ASSERT_ONE}\n`).test.fullTitle).toBe(FULL_TITLE);
+  });
+
+  it("PR-5: a blank line inside an existing string, and an it() that takes over a chained call, are refused", () => {
+    const withTemplate = PASSING_TESTS.replace("    assert.strictEqual(api.seconds(2000), 2);", "    assert.ok(String(api.seconds(2000)).indexOf(`2\n0`) === -1);");
+    const tl = withTemplate.split("\n");
+    const blankInString = Buffer.from(
+      [`diff --git a/${TEST_FILE} b/${TEST_FILE}`, `--- a/${TEST_FILE}`, `+++ b/${TEST_FILE}`, "@@ -6,2 +6,3 @@", ` ${tl[5]}`, "+   ", ` ${tl[6]}`, "@@ -11,2 +12,5 @@", ` ${tl[10]}`, ...NEW_TEST.trimEnd().split("\n").map((l) => `+${l}`), ` ${tl[11]}`, ""].join("\n")
+    );
+    expect(messageOf(() => {
+      const applied = applyAdditivePatch(Buffer.from(withTemplate), parseAdditivePatch(blankInString));
+      expect(applied.added.map((a) => a.line)).toEqual([7, 13, 14, 15]);
+      readNewTest({ path: TEST_FILE, patched: applied.bytes, original: Buffer.from(withTemplate), added: applied.added });
+    })).toMatch(/candidate_invalid.*added outside the new it/);
+    const chained = PASSING_TESTS.replace("    assert.strictEqual(api.seconds('soon'), null);\n  });", "    assert.strictEqual(api.seconds('soon'), null);\n  })\n  .timeout(5000);");
+    const takeover = chained.replace("  })\n  .timeout(5000);", `  });\n  it('${NEW_TITLE}', function () {\n    ${ASSERT_ONE}\n  })\n  .timeout(5000);`);
+    expect(messageOf(() => {
+      const applied = applyAdditivePatch(Buffer.from(chained), parseAdditivePatch(candidate(chained, takeover)));
+      readNewTest({ path: TEST_FILE, patched: applied.bytes, original: Buffer.from(chained), added: applied.added });
+    })).toMatch(/candidate_invalid/);
+  });
+
+  it("PR-7: assertions in other common styles are recognised", () => {
+    const destructured = `var { strictEqual } = require('assert');\n${PASSING_TESTS}`;
+    const a = readWith(destructured, "    strictEqual(api.seconds(1500), 1);\n");
+    expect(a.test.assertionPositions.has(a.after.split("\n").findIndex((l) => l.includes("strictEqual(api.seconds(1500)")) + 1)).toBe(true);
+    const b = readWith(PASSING_TESTS, "    should(api.seconds(1500)).equal(1);\n");
+    expect(b.test.assertionPositions.size).toBe(1);
+    const c = readWith(PASSING_TESTS, "    var spy = {};\n    sinon.assert.calledOnce(spy);\n");
+    expect(c.test.assertionPositions.size).toBe(1);
+  });
+
+  it("PR-8: a throw on the declared line is not the declared assertion failing", () => {
+    const line = "assert.ok(true); if (api.seconds(1500) !== 1) throw new Error('not one');";
+    expect(verifyBody(`    ${line}\n`, line).verdict).toMatchObject({ result: "caught_off_assertion", reason: "not_at_the_declared_line" });
+  });
+
+  it("PR-4: a hunk git would place elsewhere is refused, so the stored patch always gives the verified bytes", () => {
+    const run = survivedRun();
+    const lines = PASSING_TESTS.split("\n");
+    const at = lines.length - 2; // insert before the closing `});`
+    const added = NEW_TEST.trimEnd().split("\n");
+    const zeroContext = Buffer.from([`diff --git a/${TEST_FILE} b/${TEST_FILE}`, `--- a/${TEST_FILE}`, `+++ b/${TEST_FILE}`, `@@ -${at},0 +${at + 1},${added.length} @@`, ...added.map((l) => `+${l}`), ""].join("\n"));
+    const after = [...lines.slice(0, at), ...added, ...lines.slice(at)].join("\n");
+    expect(messageOf(() => verify(run, zeroContext, recordFor(run, zeroContext, after, ASSERT_ONE)))).toMatch(/candidate_invalid.*git applies this patch/);
+  });
+
+  it("CB-3: in a whole-suite fault run, other failures beside the new test are interference, not catches", () => {
+    const api = PASSING_TESTS.replace("var api = require('../lib/api');", "var api = require('../lib/api');\nvar log = require('./support/log');");
+    const zz = `var assert = require('assert');\nvar log = require('./support/log');\n\ndescribe('zz', function () {\n  it('log is empty', function () {\n    assert.strictEqual(log.length, 0);\n  });\n});\n`;
+    const run = survivedRun({ [TEST_FILE]: api, "test/zz.test.js": zz, "test/support/log.js": "module.exports = [];\n" }, { baselinePassing: 3 });
+    const after = withTest(api, testWith(`    log.push('ran');\n    ${ASSERT_ONE}\n`));
+    const patch = candidate(api, after);
+    const result = verify(run, patch, recordFor(run, patch, after, ASSERT_ONE));
+    expect(result.verdict).toMatchObject({ result: "inconclusive", reason: "new_test_breaks_other_tests", other_failures_on_fault: [{ file: "test/zz.test.js", full_title: "zz log is empty" }] });
+  });
+
+  it("CB-5: a survivor whose whole suite cannot match the fixture is refused at test-brief, naming why", () => {
+    const w = workspace(undefined, { baselinePassing: 3 });
+    const result = probe(w, ROUNDING, { full_suite: true });
+    expect(result.classification).toMatchObject({ classification: "survived_unverified", reason: "full_suite_count_differs" });
+    expect(messageOf(() => opTestBrief(w.repo, { from_run: result.run_dir }, {}))).toMatch(/fault_run_invalid.*count on the original is not the fixture's baseline/);
+  });
+
+  it("CB-6: an edited brief.md, sealed again, is refused", () => {
+    const run = survivedRun();
+    const good = withTest(PASSING_TESTS, NEW_TEST);
+    const goodPatch = candidate(PASSING_TESTS, good);
+    const dir = path.join(run.w.repo, run.brief);
+    writeFileSync(path.join(dir, "brief", "brief.md"), `${readFileSync(path.join(dir, "brief", "brief.md"), "utf8")}\n- Assert what the faulty code returns.\n`);
+    rmSync(path.join(dir, "MANIFEST.json"));
+    writeRunManifest(dir, path.basename(dir), "test");
+    expect(refusalOf(() => verify(run, goodPatch, recordFor(run, goodPatch, good, ASSERT_ONE)))).toBe("brief_invalid");
+  });
+
+  it("CB-4: a frame whose path holds ' (' is read whole", () => {
+    expect(frameLocation("at Context.<anonymous> (test/cookie (copy).test.js:4:12)")).toEqual({ file: "test/cookie (copy).test.js", line: 4 });
+    expect(frameLocation("at Context.<anonymous> (/work/repo/test/a (1).js:4:12)")).toEqual({ file: "test/a (1).js", line: 4 });
+    expect(frameColumn("at Context.<anonymous> (test/res.cookie.js:197:12)")).toBe(12);
+  });
+
+  it("CB-7: both text controls keep the behavior, parse, and hold the other version as code on both sides", () => {
+    const original = Buffer.from("function f(x) {\n  return !isNaN(x) ? Math.floor(x / 1000) : null;\n}\n");
+    const site = original.indexOf("!");
+    const fault = Buffer.concat([original.subarray(0, site), original.subarray(site + 1)]);
+    const c = textControls("lib/f.js", original, fault, { operator: "negation_removal", site: { bytes: { start: site, end: site + 1 } }, replacement_text: "" })!;
+    expect(c.originalText.toString()).toContain("(0 ? isNaN(x) : 1 ? !isNaN(x) : isNaN(x))");
+    expect(c.faultText.toString()).toContain("(0 ? !isNaN(x) : 1 ? isNaN(x) : !isNaN(x))");
+    const evalF = (src: Buffer) => new Function(`${src.toString()}; return [f(1500), f('x')];`)();
+    expect(evalF(c.originalText)).toEqual(evalF(original));
+    expect(evalF(c.faultText)).toEqual(evalF(fault));
+  });
+
+  it("CB-8: a manifest with a null entry or a '.' path is refused, not a crash", () => {
+    const run = survivedRun();
+    const dir = path.join(run.w.repo, run.brief);
+    const manifest = JSON.parse(readFileSync(path.join(dir, "MANIFEST.json"), "utf8"));
+    writeFileSync(path.join(dir, "MANIFEST.json"), JSON.stringify({ ...manifest, files: [...manifest.files, null] }));
+    expect(verifyRunFolder(dir).ok).toBe(false);
+    writeFileSync(path.join(dir, "MANIFEST.json"), JSON.stringify({ ...manifest, files: [...manifest.files, { path: ".", sha256: "0" }] }));
+    expect(verifyRunFolder(dir).ok).toBe(false);
+  });
+});
+
+describe("the independent read of demo.7 (round 3)", { timeout: 180_000 }, () => {
+  const readWith = (original: string, body: string) => {
+    const after = withTest(original, testWith(body));
+    const applied = applyAdditivePatch(Buffer.from(original), parseAdditivePatch(candidate(original, after)));
+    return { after, test: readNewTest({ path: TEST_FILE, patched: applied.bytes, original: Buffer.from(original), added: applied.added }) };
+  };
+  const refusedBody = (body: string, original = PASSING_TESTS): string => messageOf(() => readWith(original, body));
+
+  it.each([
+    ["F1: a built-in stored in an array slot, then replaced through it", "    var box = [];\n    box[0] = Math;\n    box[0].ceil = function () { return 0; };\n"],
+    ["F1: the target stored in a member, then replaced through it", "    var holder = {};\n    holder.api = api;\n    holder.api.seconds = function () { return 1; };\n"],
+    ["F1: a built-in returned by a getter, then replaced through it", "    var o = { get m() { return Math; } };\n    o.m.ceil = function () { return 0; };\n"],
+    ["F1: the target pushed into an array, then replaced through it", "    var box = [];\n    box.push(api);\n    box[0].seconds = function () { return 1; };\n"],
+    ["F1: a member named at run time", "    var o = {};\n    var k = 'seconds';\n    o[k] = 1;\n"],
+    ["FR-4: new Object(x), which returns x itself", "    var o = new Object(api);\n    o.seconds = null;\n"],
+    ["F3: a stack set with Object.assign", "    var e = new Error('not one');\n    Object.assign(e, { stack: 'forged' });\n"],
+    ["F3: a stack defined with defineProperty", "    var e = new Error('not one');\n    Object.defineProperty(e, 'stack', { value: 'forged' });\n"],
+    ["F3: a stack defined with defineProperties", "    var e = new Error('not one');\n    Object.defineProperties(e, { stack: { value: 'forged' } });\n"],
+    ["F3: a literal with a stack member", "    var e = { name: 'AssertionError', stack: 'forged' };\n"],
+    ["F3: prepareStackTrace written through a member named at run time", "    var o = {};\n    o.E = Error;\n    var k = 'prepare';\n    k += 'StackTrace';\n    o.E[k] = function () { return 'x'; };\n"],
+    ["F3: defineProperty with a name computed at run time", "    var e = new Error('x');\n    var k = 'sta' + String('ck');\n    Object.defineProperty(e, k, { value: 'forged' });\n"],
+    ["F3: defineProperties with names it does not spell out", "    var e = new Error('x');\n    var props = {};\n    Object.defineProperties(e, props);\n"],
+    ["FR-1: Mocha's own after() hook inside the test", "    after(function () {});\n"]
+  ])("refuses %s", (_label, body) => {
+    expect(refusedBody(`${body}    ${ASSERT_ONE}\n`)).toMatch(/verify-test refused \(candidate_invalid\)/);
+  });
+
+  it("F1, FR-4: a direct member of a local the test made may be written, whatever the literal holds", () => {
+    for (const body of [
+      "    var o = {};\n    o.x = api;\n",
+      "    var options = { maxAge: 60 * 60 * 1000 };\n    options.path = '/admin';\n",
+      "    var options = { maxAge: 1500, signed: !true };\n    options.path = '/admin';\n",
+      "    var maxAge = 1500;\n    var options = { maxAge: maxAge };\n    options.httpOnly = true;\n",
+      "    var options = { maxAge: Number('1500') };\n    options['path'] = '/';\n",
+      "    var opts = new Object();\n    opts.maxAge = 1500;\n",
+      "    var a = new Uint16Array(1);\n    a[0] = 1;\n"
+    ]) {
+      expect(readWith(PASSING_TESTS, `${body}    ${ASSERT_ONE}\n`).test.fullTitle).toBe(FULL_TITLE);
+    }
+  });
+
+  it("F1, F3: the reviewers' end-to-end spy and forged-stack tests are refused before any copy runs", () => {
+    const spy = "    var box = [];\n    box[0] = Math;\n    var ceil = Math.ceil;\n    box[0].ceil = function () {\n      box[0].ceil = ceil;\n      assert.fail('rounded up');\n    };\n    try { api.seconds(1500); } finally { box[0].ceil = ceil; }\n";
+    expect(messageOf(() => verifyBody(spy, "assert.fail('rounded up');"))).toMatch(/^verify-test refused \(candidate_invalid\)/);
+    const forged = "    var e = new Error('not one');\n    Object.assign(e, { name: 'AssertionError', stack: 'AssertionError: not one' });\n    if (api.seconds(1500) !== 1) throw e;\n    assert.ok(true);\n";
+    expect(messageOf(() => verifyBody(forged, "assert.ok(true);"))).toMatch(/^verify-test refused \(candidate_invalid\)/);
+  });
+
+  it("F4, A4-2: a control that would change how code without semicolons parses is not built", () => {
+    const roundingPlan = (bytes: Buffer, at: number) => ({ operator: "rounding_floor_ceil", site: { bytes: { start: at, end: at + "Math.floor".length } }, replacement_text: "Math.ceil" });
+    const ceilAt = (bytes: Buffer, at: number) => Buffer.concat([bytes.subarray(0, at), Buffer.from("Math.ceil"), bytes.subarray(at + "Math.floor".length)]);
+    const rounding = Buffer.from("function f(ms) {\n  var s = 0\n  Math.floor(ms / 1000) < ms / 1000 && (s = -1)\n  return Math.round(ms / 1000) + s\n}\n");
+    const at = rounding.indexOf("Math.floor");
+    expect(textControls("lib/f.js", rounding, ceilAt(rounding, at), roundingPlan(rounding, at))).toBeNull();
+    const negation = Buffer.from("function g(x) {\n  var out = null\n  !isNaN(x) && (out = x)\n  return out\n}\n");
+    const bang = negation.indexOf("!");
+    const negationFault = Buffer.concat([negation.subarray(0, bang), negation.subarray(bang + 1)]);
+    expect(textControls("lib/g.js", negation, negationFault, { operator: "negation_removal", site: { bytes: { start: bang, end: bang + 1 } }, replacement_text: "" })).toBeNull();
+    // With the semicolon, the same site gets both controls.
+    const semicolon = Buffer.from(rounding.toString().replace("var s = 0\n", "var s = 0;\n"));
+    const at2 = semicolon.indexOf("Math.floor");
+    expect(textControls("lib/f.js", semicolon, ceilAt(semicolon, at2), roundingPlan(semicolon, at2))).not.toBeNull();
+  });
+
+  it("FR-1: a name the file declares is not Mocha's hook (var after = require('after'))", () => {
+    const withAfter = PASSING_TESTS.replace("var api = require('../lib/api');", "var api = require('../lib/api');\nvar after = require('after');");
+    expect(withAfter).not.toBe(PASSING_TESTS);
+    expect(readWith(withAfter, `    var cb = after(1, function () {});\n    cb();\n    ${ASSERT_ONE}\n`).test.fullTitle).toBe(FULL_TITLE);
+  });
+
+  it("FR-2: a chai property assertion is declared at the `.` before its property, where V8 reports a getter's throw", () => {
+    for (const assertion of ["    expect(api.seconds(1500) === 1).to.be.true;", "    (api.seconds(1500) === 1).should.be.true;"]) {
+      const { after, test } = readWith(PASSING_TESTS, `${assertion}\n`);
+      const line = after.split("\n").indexOf(assertion) + 1;
+      expect([...(test.assertionPositions.get(line) ?? [])]).toContain(assertion.indexOf(".true") + 1);
+    }
+  });
+
+  it("A4-1: a verify run made before the fault key was recorded still counts as an attempt", () => {
+    const run = survivedRun();
+    const after = withTest(PASSING_TESTS, NEW_TEST);
+    const patch = candidate(PASSING_TESTS, after);
+    const result = verify(run, patch, recordFor(run, patch, after, ASSERT_ONE));
+    const dir = path.join(run.w.repo, result.run_dir);
+    const tag = JSON.parse(readFileSync(path.join(dir, "fault-run.json"), "utf8"));
+    delete tag.fault_key;
+    writeFileSync(path.join(dir, "fault-run.json"), recordBytes(tag));
+    rmSync(path.join(dir, "MANIFEST.json"));
+    writeRunManifest(dir, path.basename(dir), "test");
+    const key = faultKeyOf(JSON.parse(readFileSync(path.join(run.w.repo, run.faultRun, "fault-record.json"), "utf8")));
+    expect(earlierAttempts(path.join(run.w.repo, ".orangepro", "proof-runs"), key).map((a) => a.run_id)).toEqual([path.basename(dir)]);
+  });
+
+  it("A4-4: the repeat run on the fault must fail at the declared column, as an assertion, too", () => {
+    const run = survivedRun();
+    const after = withTest(PASSING_TESTS, NEW_TEST);
+    const patch = candidate(PASSING_TESTS, after);
+    const record = recordFor(run, patch, after, ASSERT_ONE);
+    const result = verify(run, patch, record);
+    expect(result.verdict.result).toBe("verified_gap");
+    const dir = path.join(run.w.repo, result.run_dir);
+    const stages = Object.fromEntries(result.verdict.stages.map((ref) => [ref.stage, JSON.parse(readFileSync(path.join(dir, ref.path), "utf8"))])) as Record<StageName, StageObservation>;
+    const expectedTargetSha = Object.fromEntries(Object.entries(stages).map(([name, stage]) => [name, stage.copy_target_sha256])) as Partial<Record<StageName, string>>;
+    const priorIds = [`${TEST_FILE}\u0000api.seconds converts whole seconds`, `${TEST_FILE}\u0000api.seconds returns null for a value that is not a number`];
+    const mineE = stages.candidate_fault.tests!.observed.find((t) => t.full_title === FULL_TITLE)!;
+    const declaredColumns = [frameColumn(mineE.failure!.first_frame)!];
+    const base = { stages, assertion: record, baseline: 2, priorIds, expectedTargetSha, copyWriteFailed: null, checkoutUnchanged: true, declaredColumns, faultRunScope: "full_suite" as const };
+    expect(classifyCandidate(base).result).toBe("verified_gap");
+    const repeatWith = (change: (failure: any) => void) => {
+      const copy = JSON.parse(JSON.stringify(stages.candidate_fault_repeat));
+      change(copy.tests.observed.find((t: any) => t.full_title === FULL_TITLE).failure);
+      return classifyCandidate({ ...base, stages: { ...stages, candidate_fault_repeat: copy } });
+    };
+    expect(repeatWith((f) => { f.first_frame = f.first_frame.replace(/:(\d+)\)$/, ":40)"); })).toMatchObject({ result: "inconclusive", reason: "candidate_not_deterministic" });
+    expect(repeatWith((f) => { f.name = "TypeError"; f.at_assertion = false; })).toMatchObject({ result: "inconclusive", reason: "candidate_not_deterministic" });
+  });
+
+  it("A4-3: the refusal, the brief and the docs state the write rule as the code applies it", () => {
+    const message = refusedBody(`    var holder = {};\n    holder.api = api;\n    holder.api.seconds = null;\n    ${ASSERT_ONE}\n`);
+    for (const words of ["one level", "new Object() with no argument", "Uint16Array", "never a value it gets from a call it did not make"]) expect(message).toContain(words);
+    const run = survivedRun();
+    const brief = readFileSync(path.join(run.w.repo, run.brief, "brief", "brief.md"), "utf8");
+    for (const words of ["one level and named in the code", "captureStackTrace or __proto__", "this inside a nested function", "a with statement"]) expect(brief).toContain(words);
+    const docs = readFileSync(path.join(process.cwd(), "docs", "local-proof-kit.md"), "utf8").replace(/\s+/g, " ");
+    for (const words of ["one level and named in the code", "a whole-suite count other than the fixture's baseline", "count as hooks only when the file does not declare", "used only when it parses exactly as the fault"]) expect(docs).toContain(words);
   });
 });

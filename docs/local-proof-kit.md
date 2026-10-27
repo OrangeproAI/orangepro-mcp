@@ -321,16 +321,31 @@ that describes how the repository runs its tests and in which container, and the
 When the existing tests missed the fault, two more commands close the gap with one new test.
 `opro test-brief --from-run <run>` checks that run against its manifest and refuses unless its
 result is `survived_unverified` (and no other existing test failed on the fault when the whole
-suite ran). It writes a brief (`generation-request.json` and `brief.md`): the approved expected
+suite ran). It also refuses a survivor that cannot be verified: the whole suite red on the
+original, a whole-suite count other than the fixture's baseline, or selected tests missing from
+the whole suite. It writes a brief (`generation-request.json` and `brief.md`): the approved expected
 behavior, the fault, what the existing tests did on both copies, the selected test files as the
 commit has them, where the new test goes, and a template for the assertion record. It runs
 nothing. Whoever writes the test (a coding agent, a model, or a person) returns two files:
 
 - a patch, as `git diff` writes it, that only adds lines to one of the selected test files: one
-  new `it(…)` call with everything the test needs inside it. The test may change only objects it
-  creates itself, may load no module the file does not already load, and may not use `.only`,
-  `.skip`, `.retries`, `process`, `require.cache`, `eval` or the like. OrangePro applies the patch
-  itself, byte for byte, and reads the new test on its syntax tree; anything else is refused by name;
+  new `it(…)` statement with everything the test needs inside it. The test may change only what it
+  declares itself, and only direct members, one level and named in the code (`local.name` or
+  `local['name']`), of a local it makes itself: an object or array literal, a function or class,
+  `Object.create(…)`, `new Object()` with no argument, or `new` of `Error` and its subclasses, `Date`,
+  `Map`, `Set`, `WeakMap`, `WeakSet`, `Array`, `RegExp`, `URL`, `URLSearchParams`, `Promise`,
+  `ArrayBuffer`, `DataView` or a typed array. Values from other calls (an app from `express()`, a
+  handler's `req` or `res`) and anything from outside the test are read-only to it. No object it
+  writes, defines or makes may get the members `stack`, `stackTraceLimit`, `prepareStackTrace`,
+  `captureStackTrace` or `__proto__`. It may load no module the file does not already load (only as
+  `require('…')`), and may not use `.only`, `.skip`, `.retries`, `process`, `globalThis`, `global`,
+  `module`, `exports`, `eval`, `Function`, `Reflect`, `Proxy`, `this` inside a nested function, `with`,
+  or the members `constructor`, `caller`, `callee`, `__proto__`, `__defineGetter__`,
+  `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`, `captureStackTrace` and
+  `prepareStackTrace`. Mocha's `before`, `after`, `context` and the like count as hooks only when the
+  file does not declare a name of its own for them. OrangePro applies the patch itself, byte for byte, checks that
+  `git apply` gives the same bytes, and reads the new test on its syntax tree with names resolved by
+  scope; anything else is refused by name;
 - `assertion-record.json`, which names the new test (its full title, as Mocha reports it), the line
   where its declared assertion call names its check, what it checks, and who wrote it and what they
   saw (a test written by a coding agent or a person is marked assisted). The run profile, which
@@ -339,16 +354,22 @@ nothing. Whoever writes the test (a coding agent, a model, or a person) returns 
 `opro verify-test` checks both against the brief (rebuilt and compared byte for byte) and the fault
 run, re-plans the same fault and requires it to be the recorded one, then runs these stages in the
 container: the new test's file on the original, twice; on the fault, twice; the whole suite on the
-fault; the file on the fault with the original line's text kept in a comment; the file after the
-original bytes are written back (and hash-checked); the file on the original with the faulty
-line's text kept in a comment; and the whole suite on the original. The result is `verified_gap`
+fault; the file on the fault with the original's code kept beside the site, never run
+(`(0 ? original : 1 ? fault : original)`, used only when it parses exactly as the fault with the
+site replaced, so that a missing semicolon cannot join it to the line before; otherwise the run is
+refused before any copy runs); the file after the original bytes are written back (and
+hash-checked); the file on the original with the fault's code kept beside the site the same way; and
+the whole suite on the original. The result is `verified_gap`
 only when the new test passes on the original and after restoring, fails at its declared line on
 the fault, gives the same results when run again, is the only test the whole suite fails on the
-fault, gives the same results when only a comment with the other version's text is added (which
-catches common ways a test can follow the code's text instead of its behavior, not every way), and
+fault, gives the same results when only the other version's code is added beside the site, never
+run (which catches tests that follow the code's text, by any common reading, but not a test written
+to get past it), fails, on both fault runs, at the column where its declared assertion names its
+check (for a property assertion such as `expect(x).to.be.true`, the `.` before the property), and
 the whole suite with it passes on the original with one more test. Otherwise it is `candidate_failed`, `not_caught`, `caught_off_assertion`,
 `inconclusive` or `blocked`, with a reason in plain words (`not_caught` needs none). A fault allows
-at most three candidates, counted over every probe-fault run of it, and a repair keeps the first
+at most three candidates, counted over every probe-fault run of it (whatever its rationale, and
+also verify runs made before the fault's key was recorded), and a repair keeps the first
 attempt's declared assertion and condition. The verdict lists the earlier attempts and what the
 result does not establish: a test written to tamper with its own runner is not stopped, so the
 patch is reviewed before it is delivered. The exit code is 0 for every result; the `result` field

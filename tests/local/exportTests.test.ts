@@ -2,6 +2,7 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { applyAdditivePatch, parseAdditivePatch, readNewTest } from "../../src/local/candidatePatch.js";
 import { opTestBrief, opVerifyTest } from "../../src/local/candidateTest.js";
 import { ASSERTION_RECORD_VERSION, type AssertionRecord } from "../../src/local/contracts/candidate.js";
 import { unifiedFileDiff } from "../../src/local/contracts/faultRecord.js";
@@ -153,6 +154,12 @@ describe("opro export-tests — the test-only patch, the fresh replay and the re
     const g = JSON.parse(JSON.stringify(fresh.fresh_full_suite_with_patch));
     g.tests.failed = 1;
     g.tests.passed -= 1;
+    // The declared assertion's columns, read from the verify run's patch as the product reads them.
+    const original = readFileSync(path.join(s.w.repo, TEST_FILE));
+    const applied = applyAdditivePatch(original, parseAdditivePatch(readFileSync(path.join(s.w.repo, s.verifyRun, "candidate.patch"))));
+    const record = JSON.parse(readFileSync(path.join(s.w.repo, s.verifyRun, "assertion-record.json"), "utf8"));
+    const declaredColumns = [...(readNewTest({ path: TEST_FILE, patched: applied.bytes, original, added: applied.added }).assertionPositions.get(record.assertion.line) ?? [])];
+    expect(declaredColumns.length).toBeGreaterThan(0);
     const rows = computeRows({
       fault: { run: { runId: r.run_ids.fault, classification: { classification: "survived_unverified", reached_by_selected_tests: "reached", behavioral_difference: { status: "differs" } }, faultRecord: { validity: { parse: "ok" } } } as never, stages: {}, refs: [] },
       verify: { run: { runId: r.run_ids.verify, assertion: JSON.parse(readFileSync(path.join(s.w.repo, s.verifyRun, "assertion-record.json"), "utf8")), stageRefs: [] } as never, recomputed: "verified_gap" },
@@ -160,7 +167,8 @@ describe("opro export-tests — the test-only patch, the fresh replay and the re
       baseline: 2,
       originalSha: fresh.fresh_full_suite.copy_target_sha256,
       mutatedSha: fresh.fresh_fault_full_suite_with_patch.copy_target_sha256,
-      restoreConfirmed: true
+      restoreConfirmed: true,
+      declaredColumns
     });
     expect(rows.find((row) => row.row === "G")).toMatchObject({ met: false });
     expect(rows.find((row) => row.row === "H")).toMatchObject({ met: true });
