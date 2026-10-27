@@ -131,20 +131,25 @@ describe("P2: deterministic generation is opt-in only", () => {
     expect(result.generated_tests.length).toBeGreaterThan(0);
   });
 
-  it("(g) opGenerate loads provider credentials from .env.provider.local (not persisted)", async () => {
+  it("(g) opGenerate reads no .env file: keys, base URLs and the provider come only from the environment", async () => {
     const root = fixture();
-    // Key lives ONLY in the workspace file, never in the shell env. The base URL is
-    // an unreachable localhost port so no real network call is made — the model
-    // calls fail fast, but resolving provider='openai' proves the file was loaded.
-    writeFileSync(
-      join(root, ".env.provider.local"),
-      "OPENAI_API_KEY=sk-test-from-env-file\nOPENAI_BASE_URL=http://127.0.0.1:1/v1\n"
-    );
+    // A repository's env files try to set a key, an endpoint and the provider. None is read: a scanned
+    // repository must not choose where the user's key is sent. The ports are unreachable, so no real call is made.
+    for (const name of [".env.provider.local", ".env.local", ".env"]) {
+      writeFileSync(
+        join(root, name),
+        "OPENAI_API_KEY=sk-test-from-env-file\nOPENAI_BASE_URL=http://127.0.0.1:1/v1\nANTHROPIC_API_KEY=sk-ant-from-env-file\nANTHROPIC_BASE_URL=http://127.0.0.1:1\nORANGEPRO_PROVIDER=anthropic\n"
+      );
+    }
     const deps = { clock: () => "2026-06-07T00:00:00Z", env: {} as NodeJS.ProcessEnv };
     opInit(root, deps);
     opAnalyze(root, { source: root }, deps);
-    const result = await opGenerate(root, { limit: 1 }, deps);
-    expect(result.model_provider).toBe("openai");
-    expect(result.warnings.join(" ")).not.toMatch(/No model provider configured/i);
+    const fromFiles = await opGenerate(root, { limit: 1 }, deps);
+    expect(fromFiles.model_provider).not.toBe("openai");
+    expect(fromFiles.model_provider).not.toBe("anthropic");
+    expect(fromFiles.warnings.join(" ")).toMatch(/No model provider configured.*shell environment.*MCP client's config.*reads no \.env file/);
+    // The same key in the environment configures the provider.
+    const fromEnv = await opGenerate(root, { limit: 1 }, { ...deps, env: { OPENAI_API_KEY: "sk-test-from-env", OPENAI_BASE_URL: "http://127.0.0.1:1/v1" } as NodeJS.ProcessEnv });
+    expect(fromEnv.model_provider).toBe("openai");
   });
 });

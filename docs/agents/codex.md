@@ -14,7 +14,7 @@ opro
 
 The public, supported path today is MCP setup through `opro agent --client codex` below. `codex plugin add orangepro` is only valid after OrangePro is listed in a Codex marketplace configured for your Codex install.
 
-The bundled plugin metadata in this repo is for marketplace submission and maintainer validation. It starts the same `orangepro-local` MCP server and does not pin an LLM model; OrangePro uses the provider/model configured in your environment, `.env.provider.local`, `.env.local`, `.env`, or `opro setup`.
+The bundled plugin metadata in this repo is for marketplace submission and maintainer validation. It starts the same `orangepro-local` MCP server and does not pin an LLM model; OrangePro uses the provider/model configured in your environment (the shell, or the MCP config's `env` block), or the default saved by `opro setup`. It reads no `.env` file.
 
 ## MCP Setup
 
@@ -24,7 +24,7 @@ Print a Codex-ready config block:
 opro agent --client codex
 ```
 
-Add the printed `mcpServers.orangepro-local` block to the MCP settings your Codex environment uses. The printed config intentionally omits model settings. If Codex does not inherit your shell environment, put `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OLLAMA_BASE_URL` in the local client config, or keep them in a repo-local `.env.provider.local` file that is not committed.
+Add the printed `mcpServers.orangepro-local` block to the MCP settings your Codex environment uses. The printed config intentionally omits model settings. If Codex does not inherit your shell environment, put `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OLLAMA_BASE_URL` in the `env` block of the local client config.
 
 If your Codex build supports plugin/shortcut commands, map `$opro` (or `/opro`) to: call `orangepro_start` for the current checkout, then follow the returned `next_actions`. The MCP tool is the source of truth; the shortcut is just a convenience wrapper.
 

@@ -45,7 +45,7 @@ import {
   workspaceInitialized,
   workspacePaths
 } from "./workspace.js";
-import { loadProviderEnv, resolveProviderConfig, ProviderOverride, ProviderName } from "./localConfig.js";
+import { resolveProviderConfig, ProviderOverride, ProviderName } from "./localConfig.js";
 import { behaviorNodes, denominatorComposition } from "./graph/factories.js";
 import { summarizeTestEvidence, GeneratedTestEvidence, EvidenceSummary } from "./graph/citations.js";
 import { analyzeRepo } from "./analyze/analyzer.js";
@@ -2520,7 +2520,7 @@ export async function opAiLinks(
     return result;
   }
 
-  const providerEnv = loadProviderEnv([root], deps.env);
+  const providerEnv = deps.env ?? process.env;
   const cfg = opts.provider === "deterministic" ? null : resolveProviderConfig(providerEnv, opts);
   const provider = deps.aiProvider ?? (cfg ? buildProvider(cfg) : null);
   if (!provider) {
@@ -2571,7 +2571,7 @@ export async function opAiFlows(
     return { ...result, warnings, ...(behaviorCoveragePath ? { behavior_coverage_path: behaviorCoveragePath } : {}) };
   }
 
-  const providerEnv = loadProviderEnv([root], deps.env);
+  const providerEnv = deps.env ?? process.env;
   const cfg = opts.provider === "deterministic" ? null : resolveProviderConfig(providerEnv, opts);
   const provider = deps.aiProvider ?? (cfg ? buildProvider(cfg) : null);
   if (!provider) {
@@ -2656,7 +2656,7 @@ export async function opStart(
 ): Promise<StartResult> {
   const providerOpts = startProviderOverride(root, opts);
   const scanRoot = opts.source ? resolve(opts.source) : resolve(root);
-  const providerEnv = loadProviderEnv([root, scanRoot], deps.env);
+  const providerEnv = deps.env ?? process.env;
   // R14 §5: when nothing that decides the result changed since the last full run,
   // re-render its reports from the saved data instead of analysing again.
   const reuseInput = startRunKeyInput(root, scanRoot, opts, providerOpts, providerEnv, deps);
@@ -3274,7 +3274,7 @@ function saveStartForReuse(root: string, input: RunKeyInput, result: StartResult
 }
 
 const NO_PROVIDER_MESSAGE =
-  'No model provider configured. Set OPENAI_API_KEY (or OLLAMA_BASE_URL / ANTHROPIC_API_KEY) in your shell environment or a .env.provider.local file to generate with your own model, or pass provider="deterministic" (or set ORANGEPRO_ALLOW_DETERMINISTIC=1) to use the offline deterministic stand-in. No tests were generated.';
+  'No model provider configured. Set OPENAI_API_KEY (or OLLAMA_BASE_URL / ANTHROPIC_API_KEY) in your shell environment, or in the env block of your MCP client\'s config, to generate with your own model (OrangePro reads no .env file), or pass provider="deterministic" (or set ORANGEPRO_ALLOW_DETERMINISTIC=1) to use the offline deterministic stand-in. No tests were generated.';
 const START_RTM_LIMIT = 500;
 const START_GENERATE_RISK_LIMIT = 20;
 
@@ -3306,13 +3306,11 @@ export async function opGenerate(
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
 
-  // BYOK contract: real customer generation uses their own key/local model.
-  // Load provider credentials from the workspace's .env.provider.local/.env.local/.env
-  // (never persisted) the same way ai-links/ai-flows/start do, so `opro generate`
-  // picks up a key file without exporting it into the shell. The offline
-  // deterministic stand-in is opt-in only; otherwise return setup guidance
+  // BYOK contract: real customer generation uses their own key/local model, read from the
+  // process environment only (the shell, or an MCP client's config env), never from a .env file.
+  // The offline deterministic stand-in is opt-in only; otherwise return setup guidance
   // instead of silently degrading.
-  const providerEnv = loadProviderEnv([root], deps.env);
+  const providerEnv = deps.env ?? process.env;
   const provider = deps.aiProvider ?? resolveGenerationProvider(providerEnv, opts);
   if (!provider) {
     return {
