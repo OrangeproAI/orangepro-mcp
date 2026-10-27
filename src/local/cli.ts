@@ -41,6 +41,7 @@ import { autoProve, isRoastSurvivor } from "./autoProve.js";
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
+import { opTestBrief, opVerifyTest, renderTestBrief, renderVerifyTest } from "./candidateTest.js";
 import { systemClock } from "./util/time.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
 import { runExportCli } from "./exportCli.js";
@@ -153,6 +154,11 @@ Usage:
     # one exact fault inside a bound target, run against the named existing tests on an original and a faulty copy,
     # every command inside the fixture's container (docker, network off); operators: rounding_floor_ceil, negation_removal;
     # needs an installed checkout; writes .orangepro/proof-runs/<run-id>/ and prints caught / missed / no claim
+  opro test-brief --from-run <probe-fault run folder> [--source <checkout>] [--json]
+    # for a fault the existing tests missed: writes brief.md and generation-request.json for a coding agent to write one test
+  opro verify-test --from-run <probe-fault run folder> --brief <test-brief run folder> --candidate <patch> --assertion <assertion-record.json> [--source <checkout>] [--json]
+    # the new test, as a patch that only adds one it(…) call, on the original, the same fault, two text controls, restored,
+    # and the whole suite, inside the container; the result field decides (the exit code is 0 for every result)
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
@@ -784,6 +790,50 @@ async function main(): Promise<number> {
       if (json) printJson(res);
       else for (const line of renderProbeFault(res)) out(line);
       return 0;
+    }
+
+    case "test-brief":
+    case "verify-test": {
+      const need = (flag: string): string => {
+        const value = flags[flag];
+        if (typeof value !== "string" || value.trim() === "") throw new Error(`${command} requires --${flag}`);
+        return value;
+      };
+      try {
+        if (command === "test-brief") {
+          const res = opTestBrief(cwd, { from_run: need("from-run"), source: typeof flags.source === "string" ? flags.source : undefined }, {});
+          if (json) printJson(res);
+          else for (const line of renderTestBrief(res)) out(line);
+          return 0;
+        }
+        const assertionPath = need("assertion");
+        let assertion: unknown;
+        try {
+          assertion = JSON.parse(readFileSync(resolve(cwd, assertionPath), "utf8"));
+        } catch (e) {
+          throw new Error(`--assertion ${String(flags.assertion)} could not be read as JSON: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        const res = opVerifyTest(
+          cwd,
+          {
+            from_run: need("from-run"),
+            brief: need("brief"),
+            candidate_bytes: readFileSync(resolve(cwd, need("candidate"))),
+            assertion,
+            source: typeof flags.source === "string" ? flags.source : undefined
+          },
+          { clock: systemClock }
+        );
+        if (json) printJson(res);
+        else for (const line of renderVerifyTest(res)) out(line);
+        return 0;
+      } catch (e) {
+        if (json && (e instanceof ProofRefusalError || e instanceof ProbeFaultRefusal)) {
+          printJson({ error: e.message, refusal: e.code });
+          return 1;
+        }
+        throw e;
+      }
     }
 
     case "score": {

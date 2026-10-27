@@ -67,8 +67,8 @@ export type ProbeFaultRefusalCode = (typeof PROBE_FAULT_REFUSALS)[number];
 /** Refused before any run: no result exists. */
 export class ProbeFaultRefusal extends Error {
   readonly code: string;
-  constructor(code: ProbeFaultRefusalCode | string, detail: string) {
-    super(`probe-fault refused (${code}): ${detail}`);
+  constructor(code: ProbeFaultRefusalCode | string, detail: string, command = "probe-fault") {
+    super(`${command} refused (${code}): ${detail}`);
     this.name = "ProbeFaultRefusal";
     this.code = code;
   }
@@ -108,19 +108,19 @@ export interface ProbeFaultResult {
 }
 
 export const DEFAULT_STAGE_DEADLINE_MS = 300_000;
-const REPORTER_TARGET = `${OPRO_DIR}/mocha-reporter.cjs`;
+export const REPORTER_TARGET = `${OPRO_DIR}/mocha-reporter.cjs`;
 const WITNESS_TARGET = `${OPRO_DIR}/witness.cjs`;
-const WITNESS_STORED = "inputs/witness.cjs";
-const MOCHA_ENTRY = "node_modules/mocha/bin/mocha.js";
+export const WITNESS_STORED = "inputs/witness.cjs";
+export const MOCHA_ENTRY = "node_modules/mocha/bin/mocha.js";
 // Mocha would otherwise also read the repository's .mocharc* and package.json "mocha" key, which can add
 // files to the selection, skip some, or not run tests at all (dry-run). Only the profile's options apply.
-const MOCHA_NO_REPO_CONFIG = ["--no-config", "--no-package"];
+export const MOCHA_NO_REPO_CONFIG = ["--no-config", "--no-package"];
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
 const MAX_COVERAGE_FILE_BYTES = 256 * 1024 * 1024;
 
 // ── the fixture manifest ─────────────────────────────────────────────────────────
 
-interface FixtureProfile {
+export interface FixtureProfile {
   mergedSha: string;
   prNumber: number | null;
   shape: ContainerShape;
@@ -132,7 +132,7 @@ interface FixtureProfile {
 const VALUE_OPTIONS = new Set(["--require", "--ui", "--timeout"]);
 const FLAG_OPTIONS = new Set(["--check-leaks", "--exit"]);
 
-const insideRepoPath = (value: string): boolean => !isAbsolute(value) && !value.startsWith("-") && !value.split(/[\\/]/).includes("..");
+export const insideRepoPath = (value: string): boolean => !isAbsolute(value) && !value.startsWith("-") && !value.split(/[\\/]/).includes("..");
 
 /**
  * The repository's own Mocha options, from the fixture's full-suite command. Only options
@@ -178,7 +178,7 @@ export function mochaPlanOf(expanded: unknown): { options: string[]; operands: s
   return { options, operands };
 }
 
-function readFixture(bytes: Buffer): FixtureProfile {
+export function readFixture(bytes: Buffer): FixtureProfile {
   const refuse = (detail: string): never => {
     throw new ProbeFaultRefusal("fixture_invalid", detail);
   };
@@ -230,26 +230,72 @@ function firstFrame(stack: unknown): string | null {
   return line ? line.trim() : null;
 }
 
-function frameFile(frame: string): string | null {
-  const match = /\(?([^()\s]+?):\d+:\d+\)?$/.exec(frame);
+/**
+ * The file and line one V8 frame names. The file may hold spaces and parentheses:
+ * `at fn (test/(group)/a b.test.js:4:12)`, `at test/x.js:4:12`, `at async file:///…/x.mjs:4:12`.
+ */
+function frameParts(frame: string): { file: string; line: number } | null {
+  let match: RegExpExecArray | null = null;
+  if (frame.endsWith(")")) {
+    // The location is in the last " (…)" whose content ends in :line:col; a function name may hold parentheses too.
+    for (let at = frame.lastIndexOf(" ("); at >= 0 && !match; at = frame.lastIndexOf(" (", at - 1)) {
+      match = /^ \((.+):(\d+):\d+\)$/.exec(frame.slice(at));
+      if (at === 0) break;
+    }
+  } else {
+    match = /^at (?:async )?(.+):(\d+):\d+$/.exec(frame);
+  }
   if (!match) return null;
   const file = match[1]!.startsWith("file://") ? fileURLToPath(match[1]!) : match[1]!;
-  return posix.resolve(WORK_REPO, file);
+  return { file: posix.resolve(WORK_REPO, file), line: Number(match[2]) };
+}
+
+/** Where one stack frame points: its file (as a repository path) and line, or null. */
+export function frameLocation(frame: string | null): { file: string; line: number } | null {
+  const parts = frame ? frameParts(frame) : null;
+  return parts ? { file: repoRel(parts.file), line: parts.line } : null;
+}
+
+/** Where a failure was raised: the first stack frame's file (as a repository path) and line, or null. */
+export function failureLocation(stack: unknown): { file: string; line: number } | null {
+  return frameLocation(firstFrame(stack));
 }
 
 /**
- * The A2 rule for "at an assertion": an AssertionError, an error that carries `expected`
- * and `actual`, or an error whose first stack frame is a line of the failing test's own
- * file and that is not a TypeError, ReferenceError, SyntaxError or RangeError.
+ * Where an error really came from when its stack was rewritten to start at the test's call:
+ * supertest puts the test's frames first, then a `----` line, then the frames where the error
+ * was raised. Null when the stack has no such line.
+ */
+export function rewrittenOrigin(stack: unknown): { file: string; line: number } | null {
+  if (typeof stack !== "string") return null;
+  const lines = stack.split("\n");
+  const separator = lines.findIndex((line) => line.trim() === "----");
+  if (separator < 0) return null;
+  const frame = lines.slice(separator + 1).find((line) => /^\s+at\s/.test(line));
+  return frame ? frameLocation(frame.trim()) : null;
+}
+
+export const NOT_AN_ASSERTION_ERRORS: ReadonlySet<string> = NOT_AN_ASSERTION;
+
+/**
+ * "At an assertion" (classifier v2, tightened for A3 on the owner's direction): the
+ * failure's first stack frame is a line of the failing test's own file, and the error
+ * is not a TypeError, ReferenceError, SyntaxError or RangeError. An AssertionError, or
+ * an error carrying `expected` and `actual`, raised inside the library under test no
+ * longer counts by itself: only the test's own line does. When the stack was rewritten
+ * to start at the test's call, the frame it was really raised at must not be repository
+ * code outside the test.
  */
 export function failedAtAssertion(detail: Record<string, unknown> | undefined, testFile: string): boolean {
   if (!detail) return false;
   const name = String(detail.name ?? detail.constructorName ?? "");
-  if (name === "AssertionError" || detail.constructorName === "AssertionError") return true;
-  if ("expected" in detail && "actual" in detail) return true;
-  const frame = firstFrame(detail.stack);
-  if (!frame || NOT_AN_ASSERTION.has(name)) return false;
-  return frameFile(frame) === posix.resolve(WORK_REPO, testFile);
+  if (NOT_AN_ASSERTION.has(name)) return false;
+  const at = failureLocation(detail.stack);
+  if (at === null || at.file !== testFile) return false;
+  // A rewritten stack (supertest) names the test's line first; where the error was raised must be the
+  // test itself, an installed library (the assertion code), or Node: never the code under test.
+  const origin = rewrittenOrigin(detail.stack);
+  return origin === null || origin.file === testFile || origin.file.startsWith("node_modules/") || origin.file.startsWith("node:");
 }
 
 function repoRel(file: unknown): string {
@@ -584,7 +630,7 @@ function lastJsonLine(stdout: string): unknown {
 }
 
 /** Every file under `dir` with its sha256, `/`-separated, except the folders named. */
-function treeHashes(dir: string, skip: Set<string>): Map<string, string> {
+export function treeHashes(dir: string, skip: Set<string>): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (abs: string, rel: string): void => {
     for (const name of readdirSync(abs).sort()) {
@@ -600,7 +646,7 @@ function treeHashes(dir: string, skip: Set<string>): Map<string, string> {
   return out;
 }
 
-function trackedStatus(root: string): string | null {
+export function trackedStatus(root: string): string | null {
   try {
     return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-C", root, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch {
@@ -608,7 +654,7 @@ function trackedStatus(root: string): string | null {
   }
 }
 
-function realInside(root: string, abs: string): boolean {
+export function realInside(root: string, abs: string): boolean {
   const rel = relative(realpathSync(root), realpathSync(abs));
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
@@ -764,72 +810,18 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   // ── the two copies, made by the proof script from the commit's own files ──
   const tmp = mkdtempSync(join(tmpdir(), "opro-probe-fault-"));
   try {
-    const copiesDir = join(tmp, "copies");
-    mkdirSync(copiesDir);
-    const args = [
-      "--root",
+    const copyRoots = prepareFaultCopies({
+      runner: deps.dynamicProofRunner ?? defaultDynamicProofRunner,
       sourceRoot,
-      "--target",
-      symbolTarget.file,
-      "--method",
-      symbolTarget.method,
-      "--prepare",
-      copiesDir,
-      "--json",
-      ...bound.args,
-      "--bound-edit-start",
-      String(plan.site.bytes.start),
-      "--bound-edit-end",
-      String(plan.site.bytes.end),
-      "--bound-edit-expect-sha256",
-      plan.original_site_sha256,
-      "--bound-edit-replacement",
-      plan.replacement_text
-    ];
-    const prepared = runBoundSpike(
-      deps.dynamicProofRunner ?? defaultDynamicProofRunner,
-      args,
-      sourceRoot,
-      tsjs.targetAbs,
-      symbolTarget.file,
-      bound.target.file_sha256,
-      plan.site.bytes
-    ).oracle as unknown as { status?: string; bound?: { mutatedSha256?: string }; copies?: { original?: { root?: string }; mutant?: { root?: string } } };
-    if (prepared.status !== "prepared" || prepared.bound?.mutatedSha256 !== plan.mutated_file_sha256) {
-      throw new ProbeFaultRefusal("prepare_failed", "the proof script did not prepare the copies with the planned fault.");
-    }
-    const copyRoots = { original: prepared.copies?.original?.root ?? "", mutant: prepared.copies?.mutant?.root ?? "" };
-    for (const copy of Object.values(copyRoots)) {
-      if (!copy || !existsSync(copy) || relative(copiesDir, copy).startsWith("..") || isAbsolute(relative(copiesDir, copy))) {
-        throw new ProbeFaultRefusal("prepare_failed", "the proof script did not put both copies inside the folder it was given.");
-      }
-    }
-    // The two copies differ in the target file and nothing else, and both hold the selected tests as the checkout has them.
-    const originalTree = treeHashes(copyRoots.original, new Set());
-    const mutantTree = treeHashes(copyRoots.mutant, new Set());
-    const targetPath = symbolTarget.file.split(sep).join("/");
-    if (originalTree.get(targetPath) !== bound.target.file_sha256 || mutantTree.get(targetPath) !== plan.mutated_file_sha256) {
-      throw new ProbeFaultRefusal("prepare_failed", "a prepared copy does not hold the expected bytes of the target file.");
-    }
-    const otherDiffers =
-      originalTree.size !== mutantTree.size || [...originalTree].some(([path, hash]) => path !== targetPath && mutantTree.get(path) !== hash);
-    if (otherDiffers) throw new ProbeFaultRefusal("prepare_failed", "the two copies differ in more than the target file.");
-    for (const test of tests) {
-      const path = test.path.split(sep).join("/");
-      if (originalTree.get(path) !== test.sha256) {
-        throw new ProbeFaultRefusal("tests_invalid", `${test.path} is not in the commit as it is in the checkout (missing, changed since the commit, or a symbolic link).`);
-      }
-    }
-    // Mount points for the installed dependencies: the copies never contain them.
-    for (const copy of Object.values(copyRoots)) mkdirSync(join(copy, "node_modules"), { recursive: true });
-
-    const mountsFor = (copy: "original" | "mutant", out: string): ContainerMount[] => [
-      { source: copyRoots[copy], target: WORK_REPO, readonly: true, role: `<${copy}>` },
-      { source: realpathSync(nodeModules), target: `${WORK_REPO}/node_modules`, readonly: true, role: "<node_modules>" },
-      { source: out, target: WORK_OUT, readonly: false, role: "<out>" },
-      { source: reporterPath(), target: REPORTER_TARGET, readonly: true, role: "<reporter>" },
-      { source: join(runDir, WITNESS_STORED), target: WITNESS_TARGET, readonly: true, role: "<witness>" }
-    ];
+      targetRel: symbolTarget.file,
+      method: symbolTarget.method,
+      targetAbs: tsjs.targetAbs,
+      bound,
+      plan,
+      tmp,
+      mustHold: tests
+    });
+    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), join(runDir, WITNESS_STORED));
     const reportEnv = { OPRO_DYNAMIC_PROOF_REPORT: `${WORK_OUT}/report.json` };
     const coverageEnv = { NODE_V8_COVERAGE: `${WORK_OUT}/coverage` };
 
@@ -848,130 +840,28 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       selected_argv: selectedArgv,
       full_suite_argv: fullArgv,
       runner: { name: "mocha", version: mochaVersion },
-      container: {
-        image: fixture.shape.image,
-        platform: fixture.shape.platform,
-        user: "1000:1000",
-        network: "none",
-        read_only_root: true,
-        capabilities: "none",
-        memory: fixture.shape.memory,
-        cpus: fixture.shape.cpus,
-        processes: fixture.shape.processes,
-        tmp_size: "2g",
-        deadline_seconds: fixture.shape.deadlineSeconds,
-        mounts: mountsFor("original", "<out>").map((mount) => ({ source: mount.role, target: mount.target, mode: mount.readonly ? "ro" : "rw" })),
-        env_names: shapeEnvNames({ ...reportEnv, ...coverageEnv })
-      },
+      container: containerProfile(fixture, mountsFor, { ...reportEnv, ...coverageEnv }),
       limits: { stage_deadline_ms: deadlineMs }
     };
     writeFileAtomic(join(runDir, "run-profile.json"), recordBytes(profile));
-    const profileSha = recordSha256(profile);
-    const executor = deps.container ?? dockerExecutor();
-
-    /** One stage: the boundary probe in the stage's own shape, then, only if it holds, the stage's command. */
-    const runStage = (stage: StageName, copy: "original" | "mutant", command: string[], env: Record<string, string>, coverageTarget?: Buffer): StageObservation => {
-      // The probe and the stage each get a new, never-used output folder. A folder deleted and made again at
-      // the same path is not the same folder to Docker Desktop's file sharing: the next container sees the
-      // deleted one, and every write to it fails.
-      const probeOut = mkdtempSync(join(tmp, `probe-${stage}-`));
-      const out = mkdtempSync(join(tmp, `out-${stage}-`));
-      const request: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, out), env, workdir: WORK_REPO, command, deadlineMs };
-      const probeRequest: ContainerRequest = { ...request, mounts: mountsFor(copy, probeOut) };
-      const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy], symbolTarget.file)));
-      const startedAt = deps.clock();
-      const probe = executor(boundaryProbeRequest(probeRequest));
-      const probeReport = probe.exitCode === 0 ? lastJsonLine(probe.stdout) : null;
-      const failures =
-        probe.exitCode === 0
-          ? boundaryFailures(probeReport, probeRequest, fixture.node)
-          : [`the probe exited ${probe.exitCode}${probe.timedOut ? " (timeout)" : ""}${probe.stderr ? `: ${redactSecrets(probe.stderr).split("\n")[0]}` : ""}`];
-      rmSync(probeOut, { recursive: true, force: true });
-      const run = failures.length === 0 ? executor(request) : null;
-      const stdout = fileRef(runDir, `logs/${stage}.stdout.log`, Buffer.from(redactSecrets(run?.stdout ?? ""), "utf8"));
-      const stderr = fileRef(runDir, `logs/${stage}.stderr.log`, Buffer.from(redactSecrets(run?.stderr ?? ""), "utf8"));
-      const outputProblems: string[] = [];
-      let report: FileRef | null = null;
-      let observedTests: StageObservation["tests"] = null;
-      if (run && env.OPRO_DYNAMIC_PROOF_REPORT) {
-        const read = readUntrustedFile(join(out, "report.json"), MAX_REPORT_BYTES);
-        if ("bytes" in read) {
-          report = fileRef(runDir, `reports/${stage}.json`, read.bytes);
-          try {
-            observedTests = testsFromReport(JSON.parse(read.bytes.toString("utf8")));
-          } catch {
-            outputProblems.push("report.json is not valid JSON");
-          }
-        } else if (read.problem !== "missing") {
-          outputProblems.push(`report.json was not read: ${read.problem}`);
-        }
-      }
-      let coverage: FileRef | null = null;
-      let spanCount: number | null = null;
-      if (run && coverageTarget) {
-        const dir = join(out, "coverage");
-        const dirStat = existsSync(dir) ? lstatSync(dir) : null;
-        if (dirStat && !dirStat.isDirectory()) outputProblems.push("the coverage folder is not a folder");
-        else if (dirStat) {
-          const files: unknown[] = [];
-          for (const name of readdirSync(dir).sort()) {
-            if (!name.endsWith(".json")) continue;
-            const read = readUntrustedFile(join(dir, name), MAX_COVERAGE_FILE_BYTES);
-            if (!("bytes" in read)) {
-              outputProblems.push(`coverage/${name} was not read: ${read.problem}`);
-              continue;
-            }
-            try {
-              files.push(JSON.parse(read.bytes.toString("utf8")));
-            } catch {
-              outputProblems.push(`coverage/${name} is not valid JSON`);
-            }
-          }
-          const url = containerFileUrl(symbolTarget.file.split(sep).join("/"));
-          spanCount = outputProblems.some((problem) => problem.startsWith("coverage")) ? null : faultSpanCount(files, url, coverageTarget, plan.site.bytes);
-          const kept = files.flatMap((file) => (Array.isArray((file as any)?.result) ? (file as any).result : []).filter((script: any) => script?.url === url));
-          coverage = fileRef(runDir, `coverage/${stage}.json`, recordBytes({ url, scripts: kept }));
-        }
-      }
-      const observation: StageObservation = {
-        version: STAGE_OBSERVATION_VERSION,
-        stage,
-        run_id: runId,
-        run_profile_sha256: profileSha,
-        fault_record_sha256: copy === "mutant" ? faultRecordSha : null,
-        copy,
-        copy_target_sha256: copyTargetSha,
-        argv: command,
-        docker_argv: (run ?? probe).dockerArgv.map((part) => (part === BOUNDARY_PROBE_SOURCE ? "<boundary probe>" : part)),
-        boundary: { failures, report: probeReport },
-        stopped: probe.stopped && (run?.stopped ?? true),
-        output_problems: outputProblems,
-        cwd: WORK_REPO,
-        env_names: shapeEnvNames(env),
-        started_at: startedAt,
-        duration_ms: run?.durationMs ?? 0,
-        exit_code: run?.exitCode ?? null,
-        signal: run?.signal ?? null,
-        timed_out: run?.timedOut ?? false,
-        tests: observedTests,
-        output: run && !env.OPRO_DYNAMIC_PROOF_REPORT ? lastJsonLine(run.stdout) : null,
-        fault_span_count: coverageTarget ? spanCount : null,
-        stdout,
-        stderr,
-        report,
-        coverage
-      };
-      const rel = `stages/${stage}.json`;
-      const bytes = recordBytes(observation);
-      writeFileAtomic(join(runDir, rel), bytes);
-      // Classified from the file as written, never from the object in memory.
-      const readBack = JSON.parse(readFileSync(join(runDir, rel), "utf8")) as StageObservation;
-      stages[stage] = readBack;
-      stageRefs.push({ stage, path: rel, sha256: sha256Hex(bytes) });
-      rmSync(out, { recursive: true, force: true });
-      return readBack;
-    };
-    const held = (stage: StageObservation): boolean => stage.boundary.failures.length === 0 && stage.stopped;
+    const runner = createStageRunner({
+      runDir,
+      runId,
+      profileSha: recordSha256(profile),
+      faultRecordSha,
+      fixture,
+      deadlineMs,
+      tmp,
+      copyRoots,
+      mountsFor,
+      targetRel: symbolTarget.file,
+      faultSpan: plan.site.bytes,
+      executor: deps.container ?? dockerExecutor(),
+      clock: deps.clock,
+      stages,
+      stageRefs
+    });
+    const { runStage, held } = runner;
 
     const original = runStage("original_selected", "original", selectedArgv, { ...reportEnv, ...coverageEnv }, fileBytes);
     if (!held(original) || original.timed_out || !original.tests || original.tests.failed > 0 || original.tests.hook_failures > 0 || original.exit_code !== 0 || original.tests.executed === 0 || original.tests.pending > 0) {
@@ -990,6 +880,238 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+// ── shared with verify-test (A3): the copies, the mounts and one stage ───────────
+
+export type CopyRoots = { original: string; mutant: string };
+
+/**
+ * The original and the faulty copy, made by the proof script from the commit's own files
+ * under `<tmp>/copies`, and checked: the target file holds the expected bytes in each, the
+ * two copies differ in nothing else, and each file in `mustHold` is there with the checkout's bytes.
+ */
+export function prepareFaultCopies(args: {
+  runner: DynamicProofRunner;
+  sourceRoot: string;
+  targetRel: string;
+  method: string;
+  targetAbs: string;
+  bound: NonNullable<NonNullable<ReturnType<typeof proofPreflight>["tsjs"]>["bound"]>;
+  plan: FaultPlan;
+  tmp: string;
+  mustHold: Array<{ path: string; sha256: string }>;
+}): CopyRoots {
+  const { bound, plan } = args;
+  const copiesDir = join(args.tmp, "copies");
+  mkdirSync(copiesDir);
+  const spikeArgs = [
+    "--root",
+    args.sourceRoot,
+    "--target",
+    args.targetRel,
+    "--method",
+    args.method,
+    "--prepare",
+    copiesDir,
+    "--json",
+    ...bound.args,
+    "--bound-edit-start",
+    String(plan.site.bytes.start),
+    "--bound-edit-end",
+    String(plan.site.bytes.end),
+    "--bound-edit-expect-sha256",
+    plan.original_site_sha256,
+    "--bound-edit-replacement",
+    plan.replacement_text
+  ];
+  const prepared = runBoundSpike(args.runner, spikeArgs, args.sourceRoot, args.targetAbs, args.targetRel, bound.target.file_sha256, plan.site.bytes)
+    .oracle as unknown as { status?: string; bound?: { mutatedSha256?: string }; copies?: { original?: { root?: string }; mutant?: { root?: string } } };
+  if (prepared.status !== "prepared" || prepared.bound?.mutatedSha256 !== plan.mutated_file_sha256) {
+    throw new ProbeFaultRefusal("prepare_failed", "the proof script did not prepare the copies with the planned fault.");
+  }
+  const copyRoots: CopyRoots = { original: prepared.copies?.original?.root ?? "", mutant: prepared.copies?.mutant?.root ?? "" };
+  for (const copy of Object.values(copyRoots)) {
+    if (!copy || !existsSync(copy) || relative(copiesDir, copy).startsWith("..") || isAbsolute(relative(copiesDir, copy))) {
+      throw new ProbeFaultRefusal("prepare_failed", "the proof script did not put both copies inside the folder it was given.");
+    }
+  }
+  // The two copies differ in the target file and nothing else, and both hold the named files as the checkout has them.
+  const originalTree = treeHashes(copyRoots.original, new Set());
+  const mutantTree = treeHashes(copyRoots.mutant, new Set());
+  const targetPath = args.targetRel.split(sep).join("/");
+  if (originalTree.get(targetPath) !== bound.target.file_sha256 || mutantTree.get(targetPath) !== plan.mutated_file_sha256) {
+    throw new ProbeFaultRefusal("prepare_failed", "a prepared copy does not hold the expected bytes of the target file.");
+  }
+  const otherDiffers = originalTree.size !== mutantTree.size || [...originalTree].some(([path, hash]) => path !== targetPath && mutantTree.get(path) !== hash);
+  if (otherDiffers) throw new ProbeFaultRefusal("prepare_failed", "the two copies differ in more than the target file.");
+  for (const file of args.mustHold) {
+    if (originalTree.get(file.path.split(sep).join("/")) !== file.sha256) {
+      throw new ProbeFaultRefusal("tests_invalid", `${file.path} is not in the commit as it is in the checkout (missing, changed since the commit, or a symbolic link).`);
+    }
+  }
+  // Mount points for the installed dependencies: the copies never contain them.
+  for (const copy of Object.values(copyRoots)) mkdirSync(join(copy, "node_modules"), { recursive: true });
+  return copyRoots;
+}
+
+/** The mounts of every stage: a copy, the installed dependencies, a fresh output folder, the reporter, and the witness when there is one. */
+export function makeMountsFor(copyRoots: CopyRoots, nodeModulesReal: string, witnessFile: string | null): (copy: "original" | "mutant", out: string) => ContainerMount[] {
+  return (copy, out) => [
+    { source: copyRoots[copy], target: WORK_REPO, readonly: true, role: `<${copy}>` },
+    { source: nodeModulesReal, target: `${WORK_REPO}/node_modules`, readonly: true, role: "<node_modules>" },
+    { source: out, target: WORK_OUT, readonly: false, role: "<out>" },
+    { source: reporterPath(), target: REPORTER_TARGET, readonly: true, role: "<reporter>" },
+    ...(witnessFile ? [{ source: witnessFile, target: WITNESS_TARGET, readonly: true, role: "<witness>" }] : [])
+  ];
+}
+
+export function containerProfile(fixture: FixtureProfile, mountsFor: ReturnType<typeof makeMountsFor>, env: Record<string, string>): RunProfile["container"] {
+  return {
+    image: fixture.shape.image,
+    platform: fixture.shape.platform,
+    user: "1000:1000",
+    network: "none",
+    read_only_root: true,
+    capabilities: "none",
+    memory: fixture.shape.memory,
+    cpus: fixture.shape.cpus,
+    processes: fixture.shape.processes,
+    tmp_size: "2g",
+    deadline_seconds: fixture.shape.deadlineSeconds,
+    mounts: mountsFor("original", "<out>").map((mount) => ({ source: mount.role, target: mount.target, mode: mount.readonly ? "ro" : "rw" })),
+    env_names: shapeEnvNames(env)
+  };
+}
+
+export interface StageRunnerContext {
+  runDir: string;
+  runId: string;
+  profileSha: string;
+  faultRecordSha: string;
+  fixture: FixtureProfile;
+  deadlineMs: number;
+  tmp: string;
+  copyRoots: CopyRoots;
+  mountsFor: ReturnType<typeof makeMountsFor>;
+  targetRel: string;
+  faultSpan: { start: number; end: number };
+  executor: ContainerExecutor;
+  clock: Clock;
+  stages: Partial<Record<StageName, StageObservation>>;
+  stageRefs: Classification["stages"];
+}
+
+export function createStageRunner(ctx: StageRunnerContext): {
+  runStage: (stage: StageName, copy: "original" | "mutant", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent?: boolean) => StageObservation;
+  held: (stage: StageObservation) => boolean;
+} {
+  const { runDir, runId, fixture, deadlineMs, tmp, copyRoots, mountsFor, executor } = ctx;
+  /** One stage: the boundary probe in the stage's own shape, then, only if it holds, the stage's command. */
+  // `faultPresent` says whether the target bytes in the copy hold the fault; by default, in the faulty copy only.
+  const runStage = (stage: StageName, copy: "original" | "mutant", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent = copy === "mutant"): StageObservation => {
+    // The probe and the stage each get a new, never-used output folder. A folder deleted and made again at
+    // the same path is not the same folder to Docker Desktop's file sharing: the next container sees the
+    // deleted one, and every write to it fails.
+    const probeOut = mkdtempSync(join(tmp, `probe-${stage}-`));
+    const out = mkdtempSync(join(tmp, `out-${stage}-`));
+    const request: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, out), env, workdir: WORK_REPO, command, deadlineMs };
+    const probeRequest: ContainerRequest = { ...request, mounts: mountsFor(copy, probeOut) };
+    const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy], ctx.targetRel)));
+    const startedAt = ctx.clock();
+    const probe = executor(boundaryProbeRequest(probeRequest));
+    const probeReport = probe.exitCode === 0 ? lastJsonLine(probe.stdout) : null;
+    const failures =
+      probe.exitCode === 0
+        ? boundaryFailures(probeReport, probeRequest, fixture.node)
+        : [`the probe exited ${probe.exitCode}${probe.timedOut ? " (timeout)" : ""}${probe.stderr ? `: ${redactSecrets(probe.stderr).split("\n")[0]}` : ""}`];
+    rmSync(probeOut, { recursive: true, force: true });
+    const run = failures.length === 0 ? executor(request) : null;
+    const stdout = fileRef(runDir, `logs/${stage}.stdout.log`, Buffer.from(redactSecrets(run?.stdout ?? ""), "utf8"));
+    const stderr = fileRef(runDir, `logs/${stage}.stderr.log`, Buffer.from(redactSecrets(run?.stderr ?? ""), "utf8"));
+    const outputProblems: string[] = [];
+    let report: FileRef | null = null;
+    let observedTests: StageObservation["tests"] = null;
+    if (run && env.OPRO_DYNAMIC_PROOF_REPORT) {
+      const read = readUntrustedFile(join(out, "report.json"), MAX_REPORT_BYTES);
+      if ("bytes" in read) {
+        report = fileRef(runDir, `reports/${stage}.json`, read.bytes);
+        try {
+          observedTests = testsFromReport(JSON.parse(read.bytes.toString("utf8")));
+        } catch {
+          outputProblems.push("report.json is not valid JSON");
+        }
+      } else if (read.problem !== "missing") {
+        outputProblems.push(`report.json was not read: ${read.problem}`);
+      }
+    }
+    let coverage: FileRef | null = null;
+    let spanCount: number | null = null;
+    if (run && coverageTarget) {
+      const dir = join(out, "coverage");
+      const dirStat = existsSync(dir) ? lstatSync(dir) : null;
+      if (dirStat && !dirStat.isDirectory()) outputProblems.push("the coverage folder is not a folder");
+      else if (dirStat) {
+        const files: unknown[] = [];
+        for (const name of readdirSync(dir).sort()) {
+          if (!name.endsWith(".json")) continue;
+          const read = readUntrustedFile(join(dir, name), MAX_COVERAGE_FILE_BYTES);
+          if (!("bytes" in read)) {
+            outputProblems.push(`coverage/${name} was not read: ${read.problem}`);
+            continue;
+          }
+          try {
+            files.push(JSON.parse(read.bytes.toString("utf8")));
+          } catch {
+            outputProblems.push(`coverage/${name} is not valid JSON`);
+          }
+        }
+        const url = containerFileUrl(ctx.targetRel.split(sep).join("/"));
+        spanCount = outputProblems.some((problem) => problem.startsWith("coverage")) ? null : faultSpanCount(files, url, coverageTarget, ctx.faultSpan);
+        const kept = files.flatMap((file) => (Array.isArray((file as any)?.result) ? (file as any).result : []).filter((script: any) => script?.url === url));
+        coverage = fileRef(runDir, `coverage/${stage}.json`, recordBytes({ url, scripts: kept }));
+      }
+    }
+    const observation: StageObservation = {
+      version: STAGE_OBSERVATION_VERSION,
+      stage,
+      run_id: runId,
+      run_profile_sha256: ctx.profileSha,
+      fault_record_sha256: faultPresent ? ctx.faultRecordSha : null,
+      copy,
+      copy_target_sha256: copyTargetSha,
+      argv: command,
+      docker_argv: (run ?? probe).dockerArgv.map((part) => (part === BOUNDARY_PROBE_SOURCE ? "<boundary probe>" : part)),
+      boundary: { failures, report: probeReport },
+      stopped: probe.stopped && (run?.stopped ?? true),
+      output_problems: outputProblems,
+      cwd: WORK_REPO,
+      env_names: shapeEnvNames(env),
+      started_at: startedAt,
+      duration_ms: run?.durationMs ?? 0,
+      exit_code: run?.exitCode ?? null,
+      signal: run?.signal ?? null,
+      timed_out: run?.timedOut ?? false,
+      tests: observedTests,
+      output: run && !env.OPRO_DYNAMIC_PROOF_REPORT ? lastJsonLine(run.stdout) : null,
+      fault_span_count: coverageTarget ? spanCount : null,
+      stdout,
+      stderr,
+      report,
+      coverage
+    };
+    const rel = `stages/${stage}.json`;
+    const bytes = recordBytes(observation);
+    writeFileAtomic(join(runDir, rel), bytes);
+    // Classified from the file as written, never from the object in memory.
+    const readBack = JSON.parse(readFileSync(join(runDir, rel), "utf8")) as StageObservation;
+    ctx.stages[stage] = readBack;
+    ctx.stageRefs.push({ stage, path: rel, sha256: sha256Hex(bytes) });
+    rmSync(out, { recursive: true, force: true });
+    return readBack;
+  };
+  const held = (stage: StageObservation): boolean => stage.boundary.failures.length === 0 && stage.stopped;
+  return { runStage, held };
 }
 
 /** Plain lines for the terminal. */

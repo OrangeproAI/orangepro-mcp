@@ -18,6 +18,9 @@ export interface ParsedArgs {
  */
 export const VALUE_FLAGS = new Set([
   "agent-pass",
+  "assertion",
+  "brief",
+  "candidate",
   "auto-limit",
   "proof-limit",
   "generate-limit",
@@ -30,6 +33,7 @@ export const VALUE_FLAGS = new Set([
   "fixture",
   "format",
   "framework",
+  "from-run",
   "include-markdown",
   "job-id",
   "limit",

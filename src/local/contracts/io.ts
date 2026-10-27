@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { sha256Hex } from "./targetRecord.js";
 
 // Shared plumbing for the files of one proof run (`.orangepro/proof-runs/<run-id>/`):
@@ -118,6 +118,9 @@ export function verifyRunFolder(runDir: string): RunCheck {
   }
   const listed = new Set(manifest.files.map((entry) => entry.path));
   for (const entry of manifest.files) {
+    if (typeof entry?.path !== "string" || isAbsolute(entry.path) || entry.path.split(/[\\/]/).some((part) => part === ".." || part === "")) {
+      return { ok: false, message: `MANIFEST.json lists a path outside the run folder: ${JSON.stringify(entry?.path)}.` };
+    }
     const abs = join(runDir, entry.path);
     if (!existsSync(abs)) return { ok: false, message: `${entry.path} is listed in MANIFEST.json but missing.` };
     if (sha256Hex(readFileSync(abs)) !== entry.sha256) return { ok: false, message: `${entry.path} does not match its hash in MANIFEST.json.` };
