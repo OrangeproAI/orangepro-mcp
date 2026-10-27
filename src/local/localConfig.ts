@@ -1,12 +1,12 @@
 /**
  * Local proof-kit configuration: privacy defaults + BYOK provider resolution.
  *
- * Security invariant: model provider API keys are read from the environment at
- * call time and are NEVER written into the workspace config, the graph, or the
- * evidence pack.
+ * Security invariant: model provider settings (API keys, provider, base URLs,
+ * models) are read only from the process environment at call time: the shell,
+ * or the env block of an MCP client's config. No .env file is read, so a scanned
+ * repository cannot choose where a key is sent. Keys are NEVER written into the
+ * workspace config, the graph, or the evidence pack.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 
 export interface PrivacySettings {
   /** Hosted upload is deferred + opt-in; always false in the first slice. */
@@ -49,63 +49,6 @@ export interface ProviderConfig {
 export interface ProviderOverride {
   provider?: string;
   model?: string;
-}
-
-export const PROVIDER_ENV_FILES = [".env.provider.local", ".env.local", ".env"] as const;
-
-const PROVIDER_ENV_KEYS = new Set([
-  "OPENAI_API_KEY",
-  "OPENAI_BASE_URL",
-  "OPENAI_MODEL",
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_MODEL",
-  "OLLAMA_BASE_URL",
-  "OLLAMA_MODEL",
-  "ORANGEPRO_PROVIDER"
-]);
-
-function parseEnvFile(contents: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const rawLine of contents.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-    if (!match || !PROVIDER_ENV_KEYS.has(match[1])) continue;
-    let value = match[2].trim();
-    if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    out[match[1]] = value;
-  }
-  return out;
-}
-
-export function loadProviderEnv(
-  roots: Array<string | undefined>,
-  env: NodeJS.ProcessEnv = process.env
-): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = {};
-  const seen = new Set<string>();
-  for (const root of roots) {
-    if (!root) continue;
-    const abs = resolve(root);
-    if (seen.has(abs)) continue;
-    seen.add(abs);
-    for (const name of PROVIDER_ENV_FILES) {
-      const file = join(abs, name);
-      if (!existsSync(file)) continue;
-      try {
-        Object.assign(merged, parseEnvFile(readFileSync(file, "utf8")));
-      } catch {
-        /* Ignore unreadable local env files; callers will surface no-provider guidance. */
-      }
-    }
-  }
-  return { ...merged, ...env };
 }
 
 /**

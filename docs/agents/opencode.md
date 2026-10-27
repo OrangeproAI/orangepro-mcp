@@ -18,7 +18,7 @@ Print the OpenCode MCP block:
 opro agent --client opencode
 ```
 
-Add the printed `mcpServers.orangepro-local` block to your OpenCode MCP settings. If OpenCode does not inherit your shell environment, put the model provider key in the local MCP config, or keep it in a repo-local `.env.provider.local` file that is not committed.
+Add the printed `mcpServers.orangepro-local` block to your OpenCode MCP settings. If OpenCode does not inherit your shell environment, put the model provider key in the `env` block of the local MCP config. OrangePro reads no `.env` file.
 
 For a direct OpenCode config, add this server under `mcp`:
 

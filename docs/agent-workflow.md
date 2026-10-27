@@ -37,9 +37,10 @@ opro agent --client generic --json
 
 The generated MCP config points at the local `opro mcp` server and intentionally
 does not pin a model. If your MCP client does not inherit shell environment
-variables, add provider keys/model defaults to that client's local config, or
-place provider values in a local `.env.provider.local` file in the
-repo/workspace. Do not commit client config files or env files that contain keys.
+variables, add provider keys and model defaults to the `env` block of that
+client's local config. OrangePro reads no `.env` file: keys, the provider, its
+endpoint and the model come only from the environment. Do not commit client
+config files that contain keys.
 
 ## Agent Instruction
 

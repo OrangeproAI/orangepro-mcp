@@ -18,7 +18,7 @@ Install OrangePro from the Cursor Marketplace when it is listed. Until then, use
 plugins/orangepro
 ```
 
-The plugin starts the `orangepro-local` MCP server through `npx -y @orangepro/mcp-server@latest mcp` and applies OrangePro rules for gap/test workflows. It does not pin a model; provider keys and model defaults come from your environment, `.env.provider.local`, `.env.local`, `.env`, or `opro setup`.
+The plugin starts the `orangepro-local` MCP server through `npx -y @orangepro/mcp-server@latest mcp` and applies OrangePro rules for gap/test workflows. It does not pin a model; provider keys and model defaults come from your environment (the shell, or the MCP config's `env` block), or the default saved by `opro setup`. OrangePro reads no `.env` file.
 
 ## MCP Setup
 
@@ -28,7 +28,7 @@ Print the Cursor MCP block:
 opro agent --client cursor
 ```
 
-Paste the printed block into Cursor Settings -> MCP or `~/.cursor/mcp.json`. If Cursor does not inherit your shell environment, add the provider key to the local MCP config, or keep it in a repo-local `.env.provider.local` file that is not committed.
+Paste the printed block into Cursor Settings -> MCP or `~/.cursor/mcp.json`. If Cursor does not inherit your shell environment, add the provider key to the `env` block of the local MCP config.
 
 If your Cursor setup supports custom commands, map `/opro` to: call `orangepro_start` for the current checkout, then follow the returned `next_actions`. The shortcut should use the MCP tool so Proven / Associated signal / No integration signal semantics stay intact.
 

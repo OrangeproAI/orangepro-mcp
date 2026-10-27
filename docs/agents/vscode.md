@@ -25,7 +25,7 @@ Add OrangePro as an MCP server in your user or workspace MCP config:
 }
 ```
 
-Do not hardcode provider keys in a committed workspace config. Prefer your shell environment, `.env.provider.local`, `.env.local`, `.env`, or `opro setup`.
+Do not hardcode provider keys in a committed workspace config. Prefer your shell environment, or the `env` block of your local MCP config; `opro setup` saves only a default provider and model name. OrangePro reads no `.env` file.
 
 ## Agent Prompt
 

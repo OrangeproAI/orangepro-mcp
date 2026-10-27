@@ -47,7 +47,7 @@ Hosted MCP server (set in your environment or a local `.env`):
 - `ORANGEPRO_USER_EMAIL` — sent as `X-User-Email` header
 - `ORANGEPRO_ORGANIZATION_NAME` — sent as `X-Organization-Name` header (falls back to tenant ID)
 
-Local proof kit is BYOK, and a key is only needed for LLM test generation — analysis and dynamic proof run keyless. Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OLLAMA_BASE_URL` (optional `ORANGEPRO_PROVIDER`, `*_MODEL`, `*_BASE_URL`), read from the environment or `.env.provider.local` / `.env.local` / `.env`. See [docs/local-proof-kit.md](docs/local-proof-kit.md).
+Local proof kit is BYOK, and a key is only needed for LLM test generation — analysis and dynamic proof run keyless. Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OLLAMA_BASE_URL` (optional `ORANGEPRO_PROVIDER`, `*_MODEL`, `*_BASE_URL`), read only from the process environment: the shell, or the `env` block of an MCP client's config. No `.env` file is read, so a scanned repository cannot choose where a key is sent. See [docs/local-proof-kit.md](docs/local-proof-kit.md).
 
 ## Architecture
 
