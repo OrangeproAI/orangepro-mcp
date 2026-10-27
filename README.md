@@ -235,7 +235,8 @@ Optional. Put it in `.orangepro/config.json` in the repository, or in `~/.orange
 ---
 
 ## Requirements and limits
-- **Node.js 20 or newer,** on macOS or Linux. Windows isn't tested: proofs use POSIX paths and symlinks.
+- **A patched Node.js: 22.23.4 or newer 22.x, 24.22.1 or newer 24.x, or 26.12.1 or newer,** on macOS or Linux. Windows isn't tested: proofs use POSIX paths and symlinks.
+- **Use a patched Node.js.** The October 21, 2026 Node.js security releases (22.23.4, 24.22.1, 26.12.1) fix several high-severity issues, and Node.js 20 is end-of-life and gets no fix. Odd-numbered lines (23, 25) have no patched release. The `engines` field in `package.json` records this, but npm only warns about it unless you set `engine-strict=true`. Check your version with `node -v`. See the [Node.js security release notice](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
 - **Git, for change history.** Without it, or in a shallow clone, the ranking uses structure only and the report says so. A folder that isn't a git checkout always runs in full.
 - **Install the repository's dependencies first** (`npm ci`, `uv sync`, `go mod download`, `mvn -q install`, …). Proof runs your own tests in an isolated copy and needs them to pass there.
 - **What's read:** source and test files, skipping anything in `.gitignore` or `.orangeproignore` (negations with `!` aren't supported), the usual build and dependency folders (`node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`, `.venv`, …), files over 1 MB, and generated code (files marked `Code generated … DO NOT EDIT`). Up to 100,000 files; `ORANGEPRO_MAX_FILES` lowers that and `ORANGEPRO_MAX_ANALYZE_MS` sets a time limit for the scan.
