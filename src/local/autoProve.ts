@@ -41,6 +41,7 @@ import type { Clock } from "./util/time.js";
 import type { FileReader } from "./types.js";
 import type { GraphNode, LocalGraph } from "./graph/ontology.js";
 import type { OperationDeps, ProveLoopOptions, ProveLoopResult, DynamicProofResult } from "./operations.js";
+import { isStaticOnly } from "./staticOnly.js";
 
 /** Real dynamic proof is profile-gated; only wired runner targets are attemptable. */
 function isTsJsFile(file: string): boolean {
@@ -1350,6 +1351,13 @@ function proveExistingAssociatedTests(
  */
 export async function autoProve(root: string, opts: AutoProveOptions, deps: AutoProveDeps): Promise<AutoProveResult> {
   if (opts.noAuto) return zeroSummary("disabled", false, "--no-auto: auto-prove disabled; analyze-only.");
+  // Item 34: static-only mode never runs the repository's tests, and a budget of 0 means no attempt.
+  if (isStaticOnly(deps.env ?? process.env)) {
+    return zeroSummary("disabled", false, "static-only: no proof attempts; the repository's tests are not run.");
+  }
+  if (opts.autoLimit !== undefined && Math.floor(opts.autoLimit) <= 0) {
+    return zeroSummary("disabled", false, "--proof-limit 0: no proof attempts.");
+  }
 
   const clock: Clock = deps.clock ?? systemClock;
   const proveLoop = deps.proveLoop;

@@ -1625,3 +1625,37 @@ describe("autoProve — bounded proof lane (0.2.47)", () => {
     expect(res.auto_prove.generated_files ?? []).toEqual([]);
   });
 });
+
+describe("item 34: start with a proof budget of 0, and in static-only mode", () => {
+  const refuseToRun = () => {
+    throw new Error("the repository's tests must not run");
+  };
+  const draftingProvider: ModelProvider = {
+    providerName: "fake",
+    modelName: "static-only-drafts",
+    complete: async () => "import { test, expect } from 'vitest';\ntest('draft', () => { expect(1).toBe(1); });\n"
+  };
+
+  it("--proof-limit 0 makes no proof attempt and says why", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const res = await opStart(W, { ai: false, aiFlows: false, proofLimit: 0 }, { clock, env: NO_ENV, dynamicProofRunner: refuseToRun } as never);
+    expect(res.auto_prove.status).toBe("disabled");
+    expect(res.auto_prove.attempted).toBe(0);
+    expect(res.auto_prove.reason).toContain("--proof-limit 0");
+  });
+
+  it("static-only drafts tests for the top rows and runs none of the repository's tests", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const res = await opStart(
+      W,
+      { aiFlows: false, generateLimit: 1, generateCoverage: true },
+      { clock, env: { ORANGEPRO_STATIC_ONLY: "1" }, aiProvider: draftingProvider, dynamicProofRunner: refuseToRun } as never
+    );
+    expect(res.auto_prove.status).toBe("disabled");
+    expect(res.auto_prove.attempted).toBe(0);
+    expect(res.auto_prove.reason).toContain("static-only");
+    expect(res.warnings.join("\n")).toContain("--generate-coverage ignored");
+    expect(res.generation.requested).toBe(1);
+    expect(res.generation.generated).toBeGreaterThan(0);
+  });
+});

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
+import { isStaticOnly, STATIC_ONLY_REFUSAL } from "./staticOnly.js";
 
 // The execution boundary for customer-repository code (context §12.7, handoff §5).
 // Every command that runs a customer's code runs in one container shape: the pinned
@@ -187,6 +188,10 @@ function sleepMs(ms: number): void {
  */
 export function dockerExecutor(dockerBin: string | null = resolveDocker()): ContainerExecutor {
   return (request) => {
+    // Item 34 backstop: a container here runs the repository's code.
+    if (isStaticOnly()) {
+      return { exitCode: null, signal: null, timedOut: false, stdout: "", stderr: STATIC_ONLY_REFUSAL, durationMs: 0, dockerArgv: [], stopped: true };
+    }
     for (const mount of request.mounts) assertMountablePath(mount.source);
     const name = `opro-probe-${process.pid}-${randomBytes(4).toString("hex")}`;
     const dockerArgv = ["docker", ...dockerRunArgs(name, request, true)];

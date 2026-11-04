@@ -23,6 +23,11 @@ into a hosted OrangePro tenant.
   and are never written into the graph, config, or pack.
 - **Local only.** All workspace-local writes live under `.orangepro/`; no source or test files in your repo are written. Add
   `.orangeproignore` (same spirit as `.gitignore`) to exclude paths from analysis.
+- **Static-only runs, for code you don't trust.** `opro start --static-only` (or `ORANGEPRO_STATIC_ONLY=1` in the
+  environment) reads the repository and drafts tests, but runs none of its code: no proof, no coverage run, and no Go
+  compile check (Go drafts say "Not compile-checked"). Commands that would run it (proof, probes, containers, setup
+  commands) refuse. `--proof-limit 0` alone stops proof attempts but still compile-checks Go drafts, which starts the
+  package's test program.
 
 ## Install
 

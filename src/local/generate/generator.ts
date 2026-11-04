@@ -2,6 +2,7 @@ import ts from "typescript";
 import path from "node:path";
 import { isBuiltin } from "node:module";
 import { execFileSync } from "node:child_process";
+import { NOT_COMPILE_CHECKED } from "../staticOnly.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { GeneratedTest, GenerationRun, GraphNode, ImportProvenance, LocalBucket, LocalGraph, TestLayer } from "../graph/ontology.js";
@@ -1579,8 +1580,11 @@ function pythonStaticIssue(body: string): string | null {
     "    raise SystemExit('pytest test entrypoint not found; expected def test_... or Test*.test_...')"
   ].join("\n");
   try {
-    execFileSync("python3", ["-m", "py_compile", file], { stdio: "pipe", timeout: STATIC_CHECK_TIMEOUT_MS });
-    execFileSync("python3", ["-c", pytestEntrypointCheck, file], { stdio: "pipe", timeout: STATIC_CHECK_TIMEOUT_MS });
+    // Isolated (-I) and run from the draft's own temporary folder: without both, Python puts the
+    // working directory (the repository root under `start .`) first on its import path, and a
+    // repository file named py_compile.py or ast.py would run here (item 34).
+    execFileSync("python3", ["-I", "-m", "py_compile", file], { cwd: dir, stdio: "pipe", timeout: STATIC_CHECK_TIMEOUT_MS });
+    execFileSync("python3", ["-I", "-c", pytestEntrypointCheck, file], { cwd: dir, stdio: "pipe", timeout: STATIC_CHECK_TIMEOUT_MS });
     return null;
   } catch (e) {
     const err = e as { stdout?: Buffer; stderr?: Buffer; message?: string };
@@ -1643,7 +1647,9 @@ function removeLines(body: string, lineNumbers: Set<number>): string {
     .join("\n");
 }
 
-function goCompile(body: string, workspaceRoot: string, relatedFiles: string[]): GoCompileResult {
+function goCompile(body: string, workspaceRoot: string, relatedFiles: string[], staticOnly = false): GoCompileResult {
+  // `go test -run ^$ .` builds and starts the package's test program (init, TestMain): repository code.
+  if (staticOnly) return { body, issue: NOT_COMPILE_CHECKED };
   const externalImports = goImportSpecs(body).filter((spec) => spec.split("/")[0].includes("."));
   const unverifiedImportIssue = externalImports.length
     ? `Go test imports module-path package(s) ${externalImports.join(", ")}, but OrangePro could not run the target-package compile check to verify they resolve.`
@@ -2309,7 +2315,7 @@ export async function generateTests(
       body = ensureFrameworkScaffold(body, framework);
       let compileIssue: string | null = null;
       if (framework.toLowerCase().includes("go")) {
-        const checked = goCompile(body, graph.workspace.root, relatedFiles);
+        const checked = goCompile(body, graph.workspace.root, relatedFiles, opts.static_only === true);
         body = checked.body;
         compileIssue = checked.issue;
       }
@@ -2687,7 +2693,7 @@ export async function generateTests(
         const importErrors = isResolverFramework(framework) ? unresolvedLocalImports(body, genTestAbs, graph.workspace.root, declaredDeps) : [];
         let compileIssue: string | null = null;
         if (framework.toLowerCase().includes("go")) {
-          const checked = goCompile(body, graph.workspace.root, relatedFiles);
+          const checked = goCompile(body, graph.workspace.root, relatedFiles, opts.static_only === true);
           body = checked.body;
           compileIssue = checked.issue;
         }
@@ -2890,7 +2896,7 @@ export async function generateTests(
       const importErrors = isResolverFramework(framework) ? unresolvedLocalImports(body, genTestAbs, graph.workspace.root, declaredDeps) : [];
       let compileIssue: string | null = null;
       if (framework.toLowerCase().includes("go")) {
-        const checked = goCompile(body, graph.workspace.root, relatedFiles);
+        const checked = goCompile(body, graph.workspace.root, relatedFiles, opts.static_only === true);
         body = checked.body;
         compileIssue = checked.issue;
       }

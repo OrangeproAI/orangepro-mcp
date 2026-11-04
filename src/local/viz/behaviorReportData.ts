@@ -1190,6 +1190,9 @@ function riskTodo(
       if (blocker === "toolchain_or_runner") {
         return "OrangePro could not validate the generated test because the named toolchain or test runner is unavailable. Install/configure it, then re-run `opro start`.";
       }
+      if (blocker === "not_compile_checked") {
+        return "This run was static-only, so OrangePro did not compile the generated test. Run `opro start` in your own checkout to check it.";
+      }
       if (blocker === "validation_timeout") {
         return "OrangePro's generated-test validation timed out. Warm the dependency cache or raise the named validation timeout, then re-run `opro start`.";
       }

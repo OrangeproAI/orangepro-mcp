@@ -417,7 +417,7 @@ export interface AnalysisMeta {
     generated: number;
     runnable: number;
     drafts: number;
-    blockers: Partial<Record<"generated_code" | "unresolved_import" | "toolchain_or_runner" | "validation_timeout" | "unknown", number>>;
+    blockers: Partial<Record<"generated_code" | "unresolved_import" | "toolchain_or_runner" | "not_compile_checked" | "validation_timeout" | "unknown", number>>;
     reason?: string;
   };
   /** Deterministic Layer-1 code communities derived from structural calls/imports. Navigation only — never coverage evidence. */
