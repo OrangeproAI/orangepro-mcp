@@ -30,5 +30,5 @@ Do not hardcode provider keys in a committed workspace config. Prefer your shell
 ## Agent Prompt
 
 ```text
-Use OrangePro first. Call orangepro_start for this repo, then follow next_actions. Generate tests with orangepro_generate_tests, write only runnable outputs with run_hints, run the suggested command, and call `orangepro_prove` with the returned `prove_run` args after a pass for Dynamically Proven. Use record_run only for static diagnostics.
+Use OrangePro first. Call orangepro_start for this repo, then follow next_actions. Generate tests with orangepro_generate_tests, write only runnable outputs with run_hints, run the suggested command, and take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass for Dynamically Proven. Use record_run only for static diagnostics.
 ```

@@ -35,5 +35,5 @@ If your Cursor setup supports custom commands, map `/opro` to: call `orangepro_s
 ## Agent Prompt
 
 ```text
-Use OrangePro first. Call orangepro_start in this repo, then follow its next_actions. Generate tests with orangepro_generate_tests, write only runnable outputs with run_hints, run the suggested command, and call `orangepro_prove` with the returned `prove_run` args after a passing run for Dynamically Proven. Use record_run only for static diagnostics.
+Use OrangePro first. Call orangepro_start in this repo, then follow its next_actions. Generate tests with orangepro_generate_tests, write only runnable outputs with run_hints, run the suggested command, and take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a passing run for Dynamically Proven. Use record_run only for static diagnostics.
 ```

@@ -58,7 +58,8 @@ export const BRAND_SVG =
 export const ARROW_SVG =
   '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 7h8M8 4l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
 
-export const RUN_COMMAND = "npx -y @orangepro/orangepro-mcp start .";
+/** Same command the README and the plugin tell a new user to run. `@orangepro/mcp-server` launches `@orangepro/orangepro-mcp`. */
+export const RUN_COMMAND = "npx -y @orangepro/mcp-server@latest start .";
 
 /** CSS both pages share: tokens, chips, buttons, code. */
 export function baseCss(): string {

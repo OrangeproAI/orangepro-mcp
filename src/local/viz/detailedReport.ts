@@ -423,7 +423,11 @@ const DETAILED_JS = String.raw`
     if (S.sel && !list.some(function (r) { return r.id === S.sel; }) && list.length) S.sel = list[0].id;
     var line = anyFilter()
       ? fmt(list.length) + (list.length === 1 ? " matches" : " match") + " these filters"
-      : "The " + fmt(M.worklist.length) + " highest-priority of " + fmt(M.counts.ranked) + " ranked " + NOUN + (M.proofs.length ? ", and " + fmt(M.proofs.length) + " done" : "");
+      : (M.worklist.length
+          ? "The " + fmt(M.worklist.length) + " highest-priority of " + fmt(M.counts.ranked) + " ranked " + NOUN + (M.proofs.length ? ", and " + fmt(M.proofs.length) + " done" : "")
+          : (M.proofs.length
+              ? "Nothing left to rank. " + fmt(M.proofs.length) + (M.proofs.length === 1 ? " " + ONE + " is done." : " " + NOUN + " are done.")
+              : "No ranked " + NOUN + "."));
     var max = 0;
     M.worklist.forEach(function (r) { if (r.score > max) max = r.score; });
     var h = '<div class="lhead"><div><h1>Worklist</h1><p>' + esc(line) + '</p></div><div class="sortw"><label for="sort">Sort by</label><select id="sort">' +
