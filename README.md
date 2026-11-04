@@ -16,7 +16,7 @@
 
 ---
 
-OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Model calls happen only if you add your own key, for optional test generation and suggestions.
+OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Mapping, gap ranking and proof work with no model key. Drafting a runnable test needs a provider. `orangepro_generate_tests` with `provider` set to `deterministic` runs with no key and returns placeholders only: the body is `expect(true).toBe(true); // placeholder — replace with a concrete assertion`, `runnable` is false, and there is no `suggested_path`, `run_command` or `prove_run`. That mode smoke-tests the pipeline.
 
 ```bash
 npx -y @orangepro/mcp-server@latest start .
@@ -87,7 +87,7 @@ npx -y @orangepro/mcp-server@latest start .
 open .orangepro/short_behavior-coverage.html
 ```
 
-Analysis, ranking and proof need no model key. Test generation is optional and uses your own key (see [Model setup](#reference)).
+Mapping, gap ranking and proof work with no model key. Drafting a runnable test needs a provider (see [Model setup](#reference)). Deterministic mode returns placeholders only, as described above.
 
 **Tips for the most accurate run:**
 - **Use a full clone, not a shallow one.** Change history drives part of the ranking, and the report says when history was partial.
@@ -107,7 +107,7 @@ Analysis, ranking and proof need no model key. Test generation is optional and u
 ├── rtm.md                         ← traceability matrix
 └── config.json                    ← optional per-repo settings
 
-orangepro_generated/               ← generated tests (only with a model key); your files are never edited
+orangepro_generated/               ← generated tests (a runnable draft needs a provider; deterministic mode returns placeholders only); your files are never edited
 ```
 
 ---
@@ -124,6 +124,8 @@ Every function gets exactly one evidence label. The four things to do above are 
 | **No test found** | Nothing links a test to it. | Write |
 
 A proof that ran and did not catch the break turns the function into **Write**; a proof made before the code changed turns it back into **Prove**.
+
+A successful `orangepro_prove` sets the oracle field `proven` to true and writes the ledger status `reproven`. That status is used the first time too. The report's Proven count is how many behaviors still match one of those certificates. The traceability row says Reproven (this run). That label does not mean the function was proved earlier.
 
 **What OrangePro doesn't count, so linked numbers are a floor, not a coverage percentage:**
 - tests that only assert on mocks;
@@ -156,9 +158,33 @@ opro prove-loop --target-symbol 'sym:app/billing/invoices.py#void_invoice' \
 opro prove-loop --target-symbol 'sym:src/orders.service.ts#OrdersService.cancel' \
   --test src/orders.service.spec.ts --replacement 'return null;'
 ```
-- **Proven:** the test passes on the original code and fails at its own assertion on the broken copy.
+- **Proven:** the test passes on the original code and fails at its own assertion on the broken copy. The oracle then says `proven: true`. The ledger stores that attempt as `reproven`, including the first time, and the traceability row says Reproven (this run).
 - **Not proven:** the test still passes on the broken copy, so it doesn't protect that function. That's a finding too.
 - **Unrunnable:** setup failed. This is never counted either way.
+
+### Arguments for `orangepro_prove`
+
+For a JavaScript or TypeScript function the call needs:
+
+- `target_symbol`: `sym:<file>#<Symbol>`. A bare name is refused.
+- `test_path`: the test file, relative to the repo.
+- `replacement`: empty, or a single `return` of a literal, such as `return null;`. A throw, a call, or any other statement is refused.
+- `replacement_mode`: `return-json` for a normal function (the default). `promise-json` when the function is async, so the literal is returned as a resolved promise.
+- `runner`: `jest`, `vitest`, `mocha`, or `auto`. Use the runner the repo uses.
+
+Worked example for an async `run` in `index.js`, tested with Jest:
+
+```json
+{
+  "target_symbol": "sym:index.js#run",
+  "test_path": "index.test.js",
+  "replacement": "return null;",
+  "replacement_mode": "promise-json",
+  "runner": "jest"
+}
+```
+
+Go and Java do not take `replacement`. They take `test_run` (`^TestName$` for Go, `TestClass#testMethod` for Java).
 
 **Find weak tests without a model key:**
 ```bash
@@ -285,7 +311,7 @@ opro gaps --limit 10          # top unproven behaviors, ranked
 opro prove-loop ...           # mutation proof for one function (see above)
 opro roast .                  # find tests whose mutant survives (no key needed)
 opro doctor --proof           # why top targets aren't proven yet
-opro generate --base main     # tests for what this branch changed (needs a model key)
+opro generate --base main     # runnable tests for this branch (needs a provider; --provider deterministic returns placeholders only)
 opro rtm                      # traceability matrix
 opro export                   # metadata-only evidence pack
 opro coverage                 # find or generate runtime coverage artifacts
@@ -305,7 +331,7 @@ Add `--json` to any read command for machine output. Run `opro help` for every f
 | `orangepro_find_test_gaps` | Unproven behaviors ranked by ORS |
 | `orangepro_prove_loop` | Setup + mutation proof + report refresh for one behavior |
 | `orangepro_prove` | Mutation proof only |
-| `orangepro_generate_tests` | Grounded tests for gaps (model key required) |
+| `orangepro_generate_tests` | Grounded tests. A runnable draft needs a provider. `provider: deterministic` returns placeholders only, with no key. |
 | `orangepro_changed_impact` | What a diff touches |
 | `orangepro_status` | Workspace state without running anything |
 | `orangepro_doctor` | What evidence to add next |

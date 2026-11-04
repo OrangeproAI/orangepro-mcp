@@ -758,6 +758,28 @@ describe("both reports read one report model", () => {
     expect(renderSummaryReport({ ...model, counts: { ...model.counts, proven: 1 } })).toContain("1 function is already done: a test fails when it breaks.");
   });
 
+  it("prints the published launcher command and a plain line when nothing is left to rank", async () => {
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    const model = await reportModelOf(graph(), EMPTY_LEDGER, {
+      proofs: [{ id: "sym:index.js#run", title: "run", file: "index.js", test: "index.test.js" }]
+    });
+    const empty = {
+      ...model,
+      worklist: [],
+      counts: { ...model.counts, ranked: 0, proven: 1 },
+      proofs: [{ id: "sym:index.js#run", title: "run", file: "index.js", test: "index.test.js" }]
+    };
+    const summary = renderSummaryReport(empty);
+    const detailed = renderDetailedReport({ model: empty, csv: "" });
+    for (const html of [summary, detailed]) {
+      expect(html).toContain("npx -y @orangepro/mcp-server@latest start .");
+      expect(html).not.toContain("@orangepro/orangepro-mcp start");
+    }
+    expect(detailed).toContain("Nothing left to rank. ");
+    expect(detailed).toContain('M.proofs.length === 1 ? " " + ONE + " is done."');
+  });
+
   it("links the tests spreadsheet from the detailed report", async () => {
     const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
     const model = await reportModelOf(withDelete(graph()));

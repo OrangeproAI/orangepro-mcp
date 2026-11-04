@@ -94,14 +94,38 @@ opro export --format graph-html --out .orangepro/graph.html
 PR. `generate --pr <n>` is the mutating escape hatch and should only be used when
 the developer explicitly allows the working tree to switch.
 
+## Arguments for `orangepro_prove`
+
+For a JavaScript or TypeScript function, `orangepro_prove` needs:
+
+- `target_symbol`: `sym:<file>#<Symbol>`. A bare name is refused.
+- `test_path`: the test file, relative to the repo.
+- `replacement`: empty, or a single `return` of a literal, such as `return null;`. A throw, a call, or any other statement is refused.
+- `replacement_mode`: `return-json` for a normal function (the default). `promise-json` when the function is async, so the literal is returned as a resolved promise.
+- `runner`: `jest`, `vitest`, `mocha`, or `auto`. Use the runner the repo uses.
+
+Worked example for an async `run` in `index.js`, tested with Jest:
+
+```json
+{
+  "target_symbol": "sym:index.js#run",
+  "test_path": "index.test.js",
+  "replacement": "return null;",
+  "replacement_mode": "promise-json",
+  "runner": "jest"
+}
+```
+
+Go and Java do not take `replacement`. They take `test_run` (`^TestName$` for Go, `TestClass#testMethod` for Java).
+
 ## What Counts
 
 - **Runnable**: the generated test has `run_hints`, the agent writes it to
   `suggested_path`, and the repo's test runner executes it.
 - **Draft**: grounded context with no run command. Useful for a developer, but
   not a runnable-test claim.
-- **Proven**: dynamic targeted-proof ledger certificate closed for the behavior; no LLM judgment or static-only match is involved.
-- **Reproven**: this run produced the dynamic proof certificate. Older static re-analysis records are associated diagnostics until that certificate exists.
+- **Proven**: the report count of behaviors whose current code still matches a dynamic proof certificate. The test passed on the original code, and the same test failed at an assertion after the function body was replaced. Static matches and model output are not Proven.
+- **Reproven**: the ledger status `reproven`, written for every successful `orangepro_prove`, including the first time. The oracle reports that same success as `proven: true`. The traceability row says Reproven (this run). That label does not mean the function was proved earlier.
 - **Runtime-covered**: the repo's own coverage tool executed the code; this is runtime observation, not assertion-level proof.
 - **Associated signal**: OrangePro found a name, path, import, or structural test signal, but not semantic proof.
 - **No integration signal**: no static test signal was found.
@@ -122,7 +146,7 @@ For repos that use an `AGENTS.md`, keep the OrangePro instruction short:
   `opro generate --target <target-id> --single --limit 1`.
 - Write only tests that include `run_hints`; drafts are context, not runnable claims.
 - Write each generated body to `suggested_path`, run `run_command`, then take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass to attempt Dynamically Proven. Use `record_run` only for static diagnostics.
-- Report coverage status as Proven / Reproven / Runtime-covered / Associated signal / No integration signal. Do not promote Associated signal or AI links to Proven.
+- Report coverage status as Proven / Reproven / Runtime-covered / Associated signal / No integration signal. A successful proof stores ledger status `reproven` and the oracle says `proven: true`, including the first time. Proven is the report count. Reproven (this run) is the traceability label for that certificate, not a second proof. Do not promote Associated signal or AI links to Proven.
 ```
 
 ## Verification Loop
