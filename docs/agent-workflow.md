@@ -62,7 +62,7 @@ For PR work:
 3. Use only generated tests that include run_hints.
 4. Write each body to its suggested_path.
 5. Run the run_command from the owning package directory.
-6. After a pass, call `orangepro_prove` with the returned `prove_run` args to attempt Dynamically Proven; use `record_run` only for static diagnostics.
+6. After a pass, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` to attempt Dynamically Proven; use `record_run` only for static diagnostics.
 7. Report pass/fail with stack traces and exact setup problems.
 
 For baseline work:
@@ -70,7 +70,7 @@ For baseline work:
 2. Pick one high-priority gap.
 3. Call orangepro_generate_tests for that target.
 4. Write, run, and report only runnable tests.
-5. After a pass, call `orangepro_prove` with the returned `prove_run` args to attempt Dynamically Proven; use `record_run` only for static diagnostics.
+5. After a pass, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` to attempt Dynamically Proven; use `record_run` only for static diagnostics.
 
 Do not treat drafts as runnable tests. Drafts are context.
 Do not claim coverage changed unless OrangePro reports Proven, Reproven, Runtime-covered, Associated signal, or No integration signal changed.
@@ -121,7 +121,7 @@ For repos that use an `AGENTS.md`, keep the OrangePro instruction short:
 - For baseline gaps, run `opro gaps --limit 10`, pick one target, then run
   `opro generate --target <target-id> --single --limit 1`.
 - Write only tests that include `run_hints`; drafts are context, not runnable claims.
-- Write each generated body to `suggested_path`, run `run_command`, call `orangepro_prove` with the returned `prove_run` args after a pass to attempt Dynamically Proven. Use `record_run` only for static diagnostics.
+- Write each generated body to `suggested_path`, run `run_command`, then take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass to attempt Dynamically Proven. Use `record_run` only for static diagnostics.
 - Report coverage status as Proven / Reproven / Runtime-covered / Associated signal / No integration signal. Do not promote Associated signal or AI links to Proven.
 ```
 
