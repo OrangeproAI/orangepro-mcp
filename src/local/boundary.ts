@@ -9,7 +9,8 @@ import { delimiter, isAbsolute, join } from "node:path";
 // empty run-owned folder it may write. The kit itself stays on the host; nothing of
 // the host is passed in except the mounts listed here. The shape is V1's test stage
 // (artifacts/milestones/M0/0.2.58/isolation/boundary.sh) plus OrangePro's reporter,
-// read-only, and that one output folder.
+// read-only, and that one output folder. V1's install stage is the one other shape:
+// the same container with the network on and the checkout read-write, for `npm ci`.
 
 export const WORK_REPO = "/work/repo";
 export const WORK_OUT = "/work/out";
@@ -27,6 +28,23 @@ export interface ContainerShape {
 export const CONTAINER_USER = "1000:1000";
 export const CONTAINER_TMP_SIZE = "2g";
 
+/**
+ * The user the container runs as. On a Linux host the bind-mounted folders belong to the
+ * host's user, so the container runs as that uid:gid, and never as root: a stage could not
+ * write its own output folder otherwise. Elsewhere (Docker Desktop maps file ownership
+ * itself) it is 1000:1000.
+ */
+export function containerUser(platform: NodeJS.Platform = process.platform, ids: { uid: number; gid: number } | null = hostIds()): string {
+  if (platform !== "linux") return CONTAINER_USER;
+  if (!ids) throw new Error("the host user could not be read, so the container user cannot match it.");
+  if (ids.uid === 0) throw new Error("refusing to run the container boundary as root: run OrangePro as an ordinary user.");
+  return `${ids.uid}:${ids.gid}`;
+}
+
+function hostIds(): { uid: number; gid: number } | null {
+  return typeof process.getuid === "function" && typeof process.getgid === "function" ? { uid: process.getuid(), gid: process.getgid() } : null;
+}
+
 export interface ContainerMount {
   /** Host path. Never recorded: `role` stands in for it. */
   source: string;
@@ -43,6 +61,8 @@ export interface ContainerRequest {
   workdir: string;
   command: string[];
   deadlineMs: number;
+  /** "bridge" only for V1's install stage (`npm ci`); every other stage has no network. */
+  network?: "none" | "bridge";
 }
 
 export interface ContainerResult {
@@ -72,8 +92,11 @@ const SHAPE_ENV: Record<string, string> = {
   CI: "1"
 };
 
-export function shapeEnvNames(extra: Record<string, string>): string[] {
-  return [...new Set([...Object.keys(SHAPE_ENV), ...Object.keys(extra)])].sort();
+// V1's install stage sets the same variables except the two the test stage adds.
+const INSTALL_ENV: Record<string, string> = Object.fromEntries(Object.entries(SHAPE_ENV).filter(([key]) => key !== "NODE_ENV" && key !== "CI"));
+
+export function shapeEnvNames(extra: Record<string, string>, network: ContainerRequest["network"] = "none"): string[] {
+  return [...new Set([...Object.keys(network === "bridge" ? INSTALL_ENV : SHAPE_ENV), ...Object.keys(extra)])].sort();
 }
 
 /** `docker run` arguments for one command. Host paths go in `--mount`; `forRecord` swaps them for roles. */
@@ -90,7 +113,7 @@ export function dockerRunArgs(name: string, request: ContainerRequest, forRecord
     "--pull",
     "never",
     "--user",
-    CONTAINER_USER,
+    containerUser(),
     "--cap-drop",
     "ALL",
     "--security-opt",
@@ -111,11 +134,11 @@ export function dockerRunArgs(name: string, request: ContainerRequest, forRecord
     "--hostname",
     "opro-boundary",
     "--network",
-    "none",
+    request.network ?? "none",
     "--workdir",
     request.workdir
   ];
-  for (const [key, value] of Object.entries({ ...SHAPE_ENV, ...request.env })) args.push("--env", `${key}=${value}`);
+  for (const [key, value] of Object.entries({ ...(request.network === "bridge" ? INSTALL_ENV : SHAPE_ENV), ...request.env })) args.push("--env", `${key}=${value}`);
   for (const mount of request.mounts) {
     args.push("--mount", `type=bind,src=${forRecord ? mount.role : mount.source},dst=${mount.target}${mount.readonly ? ",readonly" : ""}`);
   }
@@ -203,6 +226,48 @@ export function dockerExecutor(dockerBin: string | null = resolveDocker()): Cont
   };
 }
 
+export interface ImageCheck {
+  image: string;
+  platform: string;
+  /** The image was already on this machine. */
+  present_before: boolean;
+  pulled: boolean;
+  /** The image is there now (after a pull, when one was needed). */
+  present: boolean;
+  exit_code: number | null;
+  duration_ms: number;
+  detail: string | null;
+}
+
+/** Makes sure the pinned image is on this machine; injectable, so tests never reach a registry. */
+export type ImageEnsurer = (image: string, platform: string, deadlineMs: number) => ImageCheck;
+
+/**
+ * The real one. Every stage runs with `--pull never`, so a fresh machine (a CI runner) has to fetch
+ * the image first: only by its digest, which fixes its content, and only for the platform the
+ * stages run on. Nothing is pulled when the image is already there.
+ */
+export function dockerImageEnsurer(dockerBin: string | null = resolveDocker()): ImageEnsurer {
+  return (image, platform, deadlineMs) => {
+    const base = { image, platform, present_before: false, pulled: false, present: false, exit_code: null, duration_ms: 0 };
+    if (!dockerBin) return { ...base, detail: "docker was not found on a trusted PATH (set ORANGEPRO_DOCKER to its absolute path)." };
+    if (!/^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$/.test(image)) return { ...base, detail: `${image} is not pinned by digest; only a digest is pulled.` };
+    const inspect = () => spawnSync(dockerBin, ["image", "inspect", "--format", "{{.Id}}", image], { stdio: "ignore", timeout: 30_000 }).status === 0;
+    if (inspect()) return { ...base, present_before: true, present: true, detail: null };
+    const started = Date.now();
+    const pull = spawnSync(dockerBin, ["pull", "--quiet", "--platform", platform, image], { encoding: "utf8", timeout: Math.max(1, deadlineMs), killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+    const present = inspect();
+    return {
+      ...base,
+      pulled: pull.status === 0,
+      present,
+      exit_code: pull.status,
+      duration_ms: Date.now() - started,
+      detail: present ? null : `docker pull ${image} failed${pull.status === null ? " (timed out)" : ` (exit ${pull.status})`}: ${(pull.stderr ?? "").trim().split("\n")[0] ?? ""}`
+    };
+  };
+}
+
 // Runs inside the container (`node -e <this> <json>`). Reports what the process can see and
 // do; it reads no secret. The host compares the report with what the shape promises.
 export const BOUNDARY_PROBE_SOURCE = String.raw`
@@ -256,8 +321,15 @@ export function boundaryFailures(report: unknown, request: ContainerRequest, exp
   if (typeof report !== "object" || report === null) return ["the probe printed no report"];
   const r = report as Record<string, unknown>;
   if (expectedNode !== null && r.node !== expectedNode) failures.push(`the container runs Node ${String(r.node)}, not ${expectedNode}: not the pinned image`);
-  if (r.network_reachable !== false) failures.push("the network is reachable");
-  if (r.uid !== 1000) failures.push(`the process runs as uid ${String(r.uid)}, not 1000`);
+  // The install stage has the network on by design; every other stage must not reach it.
+  if (request.network !== "bridge" && r.network_reachable !== false) failures.push("the network is reachable");
+  let expectedUid: number | null = null;
+  try {
+    expectedUid = Number(containerUser().split(":")[0]);
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error));
+  }
+  if (expectedUid !== null && r.uid !== expectedUid) failures.push(`the process runs as uid ${String(r.uid)}, not ${expectedUid}`);
   if (r.effective_capabilities !== "0000000000000000") failures.push(`effective capabilities are ${String(r.effective_capabilities)}`);
   if (r.no_new_privileges !== "1") failures.push("no-new-privileges is not set");
   if (r.root_writable !== false) failures.push("the root filesystem is writable");
@@ -276,7 +348,7 @@ export function boundaryFailures(report: unknown, request: ContainerRequest, exp
   const names = Array.isArray(r.env_names) ? (r.env_names as unknown[]).map(String) : [];
   const secretLooking = names.filter((name) => SECRET_NAME_RE.test(name));
   if (secretLooking.length > 0) failures.push(`secret-looking variables are visible: ${secretLooking.join(", ")}`);
-  const unexpected = names.filter((name) => !shapeEnvNames(request.env).includes(name) && !["PATH", "HOSTNAME", "NODE_VERSION", "YARN_VERSION", "PWD", "SHLVL", "_"].includes(name));
+  const unexpected = names.filter((name) => !shapeEnvNames(request.env, request.network).includes(name) && !["PATH", "HOSTNAME", "NODE_VERSION", "YARN_VERSION", "PWD", "SHLVL", "_"].includes(name));
   if (unexpected.length > 0) failures.push(`unexpected variables are visible: ${unexpected.join(", ")}`);
   return failures;
 }

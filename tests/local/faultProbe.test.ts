@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { boundaryFailures, dockerExecutor, dockerRunArgs, resolveDocker, shapeEnvNames, WORK_OUT, WORK_REPO, type ContainerExecutor, type ContainerRequest } from "../../src/local/boundary.js";
+import { boundaryFailures, containerUser, dockerExecutor, dockerRunArgs, resolveDocker, shapeEnvNames, WORK_OUT, WORK_REPO, type ContainerExecutor, type ContainerRequest } from "../../src/local/boundary.js";
 import { opChangedTargets } from "../../src/local/changedTargets.js";
 import { canonicalJson, recordBytes, recordSha256, verifyRunFolder, writeRunManifest } from "../../src/local/contracts/io.js";
 import { checkOracle, type Oracle } from "../../src/local/contracts/oracle.js";
@@ -288,7 +288,7 @@ describe("records and the boundary", () => {
     }
   });
 
-  it("builds V1's test shape: no network, read-only root and copies, no capabilities, uid 1000, the image pinned and never pulled", () => {
+  it("builds V1's test shape: no network, read-only root and copies, no capabilities, uid 1000 (the host user on Linux), the image pinned and never pulled", () => {
     const request: ContainerRequest = {
       shape: { image: `node@sha256:${"1".repeat(64)}`, platform: "linux/arm64", memory: "4g", cpus: "4", processes: 512, deadlineSeconds: 900 },
       mounts: [
@@ -302,7 +302,7 @@ describe("records and the boundary", () => {
     };
     const args = dockerRunArgs("n", request);
     const joined = args.join(" ");
-    for (const part of ["--network none", "--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 1000:1000", "--pull never", "--memory 4g --memory-swap 4g", "--pids-limit 512"]) {
+    for (const part of ["--network none", "--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", `--user ${containerUser()}`, "--pull never", "--memory 4g --memory-swap 4g", "--pids-limit 512"]) {
       expect(joined).toContain(part);
     }
     expect(args).toContain(`type=bind,src=/host/copy,dst=${WORK_REPO},readonly`);

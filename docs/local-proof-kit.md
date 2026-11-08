@@ -67,6 +67,9 @@ opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file
 opro test-brief --from-run <run>  # for a fault the existing tests missed: what a coding agent needs to write one new test
 opro verify-test --from-run <run> --brief <run> --candidate <patch> --assertion <file>
                                 # run the new test on the original, the same fault and the restored copy, inside a container
+opro install-github-action --profile-from <folder>   # preview an opt-in post-merge workflow; --yes writes it (never commits or pushes)
+opro actions-run --event-name push --event <file> --profile <file> --repo <checkout> --out <folder>
+                                # the workflow's step: the whole chain above for one merged change, under one time limit
 opro export --out orangepro-evidence-pack.json
 opro analyze . --no-coverage-html # skip the behavior report HTML (it is written by default)
 opro export --format graph-html # write just the explorer (orangepro-graph.html)
@@ -199,7 +202,7 @@ First-slice MCP tools (same behavior as the CLI, same core): `orangepro_start`, 
 `orangepro_graph_score`, `orangepro_status`, `orangepro_doctor`, `orangepro_find_test_gaps`,
 `orangepro_record_run`, `orangepro_prove`, `orangepro_prove_loop`, `orangepro_stats`, `orangepro_rtm`, `orangepro_update_graph`,
 `orangepro_changed_impact`, `orangepro_ai_links`, `orangepro_ai_flows`, `orangepro_generate_tests`,
-`orangepro_explain_test`, `orangepro_export_evidence_pack`. **No upload or repo-write tools.**
+`orangepro_explain_test`, `orangepro_export_evidence_pack`, `orangepro_install_github_action`. **No upload, commit or push tools.** The installer is the one tool that writes files into a checkout: it previews by default and writes the workflow and `.orangepro/actions/` only with `dry_run: false` and a matching `confirm`.
 
 ### Tool modes (baseline vs diff/PR)
 
@@ -388,6 +391,33 @@ show it, and is `verified_gap` only when all eight are met; the generation (who 
 the adoption ("not delivered") are separate fields. A one-page `summary.html` shows the merged
 change, the behavior, what the old tests did, the new test and its result, the patch and the
 reviewer's action, then the limits and every stage. The checkout is not changed.
+
+#### After a merge, in GitHub Actions (tested locally)
+
+`opro install-github-action --profile-from <folder>` shows, and with `--yes` writes, two things:
+`.github/workflows/orangepro-proof.yml` and `.orangepro/actions/` (the profile: which function, the
+approved expected behavior, the fault, the selected tests and the test to replay, with the frozen
+fixture manifest and lockfile). The workflow asks for `contents: read` only, uses no secret, keeps no
+token after checkout, pins every action to a commit and installs one pinned OrangePro version. It
+runs after a push to the base branch, or by hand with a merged commit and its previous base, and
+checks out the profile's branch and the commit to prove side by side. Nothing is committed or
+pushed; a file changed since OrangePro wrote it is a conflict, never overwritten, and
+`--uninstall` removes only what is still as written. The folder's own `.gitignore` keeps all its
+files in git even when the repository ignores, say, every `package-lock.json`; a file git would
+still ignore is named, with the `git add -f` command that adds it.
+
+`opro actions-run`, the workflow's step, refuses a build other than the one the profile names and
+starts no container while a credential is in its environment. A first push or a rewritten history
+is reported, not proven; a push that only adds to allowed test files is skipped; a change that does
+not change the profile's function, exactly as the profile records it, ends as "not configured for
+this change", listing what it changed, and replays nothing. Otherwise it installs the frozen
+lockfile inside the container (network on for that step only), then runs `changed-targets`,
+`probe-fault`, `test-brief`, `verify-test` with the profile's test and `export-tests` under one total
+time limit; running out of time gives "inconclusive", never a result. The container platform
+follows the runner (`linux/amd64` on GitHub's runners), with the same image digest; a runner that
+does not have the image fetches it by that digest first. It writes
+`result.json`, the job summary and the run folders for upload, and exits 0 for every outcome
+except an internal error. It opens no pull request.
 
 ### Dynamic proof language profiles
 

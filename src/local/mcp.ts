@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -30,6 +31,7 @@ import { preloadTreeSitter } from "./analyze/treeSitter/engine.js";
 import { treeSitterLanguages } from "./analyze/treeSitter/languages.js";
 import { redactSecrets } from "./util/redact.js";
 import { feedbackUrl } from "./feedback.js";
+import { opInstallGithubAction } from "./actionsInstall.js";
 
 interface ToolTextResponse {
   content: Array<{ type: "text"; text: string }>;
@@ -68,7 +70,8 @@ const DEFAULT_MARKDOWN_RTM_LIMIT = 500;
 
 /**
  * MCP server exposing OrangePro local graph/test tools. Agent-agnostic (Cursor,
- * Codex, Claude, Copilot, …). First slice exposes NO upload or repo-write tools.
+ * Codex, Claude, Copilot, …). No upload, commit or push tools; the one tool that
+ * writes files into a checkout (the Actions installer) previews unless confirmed.
  */
 export function createLocalServer(): McpServer {
   const server = new McpServer({ name: "orangepro-local", version: ORANGEPRO_VERSION });
@@ -701,6 +704,46 @@ export function createLocalServer(): McpServer {
           graph_html: input.graph_html
         });
         return asText(result);
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "orangepro_install_github_action",
+    {
+      title: "Install the post-merge GitHub Actions workflow",
+      description:
+        "Preview, by default, the opt-in post-merge workflow (.github/workflows/orangepro-proof.yml: contents: read, no secrets, pinned actions) and the .orangepro/actions/ folder it reads (the profile: target, oracle, fault, selected tests, the test to replay). Writes nothing unless dry_run is false and confirm is \"install\" (or \"uninstall\" with uninstall: true). Never commits, pushes, creates secrets, grants permissions or opens pull requests; a file changed since OrangePro wrote it is reported as a conflict and never overwritten or removed. Tested locally; a real Actions run is separate.",
+      inputSchema: {
+        ...Workspace,
+        profile_from: z.string().optional().describe("Folder holding profile.json and the files it names. Needed to install."),
+        base: z.string().optional().describe("Branch whose pushes start the workflow. Default: the remote's default branch, else main."),
+        opro_version: z.string().optional().describe("OrangePro version the workflow installs. Default: this one."),
+        build_sha256: z.string().optional().describe("That version's build stamp. Default: this build's."),
+        uninstall: z.boolean().optional().describe("Remove the files OrangePro wrote (only those still unchanged)."),
+        dry_run: z.boolean().optional().describe("Default true: preview only."),
+        confirm: z.enum(["install", "uninstall"]).optional().describe("Required with dry_run: false; must match the action.")
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+    },
+    async (input) => {
+      try {
+        const apply = input.dry_run === false;
+        const action = input.uninstall ? "uninstall" : "install";
+        if (apply && input.confirm !== action) throw new Error(`dry_run: false needs confirm: "${action}".`);
+        return asText(
+          opInstallGithubAction({
+            repo: root(input.workspace),
+            profile_from: input.profile_from ? resolve(root(input.workspace), input.profile_from) : undefined,
+            base: input.base,
+            version: input.opro_version,
+            build_sha256: input.build_sha256,
+            apply,
+            uninstall: input.uninstall
+          })
+        );
       } catch (error) {
         return asError(error);
       }

@@ -7,6 +7,7 @@ import {
   BOUNDARY_PROBE_SOURCE,
   boundaryFailures,
   boundaryProbeRequest,
+  containerUser,
   dockerExecutor,
   OPRO_DIR,
   shapeEnvNames,
@@ -975,7 +976,7 @@ export function containerProfile(fixture: FixtureProfile, mountsFor: ReturnType<
   return {
     image: fixture.shape.image,
     platform: fixture.shape.platform,
-    user: "1000:1000",
+    user: containerUser(),
     network: "none",
     read_only_root: true,
     capabilities: "none",
