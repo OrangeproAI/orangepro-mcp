@@ -30,6 +30,26 @@ const inputs = {
 };
 
 describe("artifact identity", () => {
+  it("records the launcher version next to the engine's, outside every fingerprint", () => {
+    const g = graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } });
+    const saved = process.env.ORANGEPRO_LAUNCHER_VERSION;
+    try {
+      delete process.env.ORANGEPRO_LAUNCHER_VERSION;
+      const direct = buildArtifactIdentity(g, inputs);
+      process.env.ORANGEPRO_LAUNCHER_VERSION = "0.2.59";
+      const launched = buildArtifactIdentity(g, inputs);
+      expect(direct.launcher_version).toBeNull();
+      expect(launched.launcher_version).toBe("0.2.59");
+      const { launcher_version: _a, ...directRest } = direct;
+      const { launcher_version: _b, ...launchedRest } = launched;
+      expect(launchedRest).toEqual(directRest);
+      expect(comparisonCompatibility(direct, launched)).toBe("comparable");
+    } finally {
+      if (saved === undefined) delete process.env.ORANGEPRO_LAUNCHER_VERSION;
+      else process.env.ORANGEPRO_LAUNCHER_VERSION = saved;
+    }
+  });
+
   it("hashes included paths and bytes deterministically, independent of manifest order", () => {
     const a = graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" }, "src/b.ts": { hash: "sha256:b", size: 1, kind: "code" } });
     const reordered = graph({ "src/b.ts": { hash: "sha256:b", size: 1, kind: "code" }, "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } });

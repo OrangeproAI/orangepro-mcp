@@ -20,7 +20,7 @@ describe("MCP Registry metadata", () => {
   it("keeps release and ownership metadata aligned", () => {
     expect(launcherPackage.version).toBe(rootPackage.version);
     expect(registryPackage.version).toBe(rootPackage.version);
-    expect(launcherPackage.dependencies[rootPackage.name]).toBe(`^${rootPackage.version}`);
+    expect(launcherPackage.dependencies[rootPackage.name]).toBe(rootPackage.version);
     expect(lockfile.version).toBe(rootPackage.version);
     expect(lockfile.packages[""].version).toBe(rootPackage.version);
     expect(launcherPackage.mcpName).toBe(server.name);

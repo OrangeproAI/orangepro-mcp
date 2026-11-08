@@ -18,7 +18,8 @@ updateJson("package.json", (pkg) => {
 });
 updateJson("packages/mcp-server/package.json", (pkg) => {
   pkg.version = newVersion;
-  pkg.dependencies["@orangepro/orangepro-mcp"] = `^${newVersion}`;
+  // Exact, never a range: the launcher runs the engine of its own version and no other.
+  pkg.dependencies["@orangepro/orangepro-mcp"] = newVersion;
 });
 updateJson("server.json", (server) => {
   server.version = newVersion;

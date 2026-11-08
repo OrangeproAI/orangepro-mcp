@@ -741,6 +741,8 @@ export interface ArtifactIdentity {
   oracle_version: string;
   risk_config_hash: string;
   tool_version: string;
+  /** The `@orangepro/mcp-server` launcher version that started the run; null when the engine ran directly. In no fingerprint. Absent in graphs written by 0.2.59 and earlier. */
+  launcher_version?: string | null;
   /** Diagnostic metadata only. Neither field participates in any fingerprint. */
   git_commit: string | null;
   git_dirty: boolean | null;
