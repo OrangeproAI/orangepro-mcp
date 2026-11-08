@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { LocalGraph, GraphNode } from "../graph/ontology.js";
 import { hashString } from "../util/hash.js";
-import { builtInRankExclusion } from "./rankEligibility.js";
+import { builtInRankExclusion, TEST_SUPPORT_RANKING_REASON_CODE } from "./rankEligibility.js";
 
 /** Explicit scorer identity. Formula changes require a new value. */
 export const ORS_VERSION = "orangepro.ors.stable_population.v3" as const;
@@ -966,6 +966,8 @@ function rankRiskGapsUncached(graph: LocalGraph, opts: RiskGapOptions = {}): Ris
   const postNormalizationExcluded = (node: GraphNode): boolean => {
     if (node.properties.ranking_exclusion_code === "python_class_with_methods" || node.properties.ranking_exclusion_code === "python_structural_container" || node.properties.ranking_exclusion_reason === "python_structural_container") return true;
     const code = node.properties.ranking_exclusion_reason_code;
+    // Test support found by its imports (path-matched test support never got this far).
+    if (code === TEST_SUPPORT_RANKING_REASON_CODE) return true;
     if (
       node.properties.ranking_exclusion_code === "trivial_constructor" ||
       node.properties.ranking_exclusion_code === "enum_declaration" ||
