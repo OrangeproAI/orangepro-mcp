@@ -217,7 +217,7 @@ describe("buildBehaviorReportData", () => {
     expect(data.summary).toEqual({ total: 2, proven: 0, associated: 1, candidate: 1, none: 0, reachableUntested: 0, noSignal: 0 });
     expect(data.proofGuidance).toMatchObject({
       state: "not_started",
-      title: "0 Dynamically Proven means no dynamic proof has run yet"
+      title: "0 Proven means no dynamic proof has run yet"
     });
     // 0-Dynamically-Proven → the verbatim explainer is populated (display copy; no classification change).
     expect(data.zeroProofExplainer?.title).toBe("Why dynamic proof is 0");
@@ -246,8 +246,8 @@ describe("buildBehaviorReportData", () => {
 
     expect(data.analysisKind).toBe("static+dynamic");
     expect(data.summary).toEqual({ total: 2, proven: 1, associated: 0, candidate: 1, none: 0, reachableUntested: 0, noSignal: 0 });
-    expect(data.proofGuidance).toMatchObject({ state: "proven", title: "Dynamically Proven is active" });
-    // Nonzero Dynamically Proven → no zero-proof explainer.
+    expect(data.proofGuidance).toMatchObject({ state: "proven", title: "Proven is active" });
+    // Nonzero Proven → no zero-proof explainer.
     expect(data.zeroProofExplainer).toBeNull();
     expect(Object.fromEntries(data.pipeline.map((s) => [s.key, s.on]))).toMatchObject({ proof: "1" });
     // Proven-first display ordering (v6): the proven row leads the grid.
@@ -361,7 +361,7 @@ describe("buildBehaviorReportData", () => {
     expect(Object.fromEntries(data.pipeline.map((s) => [s.key, s.on]))).toMatchObject({ proof: "partial" });
     expect(data.proofGuidance).toMatchObject({
       state: "attempted",
-      title: "0 Dynamically Proven — dynamic proof ran, none closed yet"
+      title: "0 Proven — dynamic proof ran, none closed yet"
     });
   });
 
@@ -443,7 +443,7 @@ describe("buildBehaviorReportData — 0-Dynamically-Proven guidance names the do
     expect(data.proofGuidance.title).toContain("top 5");
     expect(data.proofGuidance.body).toContain("attempted the top 5");
     expect(data.proofGuidance.body).toContain("Blocked because: a missing module or dependency in the sandbox (2/3)");
-    expect(data.proofGuidance.body).toContain("Static test signals stay Statically Linked");
+    expect(data.proofGuidance.body).toContain("Static test signals stay Linked");
     // Must NOT imply the static tests failed or the report is broken.
     expect(data.proofGuidance.body).not.toMatch(/static tests? failed|report is broken/i);
   });
@@ -1029,5 +1029,32 @@ describe("report fixes: every count names what it counts and the numbers reconci
     expect(testsInput(0, { linked: 0, unlinked: 0 })).toBe("0 test files");
     const { detailed } = await render(model);
     expect(detailed).toContain("3 test files: 1 calls a counted function, 2 call none that OrangePro traced");
+  });
+});
+
+describe("item 9: the reports and tests.csv show only the README's tier names", () => {
+  it("every evidence label is one of the five, and no old name appears", async () => {
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    const { testsCsv } = await import("../../src/local/viz/testsExport.js");
+    const { EVIDENCE_LABEL } = await import("../../src/local/viz/worklist.js");
+    expect(Object.values(EVIDENCE_LABEL).sort()).toEqual(["Linked", "No test found", "Proven", "Runs under tests", "Unconfirmed"]);
+    const model = await reportModelOf(withDelete(graph()));
+    const csv = testsCsv(model.worklist, { repository: model.repo.name, commit: model.repo.commit, toolVersion: model.tool, generatedAt: model.generatedAt });
+    const outputs = { summary: renderSummaryReport(model), detailed: renderDetailedReport({ model, csv }), csv };
+    for (const [name, text] of Object.entries(outputs)) {
+      for (const old of ["Dynamically Proven", "Runtime-covered", "Associated signal", "Candidate signal", "No integration signal", "Statically Linked"]) {
+        expect(text, `${name} still says ${old}`).not.toContain(old);
+      }
+    }
+    // The CSV's "Evidence today" column holds README names only.
+    const header = csv.replace(/^﻿/, "").split("\r\n")[0]!.split(",");
+    const col = header.indexOf("Evidence today");
+    expect(col).toBeGreaterThan(-1);
+    const allowed = new Set([...Object.values(EVIDENCE_LABEL), "Candidate link only, not confirmed"]);
+    for (const line of csv.split("\r\n").slice(1).filter(Boolean)) {
+      const cells = line.match(/("([^"]|"")*"|[^,]*)(,|$)/g)!.map((c) => c.replace(/,$/, "").replace(/^"|"$/g, ""));
+      expect(allowed.has(cells[col]!), `Evidence today: ${cells[col]}`).toBe(true);
+    }
   });
 });

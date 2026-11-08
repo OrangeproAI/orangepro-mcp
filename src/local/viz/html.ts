@@ -162,11 +162,11 @@ function initViz() {
         + fmt(proofLimited.skipped_files_budget)
         + ' confirmable files, above the confirmer budget. OrangePro ran a risk-ranked subset ('
         + fmt(proofLimited.scoped_by_risk.candidate_pairs)
-        + ' candidate pair(s)); Proven is still a conservative lower bound. Associated links are not proof. Use PR scope (--base <ref>) or raise ORANGEPRO_MAX_CONFIRM_FILES for the whole repo.';
+        + ' candidate pair(s)); Proven is still a conservative lower bound. Linked tests are not proof. Use PR scope (--base <ref>) or raise ORANGEPRO_MAX_CONFIRM_FILES for the whole repo.';
     } else {
       proofBanner.textContent = 'HARD PROOF SKIPPED — this full scan exceeded the confirmer budget ('
         + fmt(proofLimited.skipped_files_budget)
-        + ' files). Proven coverage is a conservative lower bound because that proof pass did not run. Associated links are still shown, but they are not proof. Use PR scope (--base <ref>) or raise ORANGEPRO_MAX_CONFIRM_FILES.';
+        + ' files). Proven coverage is a conservative lower bound because that proof pass did not run. Linked tests are still shown, but they are not proof. Use PR scope (--base <ref>) or raise ORANGEPRO_MAX_CONFIRM_FILES.';
     }
   }
 
@@ -220,10 +220,10 @@ function initViz() {
   function hideTip(){ if (tip){ tip.classList.remove('show'); tip.setAttribute('aria-hidden','true'); } }
 
   var TIER = {
-    proven:     { color:'var(--proven)', label:'Dynamic Proven' },
-    runtime:    { color:'var(--runtime)', label:'Runtime-covered' },
-    associated: { color:'var(--assoc)', label:'Associated' },
-    none:       { color:'var(--none)', label:'No link' }
+    proven:     { color:'var(--proven)', label:'Proven' },
+    runtime:    { color:'var(--runtime)', label:'Runs under tests' },
+    associated: { color:'var(--assoc)', label:'Linked' },
+    none:       { color:'var(--none)', label:'No test found' }
   };
 
   // ===================================================================
@@ -385,10 +385,10 @@ function initViz() {
         var a = h.data;
         showTip('<div class="tt">' + esc(h.area) + '</div>' +
           '<div class="trow"><span>real-code units</span><span class="v">' + fmt(a.total) + '</span></div>' +
-          '<div class="trow"><span style="color:var(--proven)">Dynamic Proven</span><span class="v">' + fmt(a.proven) + '</span></div>' +
+          '<div class="trow"><span style="color:var(--proven)">Proven</span><span class="v">' + fmt(a.proven) + '</span></div>' +
           '<div class="trow"><span style="color:var(--runtime)">Runtime</span><span class="v">' + fmt(a.runtime) + '</span></div>' +
-          '<div class="trow"><span style="color:var(--assoc)">Associated</span><span class="v">' + fmt(a.associated) + '</span></div>' +
-          '<div class="trow"><span style="color:var(--none)">No link</span><span class="v">' + fmt(a.none) + '</span></div>',
+          '<div class="trow"><span style="color:var(--assoc)">Linked</span><span class="v">' + fmt(a.associated) + '</span></div>' +
+          '<div class="trow"><span style="color:var(--none)">No test found</span><span class="v">' + fmt(a.none) + '</span></div>',
           (e.clientX||0),(e.clientY||0));
       }
       g.addEventListener('mouseenter', hubTip); g.addEventListener('mousemove', hubTip); g.addEventListener('mouseleave', hideTip);
@@ -421,9 +421,9 @@ function initViz() {
       dt._g = g; dotsLayer.appendChild(g);
       function dotTip(e){
         var label = (dt.tier === 'proven') ? 'Proven — dynamic targeted proof'
-                  : (dt.tier === 'runtime') ? 'Runtime-covered — executed by a coverage report, not proof'
-                  : (dt.tier === 'associated') ? 'Associated — resolved static test-to-behavior invocation; not execution or mutation proof'
-                  : 'No link — no static or runtime signal';
+                  : (dt.tier === 'runtime') ? 'Runs under tests — executed by a coverage report, not proof'
+                  : (dt.tier === 'associated') ? 'Linked — resolved static test-to-behavior invocation; not execution or mutation proof'
+                  : 'No test found — no static or runtime signal';
         showTip('<div class="tt">' + esc(dt.area) + ' &middot; symbol</div>' +
           '<div class="trow"><span>tier</span><span class="v" style="color:' + col + '">' + TIER[dt.tier].label + '</span></div>' +
           '<div style="margin-top:6px;color:var(--ink-3);font-size:11px">' + label + '</div>',
@@ -636,10 +636,10 @@ function initViz() {
       el.addEventListener('mouseenter', function(e){
         showTip('<div class="tt">' + esc(a.area) + '</div>' +
           '<div class="trow"><span>real-code units</span><span class="v">' + fmt(a.total) + '</span></div>' +
-          '<div class="trow"><span style="color:var(--proven)">Dynamic Proven</span><span class="v">' + fmt(a.proven) + '</span></div>' +
+          '<div class="trow"><span style="color:var(--proven)">Proven</span><span class="v">' + fmt(a.proven) + '</span></div>' +
           '<div class="trow"><span style="color:var(--runtime)">Runtime</span><span class="v">' + fmt(a.runtime) + '</span></div>' +
-          '<div class="trow"><span style="color:var(--assoc)">Associated</span><span class="v">' + fmt(a.associated) + '</span></div>' +
-          '<div class="trow"><span style="color:var(--none)">No link</span><span class="v">' + fmt(a.none) + '</span></div>',
+          '<div class="trow"><span style="color:var(--assoc)">Linked</span><span class="v">' + fmt(a.associated) + '</span></div>' +
+          '<div class="trow"><span style="color:var(--none)">No test found</span><span class="v">' + fmt(a.none) + '</span></div>',
           e.clientX, e.clientY);
       });
       el.addEventListener('mouseleave', hideTip);
@@ -718,7 +718,7 @@ function initViz() {
           '<span class="s" style="width:' + (l.proven/denom*100) + '%;background:var(--proven)" title="proven ' + fmt(l.proven) + '"></span>' +
           '<span class="s" style="width:' + (l.runtime_covered/denom*100) + '%;background:var(--runtime)" title="runtime ' + fmt(l.runtime_covered) + '"></span>' +
           '<span class="s" style="width:' + (l.associated/denom*100) + '%;background:var(--assoc)" title="associated ' + fmt(l.associated) + '"></span>' +
-          '<span class="s" style="width:' + (l.unlinked/denom*100) + '%;background:var(--none)" title="no link ' + fmt(l.unlinked) + '"></span>' +
+          '<span class="s" style="width:' + (l.unlinked/denom*100) + '%;background:var(--none)" title="no test found ' + fmt(l.unlinked) + '"></span>' +
         '</div>' +
         '<div class="lstotal">' + fmt(l.total) + '</div>';
       host.appendChild(row);
@@ -977,12 +977,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     </div>
     <div class="hl-frame">
       A small proven % is the point: a behavior is <b>proven</b> only when a dynamic targeted proof certificate closes it.
-      The rest is <b>runtime-covered</b>, a <b>weak signal</b>, or <b>no link</b> — not "untested," just not yet proven. The hero is the gap zone on the right.
+      The rest <b>runs under tests</b>, is <b>Linked</b> or <b>Unconfirmed</b>, or has <b>no test found</b> — not "untested," just not yet proven. The hero is the gap zone on the right.
     </div>
     <div class="hl-kpis">
-      <div class="kpi proven"><div class="k">Dynamic Proven</div><div class="v num" id="kpi-proven">0</div></div>
+      <div class="kpi proven"><div class="k">Proven</div><div class="v num" id="kpi-proven">0</div></div>
       <div class="kpi runtime"><div class="k">Runtime</div><div class="v num" id="kpi-runtime">0</div></div>
-      <div class="kpi assoc"><div class="k">Associated</div><div class="v num" id="kpi-assoc">0</div></div>
+      <div class="kpi assoc"><div class="k">Linked</div><div class="v num" id="kpi-assoc">0</div></div>
       <div class="kpi none"><div class="k">No&nbsp;link</div><div class="v num" id="kpi-none">0</div></div>
     </div>
   </div>
@@ -994,9 +994,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     </div>
     <div class="chips" role="group" aria-label="Tier filters">
       <span class="lab">Tiers</span>
-      <button class="chip proven" data-tier="proven" aria-pressed="true"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="var(--proven)"/></svg>Dynamic Proven</button>
+      <button class="chip proven" data-tier="proven" aria-pressed="true"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="var(--proven)"/></svg>Proven</button>
       <button class="chip runtime" data-tier="runtime" aria-pressed="true"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="var(--runtime)"/></svg>Runtime</button>
-      <button class="chip assoc" data-tier="associated" aria-pressed="true"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--assoc)" stroke-width="2.2"/></svg>Associated</button>
+      <button class="chip assoc" data-tier="associated" aria-pressed="true"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--assoc)" stroke-width="2.2"/></svg>Linked</button>
       <button class="chip none" data-tier="none" aria-pressed="true"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--none)" stroke-width="2.2"/></svg>No&nbsp;link</button>
     </div>
     <div class="selsrc">
@@ -1028,14 +1028,14 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           <div class="rail">
             <div>
               <h3>Tiers</h3>
-              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="var(--proven)"/></svg><div><div class="lt">Dynamic Proven</div><div class="ld">disc · dynamic targeted proof</div></div></div>
-              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="var(--runtime)"/></svg><div><div class="lt">Runtime-covered</div><div class="ld">disc · executed by coverage, not proof</div></div></div>
-              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--assoc)" stroke-width="2.4"/></svg><div><div class="lt">Associated</div><div class="ld">ring · invocation-backed static signal, not proof</div></div></div>
-              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4" fill="none" stroke="var(--none)" stroke-width="2.2"/><circle cx="8" cy="8" r="7" fill="none" stroke="var(--none)" stroke-width="1" opacity=".55"/></svg><div><div class="lt">No link</div><div class="ld">glowing ring · no test signal</div></div></div>
+              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="var(--proven)"/></svg><div><div class="lt">Proven</div><div class="ld">disc · dynamic targeted proof</div></div></div>
+              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="var(--runtime)"/></svg><div><div class="lt">Runs under tests</div><div class="ld">disc · executed by coverage, not proof</div></div></div>
+              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="none" stroke="var(--assoc)" stroke-width="2.4"/></svg><div><div class="lt">Linked</div><div class="ld">ring · invocation-backed static signal, not proof</div></div></div>
+              <div class="legend-row"><svg class="gly" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4" fill="none" stroke="var(--none)" stroke-width="2.2"/><circle cx="8" cy="8" r="7" fill="none" stroke="var(--none)" stroke-width="1" opacity=".55"/></svg><div><div class="lt">No test found</div><div class="ld">glowing ring · no test signal</div></div></div>
             </div>
             <div><h3>Code areas</h3><div class="areafilters" id="areafilters"></div></div>
             <div class="explain">
-              <b>Tier definitions.</b> Proven = dynamic targeted mutation proof recorded in the local ledger, not static matching or LLM. Runtime-covered = executed by a repo coverage report. Associated signal = a resolved static test-to-behavior invocation. It is not execution evidence and does not prove the test detects failure. No link = no direct static or runtime signal found. Broad e2e or integration coverage may still exist.
+              <b>Tier definitions.</b> Proven = dynamic targeted mutation proof recorded in the local ledger, not static matching or LLM. Runs under tests = executed by a repo coverage report. Linked = a resolved static test-to-behavior invocation. It is not execution evidence and does not prove the test detects failure. No test found = no direct static or runtime signal found. Broad e2e or integration coverage may still exist.
             </div>
           </div>
           <div class="stage" id="stage">
@@ -1074,7 +1074,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                   <span><span class="dotc" style="background:var(--proven)"></span>Proven <b class="num" id="sb-proven">0</b></span>
                   <span><span class="dotc" style="background:var(--runtime)"></span>Runtime <b class="num" id="sb-runtime">0</b></span>
                   <span><span class="dotc" style="background:var(--assoc)"></span>Assoc <b class="num" id="sb-assoc">0</b></span>
-                  <span><span class="dotc" style="background:var(--none)"></span>No link <b class="num" id="sb-none">0</b></span>
+                  <span><span class="dotc" style="background:var(--none)"></span>No test found <b class="num" id="sb-none">0</b></span>
                 </div>
               </div>
             </div>
@@ -1093,9 +1093,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             <caption>Code behavior evidence by language — area × tier; cell shows count &amp; tier glyph; click to drill. Proven% over the area's real-code units.</caption>
             <thead><tr>
               <th scope="col">Code area</th>
-              <th scope="col" class="cnum">Dynamic Proven</th>
+              <th scope="col" class="cnum">Proven</th>
               <th scope="col" class="cnum">Runtime</th>
-              <th scope="col" class="cnum">Associated</th>
+              <th scope="col" class="cnum">Linked</th>
               <th scope="col" class="cnum">No&nbsp;link</th>
               <th scope="col" style="text-align:right">Proven&nbsp;%</th>
             </tr></thead>
@@ -1120,10 +1120,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           <div class="dh"><span class="sw" id="drillSw"></span><h2 id="drillTitle">—</h2></div>
           <div class="dsub" id="drillSub">—</div>
           <div class="dmini">
-            <div class="seg proven"><div class="k">Dynamic Proven</div><div class="v num" id="dm-proven">0</div></div>
+            <div class="seg proven"><div class="k">Proven</div><div class="v num" id="dm-proven">0</div></div>
             <div class="seg runtime"><div class="k">Runtime</div><div class="v num" id="dm-runtime">0</div></div>
             <div class="seg assoc"><div class="k">Assoc</div><div class="v num" id="dm-assoc">0</div></div>
-            <div class="seg none"><div class="k">No link</div><div class="v num" id="dm-none">0</div></div>
+            <div class="seg none"><div class="k">No test found</div><div class="v num" id="dm-none">0</div></div>
           </div>
           <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);margin:0 0 9px">Uncovered symbols — no proven test (sampled, worst first)</h3>
           <div class="gaplist" id="gaplist"></div>

@@ -30,10 +30,10 @@ opro agent --client cursor
 
 Paste the printed block into Cursor Settings -> MCP or `~/.cursor/mcp.json`. If Cursor does not inherit your shell environment, add the provider key to the `env` block of the local MCP config.
 
-If your Cursor setup supports custom commands, map `/opro` to: call `orangepro_start` for the current checkout, then follow the returned `next_actions`. The shortcut should use the MCP tool so Proven / Associated signal / No integration signal semantics stay intact.
+If your Cursor setup supports custom commands, map `/opro` to: call `orangepro_start` for the current checkout, then follow the returned `next_actions`. The shortcut should use the MCP tool so Proven / Linked / Unconfirmed / No test found semantics stay intact.
 
 ## Agent Prompt
 
 ```text
-Use OrangePro first. Call orangepro_start in this repo, then follow its next_actions. Generate tests with orangepro_generate_tests, write only runnable outputs with run_hints, run the suggested command, and take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a passing run for Dynamically Proven. Use record_run only for static diagnostics.
+Use OrangePro first. Call orangepro_start in this repo, then follow its next_actions. Generate tests with orangepro_generate_tests, write only runnable outputs with run_hints, run the suggested command, and take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a passing run for Proven. Use record_run only for static diagnostics.
 ```

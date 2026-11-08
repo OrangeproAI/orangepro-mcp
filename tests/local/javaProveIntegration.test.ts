@@ -209,7 +209,7 @@ describe("Java dynamic-proof mint mapping (unit, no toolchain needed)", () => {
 });
 
 describe.skipIf(!JAVA)("Java dynamic-proof mint path (real toolchain)", () => {
-  it("positive: a single-return Java method target mints a Dynamically Proven certificate", () => {
+  it("positive: a single-return Java method target mints a Proven certificate", () => {
     const { ws, source } = analyzedJava("proven");
     markEligible(ws, CALCULATOR_SYMBOL);
     const res = opDynamicProof(
@@ -234,7 +234,7 @@ describe.skipIf(!JAVA)("Java dynamic-proof mint path (real toolchain)", () => {
     expect(cert?.runner).toBe("junit");
     expect(cert?.sentinel).toBe("java-typed-sentinel");
 
-    // RTM counts it as Dynamically Proven.
+    // RTM counts it as Proven.
     const rtm = opRtm(ws, { format: "json" });
     expect(rtm.summary.proven).toBe(1);
     const row = rtm.rows.find((r) => r.code_symbol === CALCULATOR_SYMBOL);

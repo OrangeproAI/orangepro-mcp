@@ -210,7 +210,7 @@ export function createLocalServer(): McpServer {
         proof: z
           .boolean()
           .optional()
-          .describe("Proof-focused mode: explain why top targets are not Dynamically Proven (deduped blockers + smallest next steps). Read-only; mints nothing.")
+          .describe("Proof-focused mode: explain why top targets are not Proven (deduped blockers + smallest next steps). Read-only; mints nothing.")
       },
       annotations: { readOnlyHint: true, destructiveHint: false }
     },
@@ -250,7 +250,7 @@ export function createLocalServer(): McpServer {
     {
       title: "Record gap-fill outcome",
       description:
-        "Record an agent test-writing attempt as static diagnostics. When test_path is provided for TS/JS, OrangePro first tries scoped deterministic re-prove; otherwise it re-analyzes the repo. Static hard COVERS edges render as Associated signal; public Proven requires orangepro_prove.",
+        "Record an agent test-writing attempt as static diagnostics. When test_path is provided for TS/JS, OrangePro first tries scoped deterministic re-prove; otherwise it re-analyzes the repo. Static hard COVERS edges render as Linked; public Proven requires orangepro_prove.",
       inputSchema: {
         ...Workspace,
         target_symbol: z.string().optional().describe("Exact CodeSymbol external id, e.g. sym:svc/add.go#Add. Preferred."),
@@ -438,7 +438,7 @@ export function createLocalServer(): McpServer {
     {
       title: "Deterministic traceability matrix",
       description:
-        "Write and return a deterministic Requirements Traceability Matrix. Status comes only from the local graph and gap-fill ledger: Proven, Runtime-covered, Associated signal, No integration signal, Reproven, or Generated-unverifiable. No LLM calls.",
+        "Write and return a deterministic Requirements Traceability Matrix. Status comes only from the local graph and gap-fill ledger: Proven, Runs under tests, Linked, Unconfirmed, No test found, Reproven, or Generated-unverifiable. No LLM calls.",
       inputSchema: {
         ...Workspace,
         format: z.enum(["md", "csv", "json"]).optional().describe("Output format. Default md."),

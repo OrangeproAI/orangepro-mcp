@@ -159,7 +159,7 @@ Usage:
   opro coverage [path] [--generate] [--timeout-ms 120000] [--json]
     # detects runtime coverage artifacts (Go coverprofile, lcov, coverage.py XML, JaCoCo XML);
     # --generate runs local free coverage tooling where safely supported (Go, JS/TS scripts, pytest-cov XML, JaCoCo)
-  opro doctor [--proof] [--json]   # --proof: why top targets are not Dynamically Proven
+  opro doctor [--proof] [--json]   # --proof: why top targets are not Proven
   opro update [--force] [--json]
   opro changed --base <ref> [--json]
   opro changed-targets --base <sha> --merged <sha> [--range] [--limit 3] [--json]
@@ -368,9 +368,9 @@ async function main(): Promise<number> {
         if (res.coverage_report_path) out(`  coverage report: ${res.coverage_report_path}`);
         if (res.generation_diagnostics_path) out(`  generation diagnostics: ${res.generation_diagnostics_path}`);
         out(`  RTM:            ${res.rtm.rtm_path}${res.rtm.rows.length < res.rtm.summary.total ? ` (capped ${res.rtm.rows.length}/${res.rtm.summary.total} rows)` : ""}`);
-        out(`  Dynamically Proven:    ${res.rtm.summary.proven}/${res.rtm.summary.total} (static map covers all ${res.rtm.summary.total}; dynamic proof verifies the top ${res.auto_prove.attempted || "few"})`);
+        out(`  Proven:                ${res.rtm.summary.proven}/${res.rtm.summary.total} (static map covers all ${res.rtm.summary.total}; dynamic proof verifies the top ${res.auto_prove.attempted || "few"})`);
         if (res.rtm.summary.total > 0 && res.rtm.summary.proven === 0) {
-          out("  Proof next:            no behavior is dynamically proven yet; run from a coding agent with a model key and follow the generated-test proof handoff.");
+          out("  Proof next:            no behavior is proven yet; run from a coding agent with a model key and follow the generated-test proof handoff.");
         }
         const ap = res.auto_prove;
         const gen = res.generation;
@@ -381,22 +381,22 @@ async function main(): Promise<number> {
         } else if (ap.status === "disabled") {
           out("  Dynamic proof:         not attempted (--no-auto)");
         } else if (ap.ran) {
-          out(`  Dynamic proof:         attempted top ${ap.attempted} target(s), ${ap.proven} dynamically proven`);
+          out(`  Dynamic proof:         attempted top ${ap.attempted} target(s), ${ap.proven} proven`);
           if (ap.proven === 0) {
             const dom = dominantBlockReason(ap.needs_setup);
-            if (dom) out(`    blocked because:     ${dom.label} (${dom.count}/${dom.total}); Statically Linked signals still shown`);
+            if (dom) out(`    blocked because:     ${dom.label} (${dom.count}/${dom.total}); static links still shown`);
           }
           for (const file of ap.generated_files) out(`    wrote:               ${file}`);
           for (const attempt of ap.needs_setup) out(`    needs setup:         ${attempt.target_symbol} — ${attempt.reason ?? "baseline/setup did not run"}`);
           for (const skip of ap.skipped) out(`    skipped:             ${skip.target_symbol ?? skip.title} — ${skip.reason}`);
         }
-        out(`  Runtime-covered:       ${res.rtm.summary.runtime_covered}`);
+        out(`  Runs under tests:      ${res.rtm.summary.runtime_covered}`);
         // G6: same-denominator coverage-vs-proof reveal — renders only when runtime
         // coverage was ingested; percentages share summary.total (never mixed scopes).
         const reveal = coverageRevealLine(res.rtm.summary);
         if (reveal) out(`  ${reveal}`);
-        out(`  Statically Linked:     ${res.rtm.summary.associated} (static test link, not dynamic proof)`);
-        out(`  No integration signal: ${res.rtm.summary.no_link}`);
+        out(`  Linked:                ${res.rtm.summary.associated} (static test link, not dynamic proof)`);
+        out(`  No test found:         ${res.rtm.summary.no_link}`);
         out(`  AI-linked:      ${res.ai_linked.behaviors} behavior(s), ${res.ai_linked.symbols} symbol(s), ${res.ai_linked.links} weak link(s) — not coverage`);
         if (res.ai_links.status === "applied") {
           const generated = res.ai_links.generate?.mode === "generate" ? res.ai_links.generate : undefined;
@@ -481,7 +481,7 @@ async function main(): Promise<number> {
           }
           out("");
           out("Equivalent mutants can also survive, so treat this as a proof-strengthening queue, not automatic blame.");
-          out("Survived mutants are not Dynamically Proven. They are targets for stronger assertions.");
+          out("Survived mutants are not Proven. They are targets for stronger assertions.");
         } else if (res.proven > 0) {
           out("  verdict:              no survived targeted mutants found in this pass.");
         } else if (res.needs_setup.length > 0) {
@@ -1251,11 +1251,11 @@ async function main(): Promise<number> {
         if (res.rows.length < res.summary.total) {
           out(`  rows:        ${res.rows.length}/${res.summary.total} shown (Markdown capped; use --format json or --format csv for full machine-readable RTM)`);
         }
-        out(`  total:                 ${res.summary.total}`);
-        out(`  dynamically proven:    ${res.summary.proven}`);
-        out(`  runtime-covered:       ${res.summary.runtime_covered}`);
-        out(`  statically linked:     ${res.summary.associated}`);
-        out(`  no integration signal: ${res.summary.no_link}`);
+        out(`  Total:                 ${res.summary.total}`);
+        out(`  Proven:                ${res.summary.proven}`);
+        out(`  Runs under tests:      ${res.summary.runtime_covered}`);
+        out(`  Linked:                ${res.summary.associated}`);
+        out(`  No test found:         ${res.summary.no_link}`);
         out(`  reproven:    ${res.summary.reproven_this_run}`);
         out(`  kept-rate:   ${res.summary.kept_rate}% (${res.summary.reproven_this_run}/${res.summary.attempted})`);
         if (res.scope?.guidance) out(`  scope:       ${res.scope.guidance}`);

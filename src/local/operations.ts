@@ -1761,7 +1761,7 @@ export function opDoctor(root: string): DoctorResult {
 }
 
 /**
- * G1 — proof-focused doctor: why are top targets not Dynamically Proven?
+ * G1 — proof-focused doctor: why are top targets not Proven?
  * Read-only: consumes the canonical RTM judgment (buildRtm) plus the last run's
  * redacted proof-attempts sidecar. Mints nothing, mutates no ledger, writes no
  * files — under staleness or ambiguity it fails closed to "re-run".
@@ -1777,7 +1777,7 @@ export function opGaps(root: string, opts: { limit?: number; min_priority?: stri
   const graph = loadGraph(workspacePaths(root).graphPath);
   const gaps = findGaps(graph, opts);
   // Ledger proofs are invisible to the graph's hard edges; pass them so a type
-  // whose every method is Dynamically Proven is suppressed instead of ranked.
+  // whose every method is Proven is suppressed instead of ranked.
   const provenIds = provenSymbolIds(graph, loadLedger(root));
   const topRiskGaps = rankRiskGaps(graph, { limit: opts.limit ?? 10, repoRoot: root, provenIds }).map((gap) => ({
     external_id: gap.id,
@@ -1807,7 +1807,7 @@ export function opGaps(root: string, opts: { limit?: number; min_priority?: stri
     top_risk_gaps: topRiskGaps,
     risk_model: {
       formula: "OrangePro Risk Score = Probability(1-10) × Impact(1-10) × DetectionDifficulty(1|5|10); P = normalize(git_churn*0.35 + fan_out*0.30 + new_code*15 + complexity*0.20); I = normalize(fan_in*0.30 + route_weight*0.30 + flow_position*0.20 + data_sensitivity*0.20); D = {proven:1, associated:5, none:10}",
-      note: "Risk ranking is prioritization only. It does not change Proven, Runtime-covered, Associated signal, No integration signal, or coverage percentages."
+      note: "Risk ranking is prioritization only. It does not change Proven, Runs under tests, Linked, No test found, or coverage percentages."
     }
   };
 }
@@ -3133,9 +3133,9 @@ export async function opStart(
   if (autoProveResult.status === "skipped-no-key") {
     nextActions.push(autoProveResult.reason ?? NO_KEY_MESSAGE);
   } else if (autoProveResult.status === "disabled") {
-    nextActions.push("Dynamic proof was not attempted (--no-auto); run without it to auto-mint Dynamically Proven from generated tests. Static mapping and Associated signals are unaffected.");
+    nextActions.push("Dynamic proof was not attempted (--no-auto); run without it to auto-mint Proven from generated tests. Static mapping and links are unaffected.");
   } else if (autoProveResult.ran) {
-    nextActions.push(`Dynamic proof: attempted the top ${autoProveResult.attempted} target(s); ${autoProveResult.proven} dynamically proven. Static breadth (behaviors, flows, Associated signals) is mapped regardless.`);
+    nextActions.push(`Dynamic proof: attempted the top ${autoProveResult.attempted} target(s); ${autoProveResult.proven} proven. Static breadth (behaviors, flows, links) is mapped regardless.`);
     if (autoProveResult.proven === 0) {
       const allEnvironmentUnavailable = autoProveResult.attempts.length > 0
         && autoProveResult.attempts.every((attempt) => attempt.category === "environment_unavailable" || attempt.category === "collection_error");
@@ -3154,7 +3154,7 @@ export async function opStart(
   }
   if (rtm.summary.total > 0 && rtm.summary.proven === 0) {
     nextActions.push(
-      "Dynamically Proven is 0 because no dynamic proof has closed yet; this is expected after analyze-only. In a coding agent, generate a test for the top gap and follow the returned prove_run/prove_loop handoff to mint Dynamically Proven through the dynamic oracle."
+      "Proven is 0 because no dynamic proof has closed yet; this is expected after analyze-only. In a coding agent, generate a test for the top gap and follow the returned prove_run/prove_loop handoff to mint Proven through the dynamic oracle."
     );
   }
   nextActions.push(

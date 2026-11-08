@@ -1,5 +1,5 @@
 /**
- * G1 — `opro doctor --proof`: explain WHY top targets are not Dynamically Proven.
+ * G1 — `opro doctor --proof`: explain WHY top targets are not Proven.
  *
  * Read-only diagnostics over already-produced, already-redacted data:
  *   - `.orangepro/proof-attempts.json` — a distilled sidecar of the last run's
@@ -159,7 +159,7 @@ export const PROOF_BLOCKER_GUIDE: Record<ProofBlockerCategory, BlockerGuide> = {
 /** Wording is load-bearing: a survivor is a proven negative, never a user failure. */
 export const NON_KILLING_NOTE =
   "Not proven: the test still passed while the target was mutated (possibly an equivalent mutation). " +
-  "The mutant surviving is a proven negative about assertion strength — it is never counted as Dynamically Proven.";
+  "The mutant surviving is a proven negative about assertion strength — it is never counted as Proven.";
 
 /** Opposite failure mode: the mutant DID make the test fail, but via a runtime
  *  crash rather than a trusted assertion. The test exercises the target; the
@@ -195,7 +195,7 @@ export interface ProofDoctorBlocker {
 export interface ProofDoctorResult {
   schema_version: string;
   /**
-   * proven  — RTM says ≥1 behavior is Dynamically Proven.
+   * proven  — RTM says ≥1 behavior is Proven.
    * blocked — 0 proven and we have current blocker evidence.
    * stale   — attempt data predates the current graph/commit; re-run for current reasons.
    * no_data — no attempt sidecar and nothing to preflight.
@@ -526,17 +526,17 @@ export function buildProofDoctor(
       "Proof-attempt data is stale (the graph or commit changed since the last run) — re-run `opro start` for current blocker reasons.";
   } else if (proven > 0) {
     status = "proven";
-    headline = `${proven} of ${denominator} behaviors are Dynamically Proven (RTM). Blockers below explain the rest.`;
+    headline = `${proven} of ${denominator} behaviors are Proven (RTM). Blockers below explain the rest.`;
   } else if (blockers.length > 0) {
     const top = blockers[0];
     status = "blocked";
     headline =
       top.count > 1
-        ? `0 Dynamically Proven — one root cause blocked ${top.count} target${top.count === 1 ? "" : "s"}: ${top.label}.`
-        : `0 Dynamically Proven — top blocker: ${top.label}.`;
+        ? `0 Proven — one root cause blocked ${top.count} target${top.count === 1 ? "" : "s"}: ${top.label}.`
+        : `0 Proven — top blocker: ${top.label}.`;
   } else if (non_killing.length > 0) {
     status = "blocked";
-    headline = `0 Dynamically Proven — ${non_killing.length} attempt(s) ran but did not close (see non_killing for the per-target outcome).`;
+    headline = `0 Proven — ${non_killing.length} attempt(s) ran but did not close (see non_killing for the per-target outcome).`;
   } else {
     status = "no_data";
     headline = "No proof-attempt data yet — run `opro start` to attempt dynamic proof and record blockers.";

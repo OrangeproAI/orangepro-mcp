@@ -185,7 +185,7 @@ describe("Go dynamic-proof mint mapping (unit, no toolchain needed)", () => {
 });
 
 describe.skipIf(!GO)("Go dynamic-proof mint path (real toolchain)", () => {
-  it("positive: a free-function Go target mints a Dynamically Proven certificate", () => {
+  it("positive: a free-function Go target mints a Proven certificate", () => {
     const { ws, source } = analyzedGo("proven");
     markEligible(ws, "sym:compute.go#Compute");
     const res = opDynamicProof(
@@ -218,7 +218,7 @@ describe.skipIf(!GO)("Go dynamic-proof mint path (real toolchain)", () => {
       stderr_tail: []
     });
 
-    // RTM counts it as Dynamically Proven.
+    // RTM counts it as Proven.
     const rtm = opRtm(ws, { format: "json" });
     expect(rtm.summary.proven).toBe(1);
     const row = rtm.rows.find((r) => r.code_symbol === "sym:compute.go#Compute");

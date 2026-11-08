@@ -27,7 +27,7 @@ export function packToMarkdown(pack: EvidencePack, analysis?: AnalysisMeta | nul
     lines.push("## Coverage");
     lines.push("");
     lines.push(
-      "Dynamic Proven, static association diagnostics, the denominator composition, and import-resolution metrics live in `COVERAGE_REPORT.md` (the 3-file contract: graph.html / COVERAGE_REPORT.md / graph.json). This pack does not restate them."
+      "Proven, static association diagnostics, the denominator composition, and import-resolution metrics live in `COVERAGE_REPORT.md` (the 3-file contract: graph.html / COVERAGE_REPORT.md / graph.json). This pack does not restate them."
     );
     if (analysis.flows_truncated > 0) {
       lines.push(

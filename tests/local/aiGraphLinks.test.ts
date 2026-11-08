@@ -438,8 +438,8 @@ describe("AI graph candidate links", () => {
     const rtm = opRtm(root, { format: "json" });
     const reqRow = rtm.rows.find((row) => row.behavior_id === "REQ-1");
     const symbolRow = rtm.rows.find((row) => row.behavior_id === "sym:src/discount.ts#applyDiscount");
-    expect(reqRow).toMatchObject({ status: "No integration signal", evidence_tier: "none", test_signal: "" });
-    expect(symbolRow).toMatchObject({ status: "No integration signal", evidence_tier: "none", test_signal: "" });
+    expect(reqRow).toMatchObject({ status: "No test found", evidence_tier: "none", test_signal: "" });
+    expect(symbolRow).toMatchObject({ status: "No test found", evidence_tier: "none", test_signal: "" });
 
     const viz = buildVizPayload(afterGraph, SCORE);
     expect(viz.gap.language_tiers).toEqual(expect.arrayContaining([expect.objectContaining({

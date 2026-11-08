@@ -6,7 +6,7 @@ describe("coverageRevealLine (G6)", () => {
   it("renders same-denominator percentages for runtime-covered vs in-denominator proven", () => {
     const line = coverageRevealLine({ total: 100, coverage_confirmed: 12, runtime_covered: 75 });
     expect(line).toBe(
-      "Coverage vs proof: 75/100 behaviors are runtime-covered but not Dynamically Proven (75%) vs 12/100 Dynamically Proven (12%) — " +
+      "Coverage vs proof: 75/100 behaviors are runtime-covered but not Proven (75%) vs 12/100 Proven (12%) — " +
         "coverage only proves execution; the unproven side may be unattempted, blocked, or covered by tests that never assert these behaviors."
     );
   });
@@ -17,7 +17,7 @@ describe("coverageRevealLine (G6)", () => {
     // (67%), never 5/3 (167%). The extra `proven` field is ignored by construction.
     const summaryWithOffDenominator = { total: 3, coverage_confirmed: 2, proven: 5, runtime_covered: 1 };
     const line = coverageRevealLine(summaryWithOffDenominator);
-    expect(line).toContain("2/3 Dynamically Proven (67%)");
+    expect(line).toContain("2/3 Proven (67%)");
     expect(line).not.toContain("5/3");
     expect(line).not.toContain("167");
   });
@@ -42,6 +42,6 @@ describe("coverageRevealLine (G6)", () => {
   it("renders even when nothing is proven — the gap is the whole point", () => {
     const line = coverageRevealLine({ total: 10, coverage_confirmed: 0, runtime_covered: 7 });
     expect(line).toContain("7/10");
-    expect(line).toContain("0/10 Dynamically Proven (0%)");
+    expect(line).toContain("0/10 Proven (0%)");
   });
 });

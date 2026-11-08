@@ -243,24 +243,24 @@ tests link back to the graph evidence that grounded them, and disclose any weak 
 
 For coverage scoring, OrangePro uses one public glossary:
 
-- **Dynamically Proven** (labeled "Dynamically Proven" in the report/CLI/RTM) means a dynamic
-  targeted-proof ledger certificate closed for the behavior: baseline green, target mutated, same
-  test failed at an assertion, and the target was not mocked. The static map covers the whole repo;
-  the dynamic pass proves only the top few eligible behaviors per run (default 5, `--auto-limit` to raise).
-- **Runtime-covered** means the repo's own coverage tool executed the code, but not that an
+- **Proven** means a dynamic targeted-proof ledger certificate closed for the behavior: baseline
+  green, target mutated, same test failed at an assertion, and the target was not mocked. The static
+  map covers the whole repo; the dynamic pass proves only the top few eligible behaviors per run
+  (default 5, `--proof-limit` to change). The traceability row says **Reproven (this run)** when the
+  proof was made in this run.
+- **Runs under tests** means the repo's own coverage tool executed the code, but not that an
   assertion checked the behavior.
-- **Associated signal** means name, path, import, or structural matches suggest a useful link,
-  but not semantic proof.
-- **No integration signal** means no direct static test signal was found yet. It does not mean “untested.”
+- **Linked** means a test calls this exact function: a structural link, not proof.
+- **Unconfirmed** means a test file or a test with a similar name points here, but no call was
+  traced: a lead, not evidence.
+- **No test found** means nothing links a test to it yet. It does not mean “untested.”
 
-The HTML report presents these as four display tiers: **Dynamically Proven**, **Statically Linked**
-(the report's label for an Associated signal — a test file appears to import or call the behavior,
-not dynamically verified), **Reachable Untested** (a behavior that appears in a static flow from an
-entry point but has no test signal), and **No Signal** (no test or static-flow signal yet). These are
-presentation labels over the same statuses above; they change no classification, count, or ledger record.
+The reports, `tests.csv`, `rtm.md` and the CLI use these same five names (the README's evidence
+tiers). Earlier versions of the traceability matrix used other names for these tiers;
+`opro rtm --status` still accepts them.
 
-LLM, similarity inference, and static hard TESTED_BY/COVERS edges are candidate or
-associated signals until a dynamic targeted proof closes.
+LLM, similarity inference, and static hard TESTED_BY/COVERS edges stay Unconfirmed or
+Linked until a dynamic targeted proof closes.
 
 ### JavaScript and TypeScript: what is seen, and what is counted
 
@@ -474,8 +474,8 @@ not mocked):
 - **Python** — pytest.
 
 The static map is broader than the dynamic pass: languages without a proof profile yet
-(Kotlin, Rust, ...) still get the full static picture (behaviors, flows, Statically
-Linked, Reachable Untested, and any ingested runtime coverage). Where a language's
+(Kotlin, Rust, ...) still get the full static picture (behaviors, flows, Linked,
+Unconfirmed, No test found, and any ingested runtime coverage). Where a language's
 profile cannot run, dynamic proof does not pretend — it reports a precise "not supported
 / workspace config missing" reason and those behaviors stay in their static tiers.
 
@@ -486,7 +486,7 @@ before accepting it from an untrusted client or edited checkout.
 Runtime coverage is reported separately when local coverage-tool artifacts are present. The
 local kit ingests Go coverprofiles, JS/TS `lcov.info`, Python coverage.py XML, and Java JaCoCo
 XML. These artifacts show executed lines inside symbols; they are not assertion-level proof and
-never promote Associated signal or No integration signal rows to Proven.
+never promote Linked or No test found rows to Proven.
 
 For the highest-signal report in a repository with its own build/test workflow, bootstrap the
 repository first, run its native coverage target, optionally use `opro coverage .` to confirm the

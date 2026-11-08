@@ -12,7 +12,7 @@
   "interface": {
     "displayName": "OrangePro",
     "shortDescription": "Find behavioral test gaps and generate grounded tests.",
-    "longDescription": "OrangePro runs locally as an MCP server. It builds an evidence graph, ingests repo-native runtime coverage, exposes Proven / Runtime-covered / Associated / No-link status, and returns grounded test drafts with run hints. Model keys stay in your environment; no model is pinned by the plugin.",
+    "longDescription": "OrangePro runs locally as an MCP server. It builds an evidence graph, ingests repo-native runtime coverage, exposes Proven / Runs under tests / Linked / Unconfirmed / No test found status, and returns grounded test drafts with run hints. Model keys stay in your environment; no model is pinned by the plugin.",
     "developerName": "OrangePro",
     "category": "Productivity",
     "capabilities": ["Interactive"],

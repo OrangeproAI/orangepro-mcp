@@ -249,7 +249,7 @@ describe("start orchestration", () => {
     expect(res.ai_links).toMatchObject({ status: "skipped" });
     expect(res.ai_flows).toMatchObject({ status: "skipped" });
     expect(res.rtm.summary.proven).toBe(0);
-    expect(res.next_actions.join("\n")).toContain("Dynamically Proven is 0 because no dynamic proof has closed yet");
+    expect(res.next_actions.join("\n")).toContain("Proven is 0 because no dynamic proof has closed yet");
     expect(res.next_actions.join("\n")).toContain("orangepro_generate_tests");
     expect(res.next_actions.join("\n")).toContain("prove_run");
     expect(res.rtm.summary.total).toBeGreaterThan(0);
@@ -350,8 +350,8 @@ describe("start orchestration", () => {
     expect(res.analyze.ai_linked).toEqual(res.ai_linked);
     expect(res.analyze.candidate_relationships_count).toBe(graph.candidate_edges.length);
     expect(graph.candidate_edges.some((e) => e.review_status === "ai_suggested")).toBe(true);
-    expect(res.rtm.rows.some((r) => r.status === "Associated signal")).toBe(false);
-    expect(res.rtm.rows.some((r) => r.status === "No integration signal")).toBe(true);
+    expect(res.rtm.rows.some((r) => r.status === "Linked")).toBe(false);
+    expect(res.rtm.rows.some((r) => r.status === "No test found")).toBe(true);
   });
 
   it("auto-applies AI candidate flows during start when a provider is configured without changing Proven", async () => {
@@ -738,7 +738,7 @@ describe("gap-fill ledger", () => {
 
     const rtm = opRtm(W, { format: "json" });
     const row = rtm.rows.find((r) => r.behavior_id === "sym:service.ts#createOrder");
-    expect(row?.status).toBe("Associated signal");
+    expect(row?.status).toBe("Linked");
     expect(row?.test_signal).toContain("static candidate:");
   });
 

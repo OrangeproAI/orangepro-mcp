@@ -1399,7 +1399,7 @@ describe("autoProve — R7.1 proof-runner limits", () => {
   });
 });
 
-describe("autoProve — trust guard: static Associated never becomes Dynamically Proven", () => {
+describe("autoProve — trust guard: static Associated never becomes Proven", () => {
   it("all attempts setup-blocked → proven 0, RTM proven 0, Associated tier preserved", async () => {
     const W = makeWorkspaceWithExistingTests();
     // Epistemic fix (Jul 17): lexical matches surface as the CANDIDATE tier

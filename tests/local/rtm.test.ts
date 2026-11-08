@@ -190,10 +190,10 @@ describe("RTM builder", () => {
       no_link: 1
     });
     expect(rtm.rows.map((r) => [r.behavior_id, r.status])).toEqual([
-      ["sym:svc/math.go#Sub", "No integration signal"],
-      ["sym:svc/math.go#Validate", "Candidate signal (unconfirmed)"],
-      ["REQ-1", "Associated signal"],
-      ["sym:svc/math.go#Add", "Associated signal"]
+      ["sym:svc/math.go#Sub", "No test found"],
+      ["sym:svc/math.go#Validate", "Unconfirmed"],
+      ["REQ-1", "Linked"],
+      ["sym:svc/math.go#Add", "Linked"]
     ]);
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.test_signal).toContain("static candidate:");
 
@@ -241,7 +241,7 @@ describe("RTM builder", () => {
     expect(rtm.summary.proven).toBe(0);
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")).toMatchObject({
       evidence_tier: "associated",
-      status: "Associated signal"
+      status: "Linked"
     });
   });
 
@@ -267,14 +267,14 @@ describe("RTM builder", () => {
     const proof = dynamicProofRecord("sym:svc/math.go#Add", graph("sha256:math-v1"));
     const rtm = buildRtm(graph("sha256:math-v2"), { schema_version: LEDGER_SCHEMA_VERSION, records: [proof] });
     expect(rtm.summary.proven).toBe(0);
-    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.status).toBe("Associated signal");
+    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.status).toBe("Linked");
   });
 
   it("does not count a dynamic proof without a target_fingerprint as Proven (pre-existing ledger)", () => {
     const legacy = { ...dynamicProofRecord(), target_fingerprint: undefined };
     const rtm = buildRtm(graph(), { schema_version: LEDGER_SCHEMA_VERSION, records: [legacy] });
     expect(rtm.summary.proven).toBe(0);
-    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.status).toBe("Associated signal");
+    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.status).toBe("Linked");
   });
 
   it("falls back to the latest record for diagnostics but never Proven when no matching proof exists", () => {
@@ -413,7 +413,7 @@ describe("RTM builder", () => {
 
     expect(row).toMatchObject({
       evidence_tier: "runtime",
-      status: "Runtime-covered",
+      status: "Runs under tests",
       test_signal: "runtime coverage (go-coverprofile)",
       suggested_next_test: ""
     });
@@ -427,7 +427,7 @@ describe("RTM builder", () => {
       coverage_confirmed: 0
     });
     expect(buildRtm(g, emptyLedger(), { statuses: ["runtime"] }).rows.map((r) => r.behavior_id)).toEqual(["sym:svc/math.go#Sub"]);
-    expect(renderRtmMarkdown(rtm)).toContain("| Runtime-covered | 1 |");
+    expect(renderRtmMarkdown(rtm)).toContain("| Runs under tests | 1 |");
   });
 
   it("does NOT propagate candidate signals through barrel imports, and never upgrades them to associated", () => {
@@ -464,11 +464,11 @@ describe("RTM builder", () => {
     // The imported file's symbols must NOT inherit the barrel's candidate signal.
     const sub = rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub");
     expect(sub?.evidence_tier).toBe("none");
-    expect(sub?.status).toBe("No integration signal");
+    expect(sub?.status).toBe("No test found");
     // Symbols in the matched file itself surface as candidate — visible, but never evidence.
     for (const row of rtm.rows.filter((r) => r.file === "src/index.ts")) {
       expect(row.evidence_tier).toBe("candidate");
-      expect(row.status).toBe("Candidate signal (unconfirmed)");
+      expect(row.status).toBe("Unconfirmed");
     }
   });
 
@@ -489,7 +489,7 @@ describe("RTM builder", () => {
 
     const rtm = buildRtm(g, emptyLedger());
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub")).toMatchObject({
-      status: "No integration signal",
+      status: "No test found",
       evidence_tier: "none"
     });
     expect(rtm.summary.proven).toBe(0);
@@ -556,8 +556,8 @@ describe("RTM builder", () => {
     };
     const rtm = buildRtm(graph(), ledger);
 
-    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub")?.status).toBe("No integration signal");
-    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Validate")?.status).toBe("Candidate signal (unconfirmed)");
+    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub")?.status).toBe("No test found");
+    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Validate")?.status).toBe("Unconfirmed");
     expect(rtm.summary).toMatchObject({ reproven_this_run: 0, attempted: 1, kept_rate: 0 });
   });
 
@@ -576,7 +576,7 @@ describe("RTM builder", () => {
     );
 
     const rtm = buildRtm(g, emptyLedger());
-    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub")?.status).toBe("No integration signal");
+    expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Sub")?.status).toBe("No test found");
     expect(rtm.summary.proven).toBe(0);
   });
 
@@ -588,10 +588,10 @@ describe("RTM builder", () => {
     // Validate carries only a lexical candidate edge → surfaces under its own
     // "candidate" status filter now, never under "associated".
     expect(rtm.rows.map((r) => r.status)).toEqual([
-      "No integration signal",
-      "Candidate signal (unconfirmed)",
-      "Associated signal",
-      "Associated signal"
+      "No test found",
+      "Unconfirmed",
+      "Linked",
+      "Linked"
     ]);
     expect(md).toContain("Traceability Matrix");
     expect(md).toContain("Add a validation test");
@@ -666,7 +666,7 @@ describe("RTM display-union (off-denominator proven symbols)", () => {
 
     // denominator (total/coverage_total) is unchanged vs the base graph (4 eligible behaviors)…
     expect(rtm.summary).toMatchObject({ total: 4, coverage_total: 4, coverage_confirmed: 0, coverage_pct: 0 });
-    // …but the off-denominator proof IS counted in the honest "Dynamically Proven" headline.
+    // …but the off-denominator proof IS counted in the honest "Proven" headline.
     expect(rtm.summary.proven).toBe(1);
     const off = rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Print");
     expect(off).toMatchObject({ off_denominator: true, evidence_tier: "proven" });
@@ -741,5 +741,39 @@ describe("RTM display-union (off-denominator proven symbols)", () => {
     expect(rtm.summary.coverage_total).toBe(4);
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Add")?.off_denominator).toBeUndefined();
     expect(rtm.rows.find((r) => r.behavior_id === "sym:svc/math.go#Print")?.off_denominator).toBe(true);
+  });
+});
+
+describe("item 9: the trace matrix uses the README's tier names in every format", () => {
+  const README_TIERS = ["Proven", "Runs under tests", "Linked", "Unconfirmed", "No test found"];
+  const RTM_EXTRA = ["Reproven (this run)", "Generated-unverifiable"];
+  const OLD = ["Dynamically Proven", "Runtime-covered", "Associated signal", "Candidate signal", "No integration signal"];
+
+  it("md, csv and json show only the README names (plus Reproven and Generated-unverifiable), never the old ones", async () => {
+    const { renderCoverageReport } = await import("../../src/local/pack/coverageReport.js");
+    const g = graph();
+    const rtm = buildRtm(g, emptyLedger());
+    for (const row of rtm.rows) expect([...README_TIERS, ...RTM_EXTRA]).toContain(row.status);
+    const outputs = { md: renderRtmMarkdown(rtm), csv: renderRtmCsv(rtm), json: JSON.stringify(rtm), coverage: renderCoverageReport(g, emptyLedger()) };
+    for (const [name, text] of Object.entries(outputs)) {
+      for (const old of OLD) expect(text, `${name} still says ${old}`).not.toContain(old);
+    }
+    for (const tier of README_TIERS) expect(outputs.md).toContain(`| ${tier} |`);
+    // The machine key is unchanged.
+    expect(new Set(rtm.rows.map((r) => r.evidence_tier))).toEqual(new Set(["none", "candidate", "associated"]));
+  });
+
+  it("--status accepts the new names and the old ones, and both select the same rows", () => {
+    const g = graph();
+    const pick = (statuses: string[]) => buildRtm(g, emptyLedger(), { statuses }).rows.map((r) => r.behavior_id);
+    expect(pick(["linked"])).toEqual(pick(["associated"]));
+    expect(pick(["Linked"])).toEqual(pick(["Associated signal"]));
+    expect(pick(["unconfirmed"])).toEqual(pick(["candidate"]));
+    expect(pick(["Unconfirmed"])).toEqual(pick(["Candidate signal (unconfirmed)"]));
+    expect(pick(["No test found"])).toEqual(pick(["no-link"]));
+    expect(pick(["no_integration_signal"])).toEqual(pick(["none"]));
+    expect(pick(["runs under tests"])).toEqual(pick(["runtime-covered"]));
+    expect(pick(["linked"]).length).toBeGreaterThan(0);
+    expect(pick(["No test found"]).length).toBeGreaterThan(0);
   });
 });

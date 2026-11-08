@@ -786,10 +786,10 @@ describe("viz HTML (v4 gap-first port, self-contained + offline)", () => {
     const html = renderVizHtml(buildVizPayload(graph, scoreGraph(graph)));
     expect(html).toContain("Code behavior evidence by language");
     expect(html).toContain("Proven = dynamic targeted mutation proof recorded in the local ledger");
-    expect(html).toContain("Runtime-covered = executed by a repo coverage report");
-    expect(html).toContain("Associated signal = a resolved static test-to-behavior invocation");
+    expect(html).toContain("Runs under tests = executed by a repo coverage report");
+    expect(html).toContain("Linked = a resolved static test-to-behavior invocation");
     expect(html).toContain("It is not execution evidence and does not prove the test detects failure");
-    expect(html).toContain("No link = no direct static or runtime signal found");
+    expect(html).toContain("No test found = no direct static or runtime signal found");
     expect(html).toContain("Broad e2e or integration coverage may still exist");
     expect(html).toContain("language_tiers");
   });

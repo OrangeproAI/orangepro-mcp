@@ -152,7 +152,7 @@ function confirmedBehaviorIds(graph: LocalGraph, provenIds?: Set<string>): Set<s
   // listing it as an unlinked candidate above its own proven methods.
   // "Confirmed" here means a hard static link OR a current ledger proof: the
   // proof lane leaves no graph edge and usually sits outside the denominator,
-  // so a hard-edge-only check never fires for a dynamically proven type.
+  // so a hard-edge-only check never fires for a proven type.
   const eligible = new Set(
     graph.nodes.filter((n) => n.kind === "CodeSymbol" && n.denominator_eligible === true).map((n) => n.external_id)
   );
@@ -954,8 +954,8 @@ function rankRiskGapsUncached(graph: LocalGraph, opts: RiskGapOptions = {}): Ris
   const depthCtx = buildFlowDepthContext(graph);
   const staticLinked = staticTestLinkedIds(graph, symbolIds);
   const candidateLinked = candidateSignalIds(graph, symbolIds);
-  // Runtime first, matching the evidence order every report uses (Proven > Runtime-covered
-  // > Statically Linked): both detect a break equally (D 5), the label is the stronger fact.
+  // Runtime first, matching the evidence order every report uses (Proven > Runs under tests
+  // > Linked): both detect a break equally (D 5), the label is the stronger fact.
   const runtimeCovered = new Set(graph.nodes.filter((n) => symbolIds.has(n.external_id) && n.properties?.runtime_covered === true).map((n) => n.external_id));
   const detectionFor = (id: string): DetectionTier =>
     runtimeCovered.has(id) ? "runtime" : staticLinked.has(id) ? "associated" : candidateLinked.has(id) ? "candidate" : "none";
