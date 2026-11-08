@@ -26,8 +26,11 @@ export const HOST_NODE_VERSION = "22.23.4";
 export const PINNED_ACTIONS = {
   checkout: { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", tag: "v7.0.1" },
   setupNode: { sha: "949feb2413d6458794dcd2491c4babbbce0c15c1", tag: "v7.1.0" },
-  uploadArtifact: { sha: "cf430e030ddbb5b0abf93d22962f4752f3646cd9", tag: "v7.0.2" }
+  uploadArtifact: { sha: "cf430e030ddbb5b0abf93d22962f4752f3646cd9", tag: "v7.0.2" },
+  // Released with upload-artifact v7.0.2 (7 Oct 2026); used only by the opt-in deliver job.
+  downloadArtifact: { sha: "9000827ccba6bdab643e8b6fd33ac0654aef8333", tag: "v8.0.2" }
 } as const;
+export const DELIVER_JOB_MINUTES = 15;
 export const JOB_MARGIN_MINUTES = 15;
 const SOURCE_SHARING = "none: no model is called; the job uploads its artifacts to this repository's own Actions run and sends nothing anywhere else";
 
@@ -41,6 +44,8 @@ export interface InstallOptions {
   /** false (the default): preview only, nothing is written. */
   apply: boolean;
   uninstall?: boolean;
+  /** V3: add the separate deliver job that opens a draft test PR (opt-in; the only job with write permissions). */
+  deliver?: "draft-pr";
 }
 
 export type FileAction = "create" | "unchanged" | "update" | "remove" | "conflict";
@@ -80,9 +85,44 @@ export function ownedWorkflow(bytes: Buffer): boolean {
   return text.slice(MARKER_PREFIX.length, newline) === sha256Hex(Buffer.from(text.slice(newline + 1), "utf8"));
 }
 
-export function workflowYaml(args: { base: string; version: string; totalMinutes: number }): string {
+export function workflowYaml(args: { base: string; version: string; totalMinutes: number; deliver?: boolean }): string {
   if (!BRANCH_RE.test(args.base)) throw new InstallError(`${args.base} is not a branch name the workflow can carry.`);
-  const { checkout, setupNode, uploadArtifact } = PINNED_ACTIONS;
+  const { checkout, setupNode, uploadArtifact, downloadArtifact } = PINNED_ACTIONS;
+  // V3, opt-in: a separate job, after prove, that checks out nothing and runs no repository code.
+  // It downloads this run's artifact and runs publish-tests, which checks the receipt and opens one draft PR.
+  const deliverJob = !args.deliver ? [] : [
+    "  deliver:",
+    "    needs: prove",
+    "    runs-on: ubuntu-24.04",
+    `    timeout-minutes: ${DELIVER_JOB_MINUTES}`,
+    "    permissions:",
+    "      contents: write",
+    "      pull-requests: write",
+    "    steps:",
+    "      - name: Set up Node",
+    `        uses: actions/setup-node@${setupNode.sha} # ${setupNode.tag}`,
+    "        with:",
+    `          node-version: "${HOST_NODE_VERSION}"`,
+    "      - name: Install OrangePro",
+    `        run: 'npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/opro" "@orangepro/orangepro-mcp@${args.version}"'`,
+    "      - name: Download the proof artifacts",
+    `        uses: actions/download-artifact@${downloadArtifact.sha} # ${downloadArtifact.tag}`,
+    "        with:",
+    "          name: orangepro-proof-${{ github.run_id }}-${{ github.run_attempt }}",
+    "          path: ${{ runner.temp }}/orangepro-in",
+    "      - name: Deliver a draft test PR",
+    "        env:",
+    "          GITHUB_TOKEN: ${{ github.token }}",
+    "          MERGED_SHA: ${{ inputs.merged_sha || github.sha }}",
+    `        run: '"$RUNNER_TEMP/opro/node_modules/.bin/opro" publish-tests --from-actions "$RUNNER_TEMP/orangepro-in" --repo "$GITHUB_REPOSITORY" --base ${JSON.stringify(args.base)} --merged "$MERGED_SHA" --yes --out "$RUNNER_TEMP/orangepro-delivery" --summary "$GITHUB_STEP_SUMMARY"'`,
+    "      - name: Upload the delivery record",
+    "        if: always()",
+    `        uses: actions/upload-artifact@${uploadArtifact.sha} # ${uploadArtifact.tag}`,
+    "        with:",
+    "          name: orangepro-delivery-${{ github.run_id }}-${{ github.run_attempt }}",
+    "          path: ${{ runner.temp }}/orangepro-delivery",
+    "          if-no-files-found: warn"
+  ];
   const body = [
     "name: OrangePro proof after merge",
     "on:",
@@ -136,6 +176,7 @@ export function workflowYaml(args: { base: string; version: string; totalMinutes
     "          name: orangepro-proof-${{ github.run_id }}-${{ github.run_attempt }}",
     "          path: ${{ runner.temp }}/orangepro-out",
     "          if-no-files-found: warn",
+    ...deliverJob,
     ""
   ].join("\n");
   return `${MARKER_PREFIX}${sha256Hex(Buffer.from(body, "utf8"))}\n${body}`;
@@ -306,7 +347,8 @@ export function opInstallGithubAction(opts: InstallOptions, deps: { git?: GitByt
   const version = opts.version ?? ORANGEPRO_VERSION;
   const { profile, inputs } = loadSourceProfile(resolve(opts.profile_from), base, version, build);
   const profileText = `${JSON.stringify(profile, null, 2)}\n`;
-  const workflowText = workflowYaml({ base, version, totalMinutes: profile.limits.total_minutes });
+  const deliver = opts.deliver === "draft-pr";
+  const workflowText = workflowYaml({ base, version, totalMinutes: profile.limits.total_minutes, deliver });
   const folder: DesiredFile[] = [{ path: `${ACTIONS_DIR}/profile.json`, bytes: Buffer.from(profileText, "utf8") }, ...inputs, { path: FOLDER_GITIGNORE, bytes: Buffer.from(FOLDER_GITIGNORE_TEXT, "utf8") }];
   const desired: DesiredFile[] = [{ path: WORKFLOW_PATH, bytes: Buffer.from(workflowText, "utf8") }, ...folder, { path: MANAGED_LIST, bytes: managedListBytes(Object.fromEntries(folder.map((file) => [file.path, sha256Hex(file.bytes)]))) }];
   Object.assign(result, {
@@ -316,8 +358,19 @@ export function opInstallGithubAction(opts: InstallOptions, deps: { git?: GitByt
     orangepro: { version, build_sha256: build },
     commands: [
       `npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/opro" "@orangepro/orangepro-mcp@${version}"`,
-      `opro actions-run --event-name "$GITHUB_EVENT_NAME" --event "$GITHUB_EVENT_PATH" --profile orangepro-config/${ACTIONS_DIR}/profile.json --repo repo --out "$RUNNER_TEMP/orangepro-out" --summary "$GITHUB_STEP_SUMMARY"`
+      `opro actions-run --event-name "$GITHUB_EVENT_NAME" --event "$GITHUB_EVENT_PATH" --profile orangepro-config/${ACTIONS_DIR}/profile.json --repo repo --out "$RUNNER_TEMP/orangepro-out" --summary "$GITHUB_STEP_SUMMARY"`,
+      ...(deliver ? [`opro publish-tests --from-actions "$RUNNER_TEMP/orangepro-in" --repo "$GITHUB_REPOSITORY" --base ${JSON.stringify(base)} --merged "$MERGED_SHA" --yes --out "$RUNNER_TEMP/orangepro-delivery" --summary "$GITHUB_STEP_SUMMARY"`] : [])
     ],
+    ...(deliver
+      ? {
+          permissions: "prove: contents: read (no write permission, no secrets; the checkouts keep no token). deliver (opt-in): contents: write and pull-requests: write, in a job that checks out nothing and runs no repository code",
+          notes: [
+            ...result.notes,
+            "The deliver job opens a draft PR with the workflow's own token. The repository must allow it: Settings → Actions → General → Workflow permissions → \"Allow GitHub Actions to create and approve pull requests\".",
+            "Delivery happens only for a verified gap, only while the base branch still points at the proven commit, and only to orangepro/tests/<merged sha, 12>; nothing is force-pushed or merged."
+          ]
+        }
+      : {}),
     time_limits: { total_minutes: profile.limits.total_minutes, job_minutes: Math.ceil(profile.limits.total_minutes) + JOB_MARGIN_MINUTES }
   });
 

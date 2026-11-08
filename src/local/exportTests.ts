@@ -92,11 +92,29 @@ function git(root: string, args: string[]): string {
 }
 
 /** `github.com/org/repo`, never a URL with credentials. */
-function repositoryName(origin: unknown): string | null {
-  const text = typeof origin === "string" ? origin : typeof (origin as { url?: unknown })?.url === "string" ? ((origin as { url: string }).url) : typeof (origin as { repository?: unknown })?.repository === "string" ? ((origin as { repository: string }).repository) : null;
-  if (!text) return null;
+/** `github.com/<owner>/<name>` from a URL, or null. */
+function githubName(text: unknown): string | null {
+  if (typeof text !== "string") return null;
   const m = /github\.com[/:]([^/\s]+)\/([^/\s.]+)/.exec(text);
   return m ? `github.com/${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * The repository the run proved: the fork when the fixture names one (that is where the commit was
+ * tested and where a PR would go), else the upstream. A fixture records `origin` as a URL, or as an
+ * object with `fork`, `upstream`, `url` or `repository`.
+ */
+export function repositoryName(origin: unknown): string | null {
+  if (typeof origin === "string") return githubName(origin);
+  const o = (origin ?? {}) as { fork?: unknown; upstream?: unknown; url?: unknown; repository?: unknown };
+  return githubName(o.fork) ?? githubName(o.upstream) ?? githubName(o.url) ?? githubName(o.repository);
+}
+
+/** Where the source PR lives: the upstream when the fixture names one (a fork's PR numbers are its own). */
+export function sourcePrRepository(origin: unknown): string | null {
+  if (typeof origin === "string") return githubName(origin);
+  const o = (origin ?? {}) as { upstream?: unknown; url?: unknown; repository?: unknown };
+  return githubName(o.upstream) ?? githubName(o.url) ?? githubName(o.repository);
 }
 
 export interface ExportTestsOptions {
@@ -546,6 +564,19 @@ export function summaryHtml(r: VerificationReceipt, patch: string, statement: st
   const verdictWord = r.classification.fault === "verified_gap" ? "Verified: the new test catches the fault the old tests missed" : r.classification.fault === "blocked" ? "Blocked: no claim" : "Inconclusive: no claim";
   const who = r.generation.by === "provider" ? `OrangePro drafted the test with the owner's model key (${r.generation.agent}) from its brief; OrangePro verified it.` : `A coding agent (${r.generation.agent}) wrote the test from OrangePro's brief; OrangePro verified it.`;
   const old = run.classification;
+  const origin = ((): unknown => {
+    try {
+      return (JSON.parse(run.fixtureBytes.toString("utf8")) as { origin?: unknown }).origin;
+    } catch {
+      return null; // a page without the fixture links what the receipt names
+    }
+  })();
+  const repo = r.source.repository;
+  const prRepo = sourcePrRepository(origin);
+  const link = (href: string, text: string): string => `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+  const repoHtml = repo ? link(`https://${repo}`, esc(repo)) : "an unnamed repository";
+  const commitHtml = repo ? link(`https://${repo}/commit/${r.source.merged_commit}`, `<code>${esc(r.source.merged_commit.slice(0, 12))}</code>`) : `<code>${esc(r.source.merged_commit.slice(0, 12))}</code>`;
+  const prHtml = r.source.pr_number ? (prRepo ? link(`https://${prRepo}/pull/${r.source.pr_number}`, `PR #${r.source.pr_number}`) : `PR #${r.source.pr_number}`) : "";
   const rowsHtml = r.rows.map((row) => `<tr><td>${row.row}</td><td>${esc(row.meaning)}</td><td class="${row.met ? "ok" : "no"}">${row.met ? "met" : `not met: ${esc(row.reason ?? "")}`}</td></tr>`).join("\n");
   const stagesHtml = r.stages
     .map((s) => `<tr><td>${esc(s.run_id)}</td><td>${esc(s.stage)}</td><td>${s.fault_present ? "fault" : "original"}</td><td>${s.executed ?? "—"}</td><td>${s.passed ?? "—"}</td><td>${s.failed ?? "—"}</td><td>${esc(s.new_test)}${s.new_test_failed_at ? ` at ${esc(s.new_test_failed_at.file)}:${s.new_test_failed_at.line}` : ""}</td></tr>`)
@@ -568,10 +599,10 @@ td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertic
 <body><main>
 <h1>${esc(verdictWord)}</h1>
 <p class="muted">OrangePro ${esc(r.tool.version)} · runtime observations only · receipt <code>verification-receipt.json</code></p>
-<div class="card"><strong>Merged change.</strong> ${esc(r.source.repository ?? "repository")} at <code>${esc(r.source.merged_commit.slice(0, 12))}</code>${r.source.pr_number ? `, PR #${r.source.pr_number}` : ""} (previous base <code>${esc((r.source.previous_base ?? "").slice(0, 12))}</code>).</div>
-<div class="card"><strong>Behavior and why.</strong> <code>${esc(r.selection.symbol_id)}</code>, which the change touched. Expected (approved oracle): ${esc(run.oracle.behavior)} ${esc(run.oracle.expected)}.${r.selection.assisted ? " Assisted: the target and the fault were known before the run." : ""}</div>
+<div class="card"><strong>Merged change.</strong> ${repoHtml} at ${commitHtml}${prHtml ? `, ${prHtml}` : ""} (previous base <code>${esc((r.source.previous_base ?? "").slice(0, 12))}</code>).</div>
+<div class="card"><strong>Behavior and why.</strong> <code>${esc(r.selection.symbol_id)}</code>, which the change touched. Expected (approved oracle): ${esc(run.oracle.behavior)}${r.selection.assisted ? " Assisted: the target and the fault were known before the run." : ""}</div>
 <div class="card"><strong>What the old tests did.</strong> ${esc(old.statement)}</div>
-<div class="card"><strong>The new test and its result on the fault.</strong> ${esc(statement)}<br>${esc(who)}</div>
+<div class="card"><strong>The new test and its result on the fault.</strong> ${esc(statement)}<br>What it checks: ${esc(run.oracle.expected)}.<br>${esc(who)}</div>
 <h2>The test-only patch (<code>orangepro-tests.patch</code>)</h2>
 <pre>${esc(patch)}</pre>
 <div class="card"><strong>Your action.</strong> Review the test patch. It is not delivered as a pull request, and nothing was merged.</div>

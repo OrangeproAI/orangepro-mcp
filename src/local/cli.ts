@@ -76,6 +76,7 @@ import type { GenerateOptions } from "./types.js";
 import { ORANGEPRO_VERSION } from "./version.js";
 import { buildLabel, checkBuild } from "./buildInfo.js";
 import { opActionsRun, renderActionsRun } from "./actionsRun.js";
+import { opPublishTests, renderPublishTests } from "./publishTests.js";
 import { InstallError, opInstallGithubAction, renderInstall } from "./actionsInstall.js";
 import { loadRiskConfig } from "./score/riskConfig.js";
 import { STATIC_ONLY_ENV } from "./staticOnly.js";
@@ -181,7 +182,7 @@ Usage:
   opro export-tests --from-run <verify-test run folder> [--source <checkout>] [--json]
     # from a verified_gap run: orangepro-tests.patch (test-only), diagnostic-fault.patch, a fresh replay inside the container
     # (the whole suite, with the patch, with the patch on the same fault, restored), verification-receipt.json (rows A-H) and summary.html
-  opro install-github-action [path] --profile-from <folder> [--base <branch>] [--opro-version <x.y.z> --build <sha256>] [--dry-run | --yes] [--json]
+  opro install-github-action [path] --profile-from <folder> [--base <branch>] [--opro-version <x.y.z> --build <sha256>] [--deliver draft-pr] [--dry-run | --yes] [--json]
   opro install-github-action [path] --uninstall [--yes] [--json]
     # preview by default (writes nothing): a post-merge workflow (.github/workflows/orangepro-proof.yml, contents: read, pinned actions)
     # and .orangepro/actions/ (the profile and its inputs); --yes writes them, never commits or pushes; a file you changed is a conflict, never overwritten
@@ -189,6 +190,10 @@ Usage:
     # the workflow's step: reads the event, stops when the change is not the profile's target, else installs inside the container and runs
     # changed-targets → probe-fault → test-brief → verify-test (the profile's test, replayed) → export-tests under one time limit;
     # writes result.json, summary.md and the run folders to --out; exit 0 for every result except an internal error
+  opro publish-tests (--from-run <export-tests run folder> | --from-actions <actions-run output folder>) --repo <owner/name> --base <branch> [--merged <sha>] [--yes] [--out <folder>] [--summary <file>] [--json]
+    # the trusted draft-PR publisher: runs no repository code and no git; checks the run (manifest, receipt, rows A-H, test-only patch, allowlist, build)
+    # and that --base still points at the proven commit; with --yes, writes one commit on orangepro/tests/<sha12> and opens or finds one DRAFT PR
+    # through the GitHub API (GITHUB_TOKEN or GH_TOKEN), reads it back and writes delivery-record.json; without --yes it writes nothing
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
@@ -276,6 +281,12 @@ function installCliProgress(label: string): () => void {
 function bar(value: number): string {
   const filled = Math.round(value * 10);
   return "█".repeat(filled) + "░".repeat(10 - filled);
+}
+
+/** `--deliver draft-pr` is the only delivery the installer adds (V3). */
+function deliverFlag(value: unknown): "draft-pr" {
+  if (value !== "draft-pr") throw new Error("--deliver takes draft-pr (the opt-in job that opens a draft test PR)");
+  return "draft-pr";
 }
 
 async function main(): Promise<number> {
@@ -864,7 +875,8 @@ async function main(): Promise<number> {
           version: text("opro-version"),
           build_sha256: text("build"),
           apply: asBool(flags.yes, false),
-          uninstall: asBool(flags.uninstall, false)
+          uninstall: asBool(flags.uninstall, false),
+          ...(flags.deliver === undefined ? {} : { deliver: deliverFlag(flags.deliver) })
         });
         if (json) printJson(res);
         else for (const line of renderInstall(res)) out(line);
@@ -901,6 +913,28 @@ async function main(): Promise<number> {
         }
         throw e;
       }
+    }
+
+    case "publish-tests": {
+      const need = (flag: string): string => {
+        const value = flags[flag];
+        if (typeof value !== "string" || value.trim() === "") throw new Error(`publish-tests requires --${flag}`);
+        return value;
+      };
+      if (flags.yes === true && flags["dry-run"] === true) throw new Error("publish-tests takes --yes or --dry-run, not both");
+      const res = await opPublishTests({
+        ...(typeof flags["from-run"] === "string" ? { from_run: resolve(cwd, flags["from-run"]) } : {}),
+        ...(typeof flags["from-actions"] === "string" ? { from_actions: resolve(cwd, flags["from-actions"]) } : {}),
+        repo: need("repo"),
+        base: need("base"),
+        ...(typeof flags.merged === "string" ? { merged: flags.merged } : {}),
+        yes: flags.yes === true,
+        ...(typeof flags.out === "string" ? { out: resolve(cwd, flags.out) } : {}),
+        ...(typeof flags.summary === "string" ? { summary_path: resolve(cwd, flags.summary) } : {})
+      });
+      if (json) printJson(res);
+      else for (const line of renderPublishTests(res)) out(line);
+      return 0;
     }
 
     case "actions-run": {

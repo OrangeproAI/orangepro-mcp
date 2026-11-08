@@ -125,6 +125,8 @@ Every function gets exactly one evidence label. The four things to do above are 
 
 A proof that ran and did not catch the break turns the function into **Write**; a proof made before the code changed turns it back into **Prove**.
 
+After `opro export-tests`, a function can also show a **patch status**: **Verified test patch (not merged)** means a new test, in `orangepro-tests.patch`, catches a fault the existing tests missed. It is not an evidence tier. The row keeps its label and what to do until the merged test is proven.
+
 A successful `orangepro_prove` sets the oracle field `proven` to true and writes the ledger status `reproven`. That status is used the first time too. The report's Proven count is how many behaviors still match one of those certificates. The traceability row says Reproven (this run). That label does not mean the function was proved earlier.
 
 **What OrangePro doesn't count, so linked numbers are a floor, not a coverage percentage:**

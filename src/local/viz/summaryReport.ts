@@ -1,7 +1,7 @@
 import type { ReportModel } from "./reportModel.js";
 import { ARROW_SVG, BRAND_SVG, FEEDBACK_SCRIPT, RUN_COMMAND, VERB_COLOR, baseCss, breakable, dateTimeText, esc, feedbackPromptHtml, fmt, localTimeZone, type ReportTimeZone } from "./reportTheme.js";
 import { permalink } from "./shortReport.js";
-import { VERB_LABEL, VERB_MEANING, VERB_ORDER, type Verb, type WorkItem } from "./worklist.js";
+import { VERB_LABEL, VERB_MEANING, VERB_ORDER, type RowPatch, type Verb, type WorkItem } from "./worklist.js";
 
 /**
  * The one-page summary (R14 §6): what to do first, for an engineer or a VP.
@@ -109,9 +109,10 @@ export function renderSummaryReport(model: ReportModel): string {
     (item) => `<li class="item">
   <div class="rank mono">${item.rank}</div>
   <div class="body">
-    <div class="head"><span class="chip v-${item.verb}"><span class="dot"></span>${VERB_LABEL[item.verb]}</span>${codeLink(item)}${item.deletes ? ` <span class="tag">Deletes data</span>` : ""}</div>
+    <div class="head"><span class="chip v-${item.verb}"><span class="dot"></span>${VERB_LABEL[item.verb]}</span>${codeLink(item)}${item.deletes ? ` <span class="tag">Deletes data</span>` : ""}${item.patch ? ` <span class="tag patch">${esc(item.patch.label)}</span>` : ""}</div>
     <p class="file mono">${breakable(item.file)}${item.line ? `:${item.line}` : ""}</p>
     <p class="reason">${esc(item.reason)}</p>
+    ${item.patch ? `<p class="small">${esc(item.patch.text)} ${patchLinks(item.patch)}</p>` : ""}
     ${testsLine(item)}
     <p class="tiny">${fbLink(item.title)}</p>
   </div>
@@ -149,6 +150,7 @@ export function renderSummaryReport(model: ReportModel): string {
     <div><dt>Delete data</dt><dd>${fmt(c.deletePaths)}</dd><p>${esc(deleteScope(model))}</p></div>
     <div><dt>Proven</dt><dd>${fmt(c.proven)}</dd><p>a test fails when the code breaks</p></div>
   </dl>
+  ${patchesHtml(model)}
   <p class="tiny faint">Counts are a floor. Tests that only check mocks, and calls over HTTP from end-to-end tests, are not linked.</p>
 </section>
 ${bar}
@@ -173,6 +175,21 @@ ${feedbackPromptHtml(fb)}
 `;
 }
 
+/** Links for a row's patch status: the run's page, the patch, and the PR when one was read back. */
+export function patchLinks(p: RowPatch): string {
+  const links = [`<a href="${esc(p.page)}">proof page</a>`, `<a href="${esc(p.patch)}">orangepro-tests.patch</a>`];
+  if (p.pr && /^https:\/\/github\.com\/[^\s"<>]+\/pull\/\d+$/.test(p.pr.url)) links.push(`<a href="${esc(p.pr.url)}" target="_blank" rel="noopener noreferrer">PR #${p.pr.number}</a>`);
+  return links.join(" · ");
+}
+
+/** V3: the patch-status line beside the Proven count. A patch status is never counted as Proven. */
+function patchesHtml(model: ReportModel): string {
+  const pt = model.patches;
+  if (!pt) return "";
+  const items = pt.rows.map((r) => `<li><b>${esc(r.title)}</b>: ${esc(r.label)}. ${patchLinks(r)}</li>`).join("");
+  return `<div class="patches"><p class="small"><b>Test patches.</b> ${esc(pt.line)} A patch status is not an evidence tier: a function counts as Proven only when its merged test is proven.</p>${items ? `<ul class="small">${items}</ul>` : ""}</div>`;
+}
+
 const SUMMARY_CSS = `
 .wrap{max-width:960px;margin:0 auto;padding-left:24px;padding-right:24px}
 .topin{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding-top:12px;padding-bottom:12px}
@@ -188,6 +205,9 @@ h1{margin:0;font-size:32px;line-height:1.2;font-weight:700;max-width:820px}
 .stats dd{margin:2px 0 0;font-size:24px;font-weight:700;letter-spacing:-.02em}
 .stats .pct{font-size:14px;font-weight:600;color:var(--muted)}
 .stats p{margin:0;font-size:12.5px;color:var(--muted)}
+.patches{border-left:3px solid var(--line);padding:2px 0 2px 12px}
+.patches ul{margin:6px 0 0;padding-left:18px}
+.tag.patch{white-space:normal}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px}
 .card h2,.h2{margin:0;font-size:16px}
 .h2{font-size:22px}

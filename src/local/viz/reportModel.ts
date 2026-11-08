@@ -10,16 +10,17 @@ import { dateText, localTimeZone, type ReportTimeZone } from "./reportTheme.js";
 import type { ReportFeedback } from "../feedback.js";
 import type { BehaviorReportBuild, DynamicProofReportInput } from "./behaviorReportData.js";
 import type { RepoWeb } from "./shortReport.js";
-import { areaOf, buildWorklist, verbCounts, type Evidence, type GenerationContext, type Verb, type WorkItem } from "./worklist.js";
+import { areaOf, buildWorklist, verbCounts, type Evidence, type GenerationContext, type RowPatch, type Verb, type WorkItem } from "./worklist.js";
+import type { PatchState, ProofRunsView } from "../proofRuns.js";
 
 /**
  * Everything both reports and the CSV show, computed once and saved as
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 3;
+export const REPORT_DATA_VERSION = 4;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r14.2";
+export const REPORT_RENDERER_VERSION = "r15.0";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
@@ -92,6 +93,17 @@ export interface ReportModel {
   feedback?: ReportFeedback;
   /** AI-suggested flows when a model proposed them: paths to verify, never evidence. */
   aiFlows?: { proposed: number; accepted: number; flows: Array<{ title: string; confidence: number; steps: string[] }> };
+  /**
+   * V3: what finished proof runs say, per function. A patch status, never an evidence tier: the
+   * tier counts above stay on the five names. Present only when there is a proof run to show.
+   */
+  patches?: {
+    /** One sentence both reports show beside the Proven count, e.g. "1 verified test patch, not merged". */
+    line: string;
+    counts: Record<PatchState, number>;
+    rows: Array<RowPatch & { id: string; title: string }>;
+    ignored: Array<{ run_id: string; reason: string }>;
+  };
   links: { detailed: string; summary: string; csv: string };
 }
 
@@ -112,6 +124,8 @@ export interface ReportModelInput {
   generatedAt: string;
   /** Minutes east of UTC at `generatedAt`; read from this machine when absent. */
   timeZoneOffsetMinutes?: number;
+  /** V3: patch statuses from finished proof runs (`loadPatchStatuses`). */
+  patches?: ProofRunsView;
   links: ReportModel["links"];
 }
 
@@ -269,6 +283,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
   // Two test slots for each of the 20 highest-priority functions, the set test drafting targets.
   const slotRows = Math.min(20, ranked.length);
   const worklist = buildWorklist(graph, ledger, ranked, { provenIds: build.provenIds, provenTests, slotRows, churnWindowDays: days, generation });
+  const patches = patchSection(input.patches, worklist, graph);
 
   // Evidence for every mapped function, from the same RTM rows the old summary used.
   const evidence = emptyEvidence();
@@ -389,7 +404,9 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
         { k: "Proven", v: proven === 0 ? "None yet" : plural(proven, "function", "functions") },
         ...(dyn ? [{ k: "This run", v: dyn.attempted === 0 ? "No proof was attempted" : `${n(dyn.attempted)} attempted, ${n(dyn.proven)} proven` }] : []),
         ...(dyn && dyn.needsSetup.length ? [{ k: "Why", v: [...new Set(dyn.needsSetup.map((a) => a.reason ?? a.category ?? "setup"))].slice(0, 3).join("; ") }] : []),
-        { k: "Details", v: "opro doctor --proof lists every attempt" }
+        { k: "Details", v: "opro doctor --proof lists every attempt" },
+        ...(patches ? [{ k: "Test patches", v: `${patches.line}${patches.rows.length ? `\n${patches.rows.map((r) => `${r.title}: ${r.label}`).join("\n")}` : ""}` }] : []),
+        ...(patches && patches.ignored.length ? [{ k: "Not used", v: patches.ignored.map((x) => `${x.run_id}: ${x.reason}`).join("\n") }] : [])
       ],
       tests: slotRows === 0 ? [{ k: "Drafted", v: "None: no function is left to rank" }] : [
         { k: "Drafted", v: `${n(tests.drafted)} of ${n(slotRows * 2)} slots for the ${slotRows} highest-priority ${input.noun.plural}` },
@@ -430,9 +447,42 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
           }
         }
       : {}),
+    ...(patches ? { patches } : {}),
     links: input.links
   };
   return model;
+}
+
+const PATCH_WORDS: Record<PatchState, [string, string]> = {
+  verified_not_merged: ["verified test patch, not merged", "verified test patches, not merged"],
+  delivered: ["delivered as a draft PR, not merged", "delivered as draft PRs, not merged"],
+  adopted: ["adopted (merged)", "adopted (merged)"],
+  closed: ["draft PR closed without merging", "draft PRs closed without merging"],
+  verified_in_checkout: ["verified test patch in this checkout", "verified test patches in this checkout"],
+  verified_stale: ["verified test patch, stale", "verified test patches, stale"],
+  no_claim: ["proof run with no claim", "proof runs with no claim"]
+};
+
+/**
+ * Attach each function's patch status to its worklist row, and the one line both reports show.
+ * The row keeps its tier and verb (owner, 8 Nov): the status only adds what to review.
+ */
+function patchSection(view: ProofRunsView | undefined, worklist: WorkItem[], graph: LocalGraph): ReportModel["patches"] | undefined {
+  if (!view || (view.statuses.length === 0 && view.ignored.length === 0)) return undefined;
+  const counts = Object.fromEntries(Object.keys(PATCH_WORDS).map((k) => [k, 0])) as Record<PatchState, number>;
+  const byId = new Map(worklist.map((w) => [w.id, w]));
+  const titles = new Map(graph.nodes.map((node) => [node.external_id, node.title ?? node.external_id]));
+  const rows: NonNullable<ReportModel["patches"]>["rows"] = [];
+  for (const status of view.statuses) {
+    counts[status.state] += 1;
+    const patch: RowPatch = { state: status.state, label: status.label, text: status.text, run: status.run_id, page: status.page, patch: status.patch, ...(status.pr ? { pr: status.pr } : {}) };
+    const row = byId.get(status.symbol_id);
+    if (row) row.patch = patch;
+    rows.push({ ...patch, id: status.symbol_id, title: row?.title ?? titles.get(status.symbol_id) ?? status.symbol_id.replace(/^sym:[^#]*#/, "") });
+  }
+  const parts = (Object.keys(PATCH_WORDS) as PatchState[]).filter((k) => counts[k] > 0).map((k) => `${n(counts[k])} ${counts[k] === 1 ? PATCH_WORDS[k][0] : PATCH_WORDS[k][1]}`);
+  const line = parts.length ? `${parts.join("; ")}.` : "No proof run can be used.";
+  return { line: line.charAt(0).toUpperCase() + line.slice(1), counts, rows, ignored: view.ignored };
 }
 
 /** "1,022 test files: 69 call a counted function, 953 call none that OrangePro traced." */

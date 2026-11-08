@@ -251,6 +251,7 @@ details.code pre{margin-top:6px;max-height:320px;overflow:auto}
 .ebar{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--soft);min-width:40px}
 .ebar span{display:block;height:100%;min-width:3px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 14px}
+.ptag{display:inline-block;margin:4px 0 0 6px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--ink2);white-space:normal}
 .lg{display:inline-flex;align-items:center;gap:6px;font-size:12.5px}
 .lg .dot{width:10px;height:10px}
 .tfoot{margin:0;padding:10px 16px;font-size:12.5px;color:var(--muted)}
@@ -443,6 +444,7 @@ const DETAILED_JS = String.raw`
       [["priority", "Priority"], ["churn", "Changed lines"], ["callers", "Callers"]].map(function (o) { return '<option value="' + o[0] + '"' + (S.sort === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") +
       "</select></div></div>";
     h += '<p class="note">Priority = how likely a change breaks it &times; what a break would hurt &times; how hard a break is to notice. It orders the work; it is not a defect probability.</p>';
+    if (M.patches) h += '<p class="note"><b>Test patches.</b> ' + esc(M.patches.line) + " A patch status is not an evidence tier: a function counts as Proven only when its merged test is proven.</p>";
     h += '<div class="tbl"><div class="grid thead" aria-hidden="true"><span>#</span><span>Function</span><span>What to do</span><span>Tests</span><span>Priority</span></div>';
     if (!shown.length) h += '<p class="empty">No ' + esc(ONE) + " matches these filters.</p>";
     else {
@@ -452,7 +454,7 @@ const DETAILED_JS = String.raw`
         h += '<li><button type="button" class="row grid' + (r.id === S.sel ? " sel" : "") + '" data-id="' + esc(r.id) + '" aria-label="Show details for ' + esc(r.title) + '">' +
           '<span class="c-rank mono">' + (r.rank == null ? "&mdash;" : r.rank) + "</span>" +
           '<span class="c-fn"><span class="nm mono">' + brk(r.title) + '</span><span class="fl mono">' + brk(r.file) + "</span></span>" +
-          '<span class="c-do">' + chip(r.verb) + '<span class="rs">' + esc(listReason(r)) + "</span></span>" +
+          '<span class="c-do">' + chip(r.verb) + '<span class="rs">' + esc(listReason(r)) + "</span>" + (r.patch ? '<span class="ptag">' + esc(r.patch.label) + "</span>" : "") + "</span>" +
           '<span class="c-tests">' + testsCell(r) + "</span>" +
           '<span class="c-pri mono">' + (r.score == null ? "&mdash;" : esc(r.score) + '<span class="pbar"><span style="width:' + pct + '%"></span></span>') + "</span></button></li>";
       });
@@ -525,6 +527,11 @@ const DETAILED_JS = String.raw`
     if (r.readFirst) h += '<div class="box"><span class="tiny">Read before writing a new test</span>' + pathLink(r.readFirst, null) + "</div>";
     if (r.linkedTest) h += '<div class="box"><span class="tiny">Test that calls it</span>' + pathLink(r.linkedTest, null) + "</div>";
     h += "</section>";
+    if (r.patch) {
+      var pl = ['<a href="' + esc(r.patch.page) + '">Proof page</a>', '<a href="' + esc(r.patch.patch) + '">orangepro-tests.patch</a>'];
+      if (r.patch.pr && /^https:\/\/github\.com\/[^\s"<>]+\/pull\/\d+$/.test(r.patch.pr.url)) pl.push('<a href="' + esc(r.patch.pr.url) + '" target="_blank" rel="noopener noreferrer">PR #' + esc(r.patch.pr.number) + "</a>");
+      h += '<section><h3>Test patch</h3><div><span class="ptag">' + esc(r.patch.label) + '</span></div><p class="small">' + esc(r.patch.text) + '</p><p class="small">' + pl.join(" &middot; ") + '</p><p class="tiny">A patch status is not an evidence tier. This row keeps its evidence and what to do until the merged test is proven.</p></section>';
+    }
     if (r.facts && r.facts.length) h += '<section><h3>Why it ranks here</h3><ul class="facts">' + r.facts.map(function (f) { return "<li>" + esc(f) + "</li>"; }).join("") + "</ul></section>";
     if (r.verb !== "done") {
       h += "<section><h3>Tests</h3>";

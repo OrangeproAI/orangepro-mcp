@@ -111,6 +111,7 @@ import {
   type LedgerRecord,
   type LedgerStats
 } from "./ledger.js";
+import { loadPatchStatuses } from "./proofRuns.js";
 import { buildRtm, provenLedgerRecords, provenSymbolIds, renderRtmCsv, renderRtmMarkdown, type RtmFormat, type RtmResult } from "./rtm.js";
 import {
   buildProofDoctor,
@@ -3727,6 +3728,8 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
     previous: readReportModel(dataPath),
     ...(options.runReason ? { runReason: options.runReason } : {}),
     generatedAt: new Date().toISOString(),
+    // V3: finished proof runs give rows a patch status; the tiers above are untouched by it.
+    patches: loadPatchStatuses(join(workspaceDir, "proof-runs"), graph.workspace.root, dirname(htmlPath)),
     links: { detailed: basename(htmlPath), summary: basename(summaryPath), csv: relative(dirname(htmlPath), csvPath).split(sep).join("/") }
   });
   const written = writeReports(model, htmlPath, summaryPath, csvPath);
