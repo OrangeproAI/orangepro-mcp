@@ -322,7 +322,7 @@ Add `--json` to any read command for machine output. Run `opro help` for every f
 </details>
 
 <details>
-<summary><strong>MCP tools (18)</strong></summary>
+<summary><strong>MCP tools (19)</strong></summary>
 
 | Tool | What it does |
 |------|--------------|
@@ -344,6 +344,7 @@ Add `--json` to any read command for machine output. Run `opro help` for every f
 | `orangepro_update_graph` | Incremental graph update |
 | `orangepro_ai_links` | Weak behavior→code suggestions (optional AI, never evidence) |
 | `orangepro_ai_flows` | Candidate flows (optional AI, never evidence) |
+| `orangepro_install_github_action` | Preview, or with confirmation write, an opt-in post-merge workflow and its profile; never commits or pushes (tested locally) |
 </details>
 
 <details>

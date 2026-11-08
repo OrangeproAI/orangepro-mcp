@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { boundaryFailures, dockerExecutor, dockerRunArgs, resolveDocker, shapeEnvNames, WORK_OUT, WORK_REPO, type ContainerExecutor, type ContainerRequest } from "../../../src/local/boundary.js";
+import { boundaryFailures, containerUser, dockerExecutor, dockerRunArgs, resolveDocker, shapeEnvNames, WORK_OUT, WORK_REPO, type ContainerExecutor, type ContainerRequest } from "../../../src/local/boundary.js";
 import { opChangedTargets } from "../../../src/local/changedTargets.js";
 import { canonicalJson, recordBytes, recordSha256, verifyRunFolder, writeRunManifest } from "../../../src/local/contracts/io.js";
 import { checkOracle, type Oracle } from "../../../src/local/contracts/oracle.js";
@@ -125,9 +125,9 @@ export interface Workspace {
 }
 
 /** A checkout at the merged commit, analyzed, with Mocha "installed" and a real record for api.seconds. */
-export function workspace(tests: Record<string, string> = { "test/api.test.js": PASSING_TESTS }, opts: { witness?: string; mochaArgs?: string[]; baselinePassing?: number } = {}): Workspace {
+export function workspace(tests: Record<string, string> = { "test/api.test.js": PASSING_TESTS }, opts: { witness?: string; mochaArgs?: string[]; baselinePassing?: number; gitignore?: string } = {}): Workspace {
   const repo = tempDir("ws");
-  writeFiles(repo, { "package.json": JSON.stringify({ name: "seconds-lib", version: "1.0.0" }, null, 2), ".gitignore": "node_modules\n", "lib/api.js": API_BEFORE, ...tests });
+  writeFiles(repo, { "package.json": JSON.stringify({ name: "seconds-lib", version: "1.0.0" }, null, 2), ".gitignore": opts.gitignore ?? "node_modules\n", "lib/api.js": API_BEFORE, ...tests });
   git(repo, "init", "-q");
   const base = commitAll(repo, "before");
   writeFileSync(path.join(repo, "lib/api.js"), API_AFTER);
@@ -172,17 +172,18 @@ export function workspace(tests: Record<string, string> = { "test/api.test.js": 
 
 export function passingProbe(request: ContainerRequest): Record<string, unknown> {
   return {
-    uid: 1000,
+    // The uid the boundary runs as on this host: 1000, or the host's own on Linux.
+    uid: Number(containerUser().split(":")[0]),
     effective_capabilities: "0000000000000000",
     no_new_privileges: "1",
-    env_names: [...shapeEnvNames(request.env), "PATH"],
+    env_names: [...shapeEnvNames(request.env, request.network), "PATH"],
     host_users_dir_visible: false,
     docker_socket_visible: false,
     root_writable: false,
     tmp_writable: true,
     writable: Object.fromEntries(request.mounts.map((mount) => [mount.target, !mount.readonly])),
     host_backed_mounts: request.mounts.map((mount) => mount.target).sort(),
-    network_reachable: false
+    network_reachable: request.network === "bridge"
   };
 }
 

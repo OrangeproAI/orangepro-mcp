@@ -74,6 +74,8 @@ import { runGenerateJob } from "./jobs/runner.js";
 import type { GenerateOptions } from "./types.js";
 import { ORANGEPRO_VERSION } from "./version.js";
 import { buildLabel, checkBuild } from "./buildInfo.js";
+import { opActionsRun, renderActionsRun } from "./actionsRun.js";
+import { InstallError, opInstallGithubAction, renderInstall } from "./actionsInstall.js";
 import { loadRiskConfig } from "./score/riskConfig.js";
 import { feedbackPrefsPath, feedbackUrl, invitationCooldownDays, readFeedbackPrefs, setInvitations } from "./feedback.js";
 
@@ -165,6 +167,14 @@ Usage:
   opro export-tests --from-run <verify-test run folder> [--source <checkout>] [--json]
     # from a verified_gap run: orangepro-tests.patch (test-only), diagnostic-fault.patch, a fresh replay inside the container
     # (the whole suite, with the patch, with the patch on the same fault, restored), verification-receipt.json (rows A-H) and summary.html
+  opro install-github-action [path] --profile-from <folder> [--base <branch>] [--opro-version <x.y.z> --build <sha256>] [--dry-run | --yes] [--json]
+  opro install-github-action [path] --uninstall [--yes] [--json]
+    # preview by default (writes nothing): a post-merge workflow (.github/workflows/orangepro-proof.yml, contents: read, pinned actions)
+    # and .orangepro/actions/ (the profile and its inputs); --yes writes them, never commits or pushes; a file you changed is a conflict, never overwritten
+  opro actions-run --event-name push|workflow_dispatch --event <event.json> --profile <profile.json> --repo <checkout> --out <new folder> [--summary <file>] [--json]
+    # the workflow's step: reads the event, stops when the change is not the profile's target, else installs inside the container and runs
+    # changed-targets → probe-fault → test-brief → verify-test (the profile's test, replayed) → export-tests under one time limit;
+    # writes result.json, summary.md and the run folders to --out; exit 0 for every result except an internal error
   opro score [--json]
   opro gaps [--limit 10] [--min-priority medium] [--json]
     # also returns top_risk_gaps: unproven code symbols ranked by OrangePro Risk Score (P × I × D)
@@ -285,7 +295,7 @@ async function main(): Promise<number> {
 
   // Preload configured tree-sitter grammars before analysis so the sync analyzer
   // can extract via AST. Idempotent; only the analysis commands pay for it.
-  if (command === "start" || command === "roast" || command === "analyze" || command === "update" || command === "generate" || command === "record" || command === "prove" || command === "prove-loop") {
+  if (command === "start" || command === "roast" || command === "analyze" || command === "update" || command === "generate" || command === "record" || command === "prove" || command === "prove-loop" || command === "actions-run") {
     await preloadTreeSitter(treeSitterLanguages());
   }
 
@@ -825,6 +835,53 @@ async function main(): Promise<number> {
         }
         throw e;
       }
+    }
+
+    case "install-github-action": {
+      if (flags.yes && flags["dry-run"]) throw new Error("install-github-action takes --yes or --dry-run, not both");
+      const text = (flag: string): string | undefined => (typeof flags[flag] === "string" ? (flags[flag] as string) : undefined);
+      try {
+        const res = opInstallGithubAction({
+          repo: resolve(cwd, positionals[0] ?? "."),
+          profile_from: text("profile-from") ? resolve(cwd, text("profile-from")!) : undefined,
+          base: text("base"),
+          version: text("opro-version"),
+          build_sha256: text("build"),
+          apply: asBool(flags.yes, false),
+          uninstall: asBool(flags.uninstall, false)
+        });
+        if (json) printJson(res);
+        else for (const line of renderInstall(res)) out(line);
+        return res.status === "conflict" ? 1 : 0;
+      } catch (e) {
+        if (json && e instanceof InstallError) {
+          printJson({ error: e.message, refusal: "install_invalid" });
+          return 1;
+        }
+        throw e;
+      }
+    }
+
+    case "actions-run": {
+      const need = (flag: string): string => {
+        const value = flags[flag];
+        if (typeof value !== "string" || value.trim() === "") throw new Error(`actions-run requires --${flag}`);
+        return value;
+      };
+      const res = opActionsRun(
+        {
+          event_name: need("event-name"),
+          event_path: resolve(cwd, need("event")),
+          profile_path: resolve(cwd, need("profile")),
+          repo: resolve(cwd, need("repo")),
+          out: resolve(cwd, need("out")),
+          summary_path: typeof flags.summary === "string" ? resolve(cwd, flags.summary) : undefined
+        },
+        { clock: systemClock }
+      );
+      if (json) printJson(res);
+      else for (const line of renderActionsRun(res)) out(line);
+      return res.status === "error" ? 1 : 0;
     }
 
     case "test-brief":
