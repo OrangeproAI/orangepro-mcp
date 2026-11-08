@@ -664,6 +664,8 @@ async function reportModelOf(
     noun: NOUN,
     proofs: [],
     generatedAt: "2026-10-09T03:00:00.000Z",
+    // UTC unless a test sets a zone, so the expected text never depends on the machine.
+    timeZoneOffsetMinutes: 0,
     links: LINKS,
     ...extra
   });
@@ -737,13 +739,17 @@ describe("both reports read one report model", () => {
     const { checkedText } = await import("../../src/local/viz/summaryReport.js");
     const first = await reportModelOf(withDelete(graph()));
     expect(first.since.kind).toBe("first");
-    const second = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { previous: first, runReason: "code_changed" });
-    expect(second.since.text).toBe(`Since the report of 2026-10-09 (your code changed): no change in the top ${second.slotRows} or in what is proven.`);
+    const second = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { previous: first, runReason: "code_changed", generatedAt: "2026-10-10T03:00:00.000Z" });
+    expect(second.since.text).toBe(`Since the report of 9 Oct 2026 (your code changed): no change in the top ${second.slotRows} or in what is proven.`);
     const moved = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { previous: { ...first, worklist: [] }, runReason: "analysis_changed" });
     expect(moved.since.kind).toBe("analysis_changed");
     expect(moved.since.text).toContain("Your code did not change; OrangePro's analysis did");
-    expect(checkedText("2026-10-09T03:00:00.000Z", "2026-10-10T08:15:00.000Z", false, "0.2.58")).toBe(
-      "Checked again 10 Oct 2026, 08:15 UTC. Nothing changed since this report was made on 9 Oct 2026, 03:00 UTC."
+    expect(checkedText("2026-10-09T03:00:00.000Z", "2026-10-10T08:15:00.000Z", false, "0.2.58", { checked: { offsetMinutes: 0, label: "UTC" } })).toBe(
+      "Checked again 10 Oct 2026, 08:15 local time (UTC). Nothing changed since this report was made on 9 Oct 2026, 03:00 UTC."
+    );
+    const pacific = { offsetMinutes: -480, label: "UTC\u221208:00" };
+    expect(checkedText("2026-11-04T05:31:00.000Z", "2026-11-04T05:50:00.000Z", false, "0.2.58", { previous: pacific, checked: pacific })).toBe(
+      "Checked again 3 Nov 2026, 21:50 local time (UTC\u221208:00). Nothing changed since this report was made on 3 Nov 2026, 21:31 local time (UTC\u221208:00)."
     );
   });
 
@@ -864,5 +870,164 @@ describe("report keeps proven delete paths in its count", () => {
     const { buildBehaviorReportDataWithGaps } = await import("../../src/local/viz/behaviorReportData.js");
     const build = buildBehaviorReportDataWithGaps(graph(), EMPTY_LEDGER, { repoRoot: NO_GIT });
     expect(build.provenDeleteGaps).toEqual([]);
+  });
+});
+
+describe("report fixes: every count names what it counts and the numbers reconcile", () => {
+  const render = async (model: import("../../src/local/viz/reportModel.js").ReportModel) => {
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const { renderDetailedReport } = await import("../../src/local/viz/detailedReport.js");
+    return { summary: renderSummaryReport(model), detailed: renderDetailedReport({ model, csv: "" }) };
+  };
+
+  it("item 1: the delete card names its population and the sidebar shows the worklist's share of it", async () => {
+    const model = await reportModelOf(withDelete(graph()));
+    const { summary, detailed } = await render(model);
+    expect(summary).toContain(`<dt>Delete data</dt><dd>${model.counts.deletePaths}</dd><p>functions whose code reaches a delete: all ranked and proven ones, not only the top ${model.worklist.length}</p>`);
+    // The sidebar's figure is computed in the page from the rows and the saved total.
+    expect(detailed).toContain('var count = l[0] === "deletes" ? fmt(n) + " of " + fmt(M.counts.deletePaths) : fmt(n);');
+    expect(detailed).toContain("Counts are for the rows in this worklist.");
+    const inWorklist = model.worklist.filter((w) => w.deletes).length;
+    expect(inWorklist).toBeLessThanOrEqual(model.counts.deletePaths);
+    expect(model.counts.deletePaths).toBe(1);
+  });
+
+  it("item 2: Left out is split by recorded reason and the subtraction is shown and adds up", async () => {
+    const { leftOutParts } = await import("../../src/local/viz/reportModel.js");
+    const { GENERATED_CODE_REASON, NON_PRODUCT_REASON } = await import("../../src/local/analyze/classify.js");
+    const { BOILERPLATE_REASON } = await import("../../src/local/analyze/boilerplate.js");
+    const g = graph();
+    const off = (id: string, extra: Record<string, unknown>) => {
+      const node = codeSymbol(`sym:src/x.ts#${id}`, id, "src/x.ts");
+      node.denominator_eligible = false;
+      Object.assign(node, extra);
+      return node;
+    };
+    g.nodes = [
+      ...g.nodes,
+      off("gen", { denominator_reason: GENERATED_CODE_REASON }),
+      off("ci", { denominator_reason: NON_PRODUCT_REASON }),
+      off("get", { denominator_reason: BOILERPLATE_REASON }),
+      Object.assign(off("far", {}), { properties: { file: "src/x.ts", denominator_reason_code: "not_entry_point_adjacent" } }),
+      Object.assign(off("util", {}), { properties: { file: "src/x.ts", denominator_reason_code: "infra_behavior_surface" } }),
+      makeNode({
+        kind: "Requirement",
+        external_id: "req:docs/orders.md#1",
+        title: "Orders are created once",
+        properties: {},
+        evidence_strength: "hard",
+        review_status: "auto_detected",
+        confidence: 1,
+        provenance,
+        behavior_source: "markdown_requirement",
+        denominator_eligible: true
+      })
+    ];
+    const parts = leftOutParts(g);
+    // The fixture's framework-derived symbol has no recorded reason: it stays in the remainder.
+    expect(parts).toMatchObject({ generated: 1, ciAndTest: 1, trivial: 1, notEntryPoint: 1, infraSurface: 1, other: 1 });
+    expect(parts.found - parts.counted).toBe(parts.generated + parts.ciAndTest + parts.trivial + parts.notEntryPoint + parts.infraSurface + parts.other);
+    const model = await reportModelOf(g);
+    const row = (k: string) => model.run.counted.find((r) => r.k === k)?.v;
+    expect(row("Left out")).toBe("1 generated, 1 not near an API, route, command or job, 1 utility, model and tooling code, 1 type, constant or other declaration, 1 trivial accessors, 1 CI and test helpers");
+    expect(model.counts.mapped).toBe(parts.counted + 1);
+    expect(row("Arithmetic")).toBe(`${parts.found} found − 6 left out = ${parts.counted} functions, plus 1 requirement from Markdown docs = ${model.counts.mapped} counted.`);
+    expect(row("Found")).toBe(`${parts.found} functions, types and constants`);
+  });
+
+  it("item 2: the worklist heading and the Everything count agree when some rows are done", async () => {
+    const model = await reportModelOf(graph(), EMPTY_LEDGER, {
+      proofs: [{ id: "sym:index.js#run", title: "run", file: "index.js", test: "index.test.js" }]
+    });
+    const { detailed } = await render(model);
+    expect(detailed).toContain('(M.proofs.length ? ", plus the " + fmt(M.proofs.length) + " already done" : "")');
+    expect(detailed).not.toContain('", and " + fmt(M.proofs.length) + " done"');
+    // "Everything" counts every row: the worklist plus the done rows the heading names.
+    expect(detailed).toContain('var n = l[0] === "all" ? rows.length');
+  });
+
+  it("item 3: the summary's verb counts say they are of the top rows, and the sidebar names its rows", async () => {
+    const model = await reportModelOf(withDelete(graph()));
+    const { summary, detailed } = await render(model);
+    for (const v of ["prove", "check", "write"] as const) {
+      expect(summary).toContain(`<b>${model.top[v]}</b> <span class="of">of the ${model.slotRows}</span>`);
+    }
+    expect(model.top.done + model.top.prove + model.top.check + model.top.write).toBe(model.slotRows);
+    expect(detailed).toContain('"In this worklist: the top " + fmt(M.worklist.length) + (M.proofs.length ? " and " + fmt(M.proofs.length) + " done" : "") + "."');
+  });
+
+  it("item 4: dates are the run's local time, saved with the data, whatever zone renders them", async () => {
+    const { dateText, dateTimeText, localTimeZone, timeZoneLabel } = await import("../../src/local/viz/reportTheme.js");
+    const pacific = localTimeZone("2026-11-04T05:31:00.000Z", -480);
+    expect(pacific).toEqual({ offsetMinutes: -480, label: "UTC−08:00" });
+    expect(dateText("2026-11-04T05:31:00.000Z", pacific)).toBe("3 Nov 2026");
+    expect(dateTimeText("2026-11-04T05:31:00.000Z", pacific)).toBe("3 Nov 2026, 21:31 local time (UTC−08:00)");
+    expect(dateText("2026-11-04T05:31:00.000Z", localTimeZone("x", 0))).toBe("4 Nov 2026");
+    expect(dateTimeText("2026-11-04T05:31:00.000Z")).toBe("4 Nov 2026, 05:31 UTC");
+    expect(timeZoneLabel(330)).toBe("UTC+05:30");
+    const model = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { generatedAt: "2026-11-04T05:31:00.000Z", timeZoneOffsetMinutes: -480 });
+    expect(model.timeZone).toEqual(pacific);
+    const { summary } = await render(model);
+    expect(summary).toContain("analysed 3 Nov 2026, 21:31 local time (UTC−08:00)");
+    // Rendering reads only the data: another zone on the rendering machine gives the same bytes.
+    const before = process.env.TZ;
+    try {
+      process.env.TZ = "Asia/Tokyo";
+      expect((await render(JSON.parse(JSON.stringify(model)))).summary).toBe(summary);
+      process.env.TZ = "UTC";
+      expect((await render(JSON.parse(JSON.stringify(model)))).summary).toBe(summary);
+    } finally {
+      if (before === undefined) delete process.env.TZ;
+      else process.env.TZ = before;
+    }
+  });
+
+  it("item 5: a report under an hour old is the same session's run, not a baseline", async () => {
+    const { sinceLine } = await import("../../src/local/viz/reportModel.js");
+    const previous = await reportModelOf(withDelete(graph()), EMPTY_LEDGER, { generatedAt: "2026-11-04T05:31:00.000Z", timeZoneOffsetMinutes: -480 });
+    const at = (iso: string) => sinceLine(previous, { ...previous, generatedAt: iso }, "code_changed").text;
+    const tail = ` (your code changed): no change in the top ${previous.slotRows} or in what is proven.`;
+    expect(at("2026-11-04T05:41:00.000Z")).toBe(`Since the run 10 minutes ago${tail}`);
+    expect(at("2026-11-04T05:32:00.000Z")).toBe(`Since the run 1 minute ago${tail}`);
+    expect(at("2026-11-04T05:31:20.000Z")).toBe(`Since the run less than a minute ago${tail}`);
+    expect(at("2026-11-04T06:30:00.000Z")).toBe(`Since the run 59 minutes ago${tail}`);
+    expect(at("2026-11-04T06:32:00.000Z")).toBe(`Since the report of 3 Nov 2026${tail}`);
+    // A clock that went backwards is not a recent run.
+    expect(at("2026-11-04T05:00:00.000Z")).toBe(`Since the report of 3 Nov 2026${tail}`);
+  });
+
+  it("item 12: test files that call a counted function, and those that call none, add up and agree everywhere", async () => {
+    const { testFileLinks, testsInput } = await import("../../src/local/viz/reportModel.js");
+    const g = graph();
+    const helperOnly = makeNode({
+      kind: "TestCase",
+      external_id: "test:src/helper.spec.ts",
+      title: "helper.spec.ts",
+      properties: { file: "src/helper.spec.ts" },
+      evidence_strength: "hard",
+      review_status: "auto_detected",
+      confidence: 1,
+      provenance,
+      denominator_eligible: false
+    });
+    const nameOnly = { ...helperOnly, external_id: "test:src/orders.service.spec.ts", title: "orders.service.spec.ts", properties: { file: "src/orders.service.spec.ts" } };
+    g.nodes = [...g.nodes, helperOnly, nameOnly];
+    // A traced call to a function that is not counted, and a name match: neither is a link to a counted function.
+    g.edges = [
+      ...g.edges,
+      { ...g.edges.find((e) => e.relationship_type === "COVERS")!, from_external_id: "test:src/helper.spec.ts", to_external_id: "sym:generated#OrderModuleService.createOrders" }
+    ];
+    g.candidate_edges = [...g.candidate_edges, { ...g.candidate_edges[0]!, from_external_id: "sym:src/orders.service.ts#OrdersService.create", to_external_id: "test:src/orders.service.spec.ts" }];
+    const links = testFileLinks(g);
+    expect(links).toEqual({ testFiles: 3, linked: 1, unlinked: 2 });
+    const model = await reportModelOf(g);
+    expect(model.counts.testFiles).toBe(links.testFiles);
+    expect(model.counts.testFilesLinked + model.counts.testFilesUnlinked).toBe(model.counts.testFiles);
+    expect(model.counts).toMatchObject({ testFilesLinked: 1, testFilesUnlinked: 2 });
+    expect(model.run.inputs.find((r) => r.k === "Tests")?.v).toBe("3 test files: 1 calls a counted function, 2 call none that OrangePro traced");
+    expect(testsInput(1022, { linked: 69, unlinked: 953 })).toBe("1,022 test files: 69 call a counted function, 953 call none that OrangePro traced");
+    expect(testsInput(0, { linked: 0, unlinked: 0 })).toBe("0 test files");
+    const { detailed } = await render(model);
+    expect(detailed).toContain("3 test files: 1 calls a counted function, 2 call none that OrangePro traced");
   });
 });

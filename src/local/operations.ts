@@ -84,7 +84,7 @@ import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
 import { buildBehaviorReportDataWithGaps, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { denominatorNoun, proofTestLocation, repoWebFromRemote, shortReportPath, type RepoWeb } from "./viz/shortReport.js";
-import { buildReportModel, isReportModel, REPORT_DATA_FILE, REPORT_DATA_VERSION, REPORT_RENDERER_VERSION, worklistRanking, type ProofRow, type ReportModel } from "./viz/reportModel.js";
+import { buildReportModel, isReportModel, testFileLinks, REPORT_DATA_FILE, REPORT_DATA_VERSION, REPORT_RENDERER_VERSION, worklistRanking, type ProofRow, type ReportModel } from "./viz/reportModel.js";
 import { checkedText, renderSummaryReport } from "./viz/summaryReport.js";
 import { renderDetailedReport } from "./viz/detailedReport.js";
 import { testsCsv, TESTS_CSV_FILE } from "./viz/testsExport.js";
@@ -155,6 +155,8 @@ export interface AnalyzeSummary {
   runtime_coverage_prepare?: RuntimeCoveragePrepareResult;
   /** Weak AI-suggested candidate links in the current graph; separate from coverage/proof. */
   ai_linked: AiLinkedSummary;
+  /** opro start only: test files that call at least one counted function (a traced link), and those that call none. */
+  test_links?: { test_files: number; linked: number; none: number };
   warnings: string[];
 }
 
@@ -3074,7 +3076,8 @@ export async function opStart(
     ...analyze,
     analysis: finalGraph.analysis ?? analyze.analysis,
     candidate_relationships_count: finalGraph.candidate_edges.length,
-    ai_linked: aiLinked
+    ai_linked: aiLinked,
+    test_links: testLinksSummary(finalGraph)
   };
   reportProgress("artifacts: selecting gap targets", { current: 8, total: 8 });
   const gaps = opGaps(root, { limit: 10 });
@@ -3699,6 +3702,12 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
   };
 }
 
+/** How many test files call at least one counted function, and how many call none (start result). */
+function testLinksSummary(graph: LocalGraph): { test_files: number; linked: number; none: number } {
+  const links = testFileLinks(graph);
+  return { test_files: links.testFiles, linked: links.linked, none: links.unlinked };
+}
+
 /** Both reports and the CSV from one model. Only the detailed report may fail the call. */
 function writeReports(model: ReportModel, htmlPath: string, summaryPath: string, csvPath: string): { summary: boolean; csv: boolean } {
   const csv = testsCsv(model.worklist, { repository: model.repo.name, commit: model.repo.commit, toolVersion: model.tool, generatedAt: model.generatedAt });
@@ -3740,7 +3749,7 @@ export function rerenderSavedReports(
   const dataPath = join(workspaceDir, REPORT_DATA_FILE);
   const saved = readReportModel(dataPath);
   if (!saved) return null;
-  const model: ReportModel = { ...saved, checked: { at: checked.at, text: checkedText(checked.previousGeneratedAt, checked.at, checked.rerendered, ORANGEPRO_VERSION) } };
+  const model: ReportModel = { ...saved, checked: { at: checked.at, text: checkedText(checked.previousGeneratedAt, checked.at, checked.rerendered, ORANGEPRO_VERSION, { previous: saved.timeZone }) } };
   const htmlPath = resolve(root, outputPath);
   const summaryPath = shortReportPath(htmlPath);
   const csvPath = join(workspaceDir, TESTS_CSV_FILE);

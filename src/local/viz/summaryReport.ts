@@ -1,5 +1,5 @@
 import type { ReportModel } from "./reportModel.js";
-import { ARROW_SVG, BRAND_SVG, FEEDBACK_SCRIPT, RUN_COMMAND, VERB_COLOR, baseCss, breakable, dateText, dateTimeText, esc, feedbackPromptHtml, fmt } from "./reportTheme.js";
+import { ARROW_SVG, BRAND_SVG, FEEDBACK_SCRIPT, RUN_COMMAND, VERB_COLOR, baseCss, breakable, dateTimeText, esc, feedbackPromptHtml, fmt, localTimeZone, type ReportTimeZone } from "./reportTheme.js";
 import { permalink } from "./shortReport.js";
 import { VERB_LABEL, VERB_MEANING, VERB_ORDER, type Verb, type WorkItem } from "./worklist.js";
 
@@ -26,8 +26,19 @@ export function sinceHtml(model: ReportModel): string {
   return `<p class="since${model.since.kind === "unchanged" ? " same" : ""}">${esc(model.since.text)}</p>${note}`;
 }
 
-export function checkedText(previousGeneratedAt: string, checkedAt: string, rerendered: boolean, tool: string): string {
-  const base = `Checked again ${dateTimeText(checkedAt)}. Nothing changed since this report was made on ${dateTimeText(previousGeneratedAt)}.`;
+/**
+ * The "checked again" line of a reuse run. Each time is shown in the zone it happened
+ * in: the check's own (read when the check runs) and the report's saved one.
+ */
+export function checkedText(
+  previousGeneratedAt: string,
+  checkedAt: string,
+  rerendered: boolean,
+  tool: string,
+  zones: { previous?: ReportTimeZone; checked?: ReportTimeZone } = {}
+): string {
+  const checkedZone = zones.checked ?? localTimeZone(checkedAt);
+  const base = `Checked again ${dateTimeText(checkedAt, checkedZone)}. Nothing changed since this report was made on ${dateTimeText(previousGeneratedAt, zones.previous)}.`;
   return rerendered ? `${base} Findings unchanged; shown with OrangePro ${tool}.` : base;
 }
 
@@ -43,6 +54,12 @@ function headline(model: ReportModel): string {
   const parts = VERB_ORDER.filter((v) => model.top[v] > 0).map((v) => VERB_PHRASE[v](model.top[v]));
   const subject = n === 1 ? `this ${model.noun.singular}` : `these ${fmt(n)} ${model.noun.plural}`;
   return `Start with ${subject}: ${parts.join(", ")}.`;
+}
+
+/** What the delete count is counted over: every ranked or proven function, not only the worklist. */
+export function deleteScope(model: Pick<ReportModel, "noun" | "worklist">): string {
+  const shown = model.worklist.length;
+  return `${model.noun.plural} whose code reaches a delete: all ranked and proven ones${shown > 0 ? `, not only the top ${fmt(shown)}` : ""}`;
 }
 
 function testsLine(item: WorkItem): string {
@@ -84,7 +101,7 @@ export function renderSummaryReport(model: ReportModel): string {
       .map((v) => `<span style="width:${((model.top[v] / n) * 100).toFixed(2)}%;background:${VERB_COLOR[v].fill}"></span>`)
       .join("")}</div>
   <div class="legend">${VERB_ORDER.filter((v) => v !== "done" || model.top.done > 0)
-      .map((v) => `<div><span class="chip v-${v}"><span class="dot"></span>${VERB_LABEL[v]}</span> <b>${fmt(model.top[v])}</b><p>${esc(VERB_MEANING[v])}</p></div>`)
+      .map((v) => `<div><span class="chip v-${v}"><span class="dot"></span>${VERB_LABEL[v]}</span> <b>${fmt(model.top[v])}</b> <span class="of">of the ${fmt(n)}</span><p>${esc(VERB_MEANING[v])}</p></div>`)
       .join("")}</div>
 </section>`;
 
@@ -122,14 +139,14 @@ export function renderSummaryReport(model: ReportModel): string {
 </div></header>
 <main class="wrap main">
 <section class="hero" aria-labelledby="h">
-  <p class="meta">${repoLabel}${short ? ` · commit ${web ? `<a class="mono" href="${esc(`${web.base}/${web.host === "gitlab" ? "-/" : ""}commit/${commit}`)}" target="_blank" rel="noopener noreferrer">${esc(short)}</a>` : `<span class="mono">${esc(short)}</span>`}` : ""} · analysed ${esc(dateText(model.generatedAt))} · OrangePro ${esc(model.tool)} · no AI model used for scoring</p>
+  <p class="meta">${repoLabel}${short ? ` · commit ${web ? `<a class="mono" href="${esc(`${web.base}/${web.host === "gitlab" ? "-/" : ""}commit/${commit}`)}" target="_blank" rel="noopener noreferrer">${esc(short)}</a>` : `<span class="mono">${esc(short)}</span>`}` : ""} · analysed ${esc(dateTimeText(model.generatedAt, model.timeZone))} · OrangePro ${esc(model.tool)} · no AI model used for scoring</p>
   <h1 id="h">${esc(headline(model))}</h1>
   <p class="lede">${esc(doneLine)}</p>
   ${sinceHtml(model)}
   <dl class="stats">
     <div><dt>${esc(model.noun.title)}</dt><dd>${fmt(c.mapped)}</dd><p>against ${fmt(c.testFiles)} test files</p></div>
     <div><dt>With test evidence</dt><dd>${fmt(c.withEvidence)} <span class="pct">${pct}%</span></dd><p>proven, run under tests, or linked</p></div>
-    <div><dt>Delete data</dt><dd>${fmt(c.deletePaths)}</dd><p>code paths reach a delete</p></div>
+    <div><dt>Delete data</dt><dd>${fmt(c.deletePaths)}</dd><p>${esc(deleteScope(model))}</p></div>
     <div><dt>Proven</dt><dd>${fmt(c.proven)}</dd><p>a test fails when the code breaks</p></div>
   </dl>
   <p class="tiny faint">Counts are a floor. Tests that only check mocks, and calls over HTTP from end-to-end tests, are not linked.</p>
@@ -179,6 +196,7 @@ h1{margin:0;font-size:32px;line-height:1.2;font-weight:700;max-width:820px}
 .bar span{display:block;height:100%;min-width:4px}
 .legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px 18px}
 .legend b{font-size:18px;margin-left:4px}
+.legend .of{font-size:13px;color:var(--muted)}
 .legend p{margin:4px 0 0;font-size:13px;color:var(--muted)}
 .items{list-style:none;margin:14px 0 0;padding:0;display:flex;flex-direction:column;gap:10px}
 .item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:flex;gap:14px}

@@ -398,16 +398,23 @@ const DETAILED_JS = String.raw`
     return out.join(", ");
   }
 
+  // Which rows the verb and lens counts are over: the worklist, plus any done rows.
+  function scopeLine() {
+    return "In this worklist: the top " + fmt(M.worklist.length) + (M.proofs.length ? " and " + fmt(M.proofs.length) + " done" : "") + ".";
+  }
   function renderFilters() {
-    var h = '<section><h2>What to do</h2>';
+    var h = '<section><h2>What to do</h2><p class="fm scope">' + esc(scopeLine()) + "</p>";
     L.order.forEach(function (v) {
       h += '<button type="button" class="fbtn" data-verb="' + v + '" aria-pressed="' + (S.verbs[v] ? "true" : "false") + '" title="' + esc(L.meaning[v]) + '"><span class="dot v-' + v + '"></span><span class="fl">' + esc(L.verb[v]) + '</span><span class="fc mono">' + fmt(verbCount[v]) + "</span></button>";
       h += '<p class="fm">' + esc(L.meaning[v]) + "</p>";
     });
-    h += "</section><section><h2>Why it matters</h2>";
+    h += '</section><section><h2>Why it matters</h2><p class="fm scope">Counts are for the rows in this worklist.</p>';
     LENSES.forEach(function (l) {
       var n = l[0] === "all" ? rows.length : rows.filter(function (r) { return lensMatch(r, l[0]); }).length;
-      h += '<button type="button" class="lbtn" data-lens="' + l[0] + '" aria-pressed="' + (S.lens === l[0] ? "true" : "false") + '"><span>' + esc(l[1]) + '</span><span class="fc mono">' + fmt(n) + "</span></button>";
+      // The whole-ranking delete count sits beside the worklist's, so the summary's figure reconciles.
+      var count = l[0] === "deletes" ? fmt(n) + " of " + fmt(M.counts.deletePaths) : fmt(n);
+      var tip = l[0] === "deletes" ? ' title="' + esc(fmt(n) + " in this worklist; " + fmt(M.counts.deletePaths) + " across every ranked or proven " + ONE) + '"' : "";
+      h += '<button type="button" class="lbtn" data-lens="' + l[0] + '" aria-pressed="' + (S.lens === l[0] ? "true" : "false") + '"' + tip + '><span>' + esc(l[1]) + '</span><span class="fc mono">' + count + "</span></button>";
     });
     h += '</section><section><h2><label for="area">Area</label></h2><select id="area"><option value="">All areas</option>';
     areaList.forEach(function (a) { h += '<option value="' + esc(a) + '"' + (S.area === a ? " selected" : "") + ">" + esc(a) + " (" + fmt(areaCount[a]) + ")</option>"; });
@@ -425,7 +432,7 @@ const DETAILED_JS = String.raw`
     var line = anyFilter()
       ? fmt(list.length) + (list.length === 1 ? " matches" : " match") + " these filters"
       : (M.worklist.length
-          ? "The " + fmt(M.worklist.length) + " highest-priority of " + fmt(M.counts.ranked) + " ranked " + NOUN + (M.proofs.length ? ", and " + fmt(M.proofs.length) + " done" : "")
+          ? "The " + fmt(M.worklist.length) + " highest-priority of " + fmt(M.counts.ranked) + " ranked " + NOUN + (M.proofs.length ? ", plus the " + fmt(M.proofs.length) + " already done" : "")
           : (M.proofs.length
               ? "Nothing left to rank. " + fmt(M.proofs.length) + (M.proofs.length === 1 ? " " + ONE + " is done." : " " + NOUN + " are done.")
               : "No ranked " + NOUN + "."));

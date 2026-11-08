@@ -4,6 +4,9 @@ import type { Ledger } from "../ledger.js";
 import { ANALYZER_VERSION } from "../provenance.js";
 import { TEST_SUPPORT_RANKING_REASON_CODE } from "../score/rankEligibility.js";
 import { rankRiskGaps } from "../score/risk.js";
+import { BOILERPLATE_REASON, TRIVIAL_BODY_REASON } from "../analyze/boilerplate.js";
+import { GENERATED_CODE_REASON, NON_PRODUCT_REASON } from "../analyze/classify.js";
+import { dateText, localTimeZone, type ReportTimeZone } from "./reportTheme.js";
 import type { ReportFeedback } from "../feedback.js";
 import type { BehaviorReportBuild, DynamicProofReportInput } from "./behaviorReportData.js";
 import type { RepoWeb } from "./shortReport.js";
@@ -14,9 +17,9 @@ import { areaOf, buildWorklist, verbCounts, type Evidence, type GenerationContex
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 2;
+export const REPORT_DATA_VERSION = 3;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r14.1";
+export const REPORT_RENDERER_VERSION = "r14.2";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
@@ -50,6 +53,8 @@ export interface ReportModel {
   tool: string;
   analyzer: string;
   generatedAt: string;
+  /** The zone the run happened in: dates render in it, never in the viewer's zone. */
+  timeZone: ReportTimeZone;
   /** Set when a later run found nothing changed and reused this report. */
   checked?: { at: string; text: string };
   since: ReportSince;
@@ -61,6 +66,10 @@ export interface ReportModel {
     mapped: number;
     ranked: number;
     testFiles: number;
+    /** Test files with a traced call to at least one counted function (README "Linked"). */
+    testFilesLinked: number;
+    /** Test files with no traced call to any counted function. */
+    testFilesUnlinked: number;
     evidence: Record<Evidence, number>;
     withEvidence: number;
     deletePaths: number;
@@ -101,6 +110,8 @@ export interface ReportModelInput {
   /** Why this run is a full run, from the reuse check (R14 §5). */
   runReason?: string;
   generatedAt: string;
+  /** Minutes east of UTC at `generatedAt`; read from this machine when absent. */
+  timeZoneOffsetMinutes?: number;
   links: ReportModel["links"];
 }
 
@@ -138,8 +149,15 @@ export function worklistRanking(graph: LocalGraph, opts: { repoRoot: string; pro
   });
 }
 
+/** A previous report this recent is the same session's earlier run, not a baseline. */
+export const RECENT_RUN_MINUTES = 60;
+
 /** The "since the last report" line: what changed and why the run happened. */
-export function sinceLine(previous: ReportModel | null | undefined, current: Pick<ReportModel, "worklist" | "counts" | "tool" | "analyzer">, runReason?: string): ReportSince {
+export function sinceLine(
+  previous: ReportModel | null | undefined,
+  current: Pick<ReportModel, "worklist" | "counts" | "tool" | "analyzer"> & Partial<Pick<ReportModel, "generatedAt" | "timeZone">>,
+  runReason?: string
+): ReportSince {
   if (!previous) return { kind: "first", text: "No earlier report to compare with: this is the first one saved for this repository." };
   const prevTop = new Set(previous.worklist.filter((w) => w.slots).map((w) => w.id));
   const curTop = current.worklist.filter((w) => w.slots);
@@ -151,14 +169,68 @@ export function sinceLine(previous: ReportModel | null | undefined, current: Pic
   if (provenDelta < 0) changes.push(`${plural(-provenDelta, "proof", "proofs")} no longer hold`);
   if (entered > 0) changes.push(`${n(entered)} new in the top ${curTop.length}`);
   if (left > 0) changes.push(`${n(left)} left it`);
-  const when = previous.generatedAt.slice(0, 10);
   if (runReason === "analysis_changed") {
     if (changes.length === 0) return { kind: "analysis_changed", text: `Your code did not change. OrangePro ${current.tool} re-checked it with a new analysis and no findings changed.` };
     return { kind: "analysis_changed", text: `Your code did not change; OrangePro's analysis did (${previous.tool} to ${current.tool}): ${changes.join(", ")}.` };
   }
+  const minutes = current.generatedAt ? (Date.parse(current.generatedAt) - Date.parse(previous.generatedAt)) / 60_000 : Number.NaN;
+  const recent = Number.isFinite(minutes) && minutes >= 0 && minutes < RECENT_RUN_MINUTES;
+  const rounded = Math.round(minutes);
+  const since = recent
+    ? `Since the run ${rounded < 1 ? "less than a minute" : rounded === 1 ? "1 minute" : `${rounded} minutes`} ago`
+    : `Since the report of ${dateText(previous.generatedAt, previous.timeZone ?? current.timeZone)}`;
   const cause = runReason === "code_changed" ? "your code changed" : runReason === "inputs_changed" ? "settings, coverage or proofs changed" : "";
-  if (changes.length === 0) return { kind: "compared", text: `Since the report of ${when}${cause ? ` (${cause})` : ""}: no change in the top ${curTop.length} or in what is proven.` };
-  return { kind: "compared", text: `Since the report of ${when}${cause ? ` (${cause})` : ""}: ${changes.join(", ")}.` };
+  if (changes.length === 0) return { kind: "compared", text: `${since}${cause ? ` (${cause})` : ""}: no change in the top ${curTop.length} or in what is proven.` };
+  return { kind: "compared", text: `${since}${cause ? ` (${cause})` : ""}: ${changes.join(", ")}.` };
+}
+
+/**
+ * Test files that call at least one counted function through a traced link (a hard
+ * COVERS / TESTED_BY edge: the README's "Linked"), and those that call none. A name
+ * match is a lead, not a link, so it does not count here.
+ */
+export function testFileLinks(graph: Pick<LocalGraph, "nodes" | "edges">): { testFiles: number; linked: number; unlinked: number } {
+  const byId = new Map(graph.nodes.map((node) => [node.external_id, node]));
+  const tests = graph.nodes.filter((node) => node.kind === "TestCase" && node.stale !== true);
+  const linked = new Set<string>();
+  for (const e of graph.edges) {
+    if (e.evidence_strength !== "hard" || (e.relationship_type !== "COVERS" && e.relationship_type !== "TESTED_BY")) continue;
+    const a = byId.get(e.from_external_id);
+    const b = byId.get(e.to_external_id);
+    for (const [test, code] of [[a, b], [b, a]] as const) {
+      if (test?.kind === "TestCase" && test.stale !== true && code?.kind === "CodeSymbol" && code.denominator_eligible === true && code.stale !== true) linked.add(test.external_id);
+    }
+  }
+  return { testFiles: tests.length, linked: linked.size, unlinked: tests.length - linked.size };
+}
+
+/**
+ * Why each code symbol that is found but not counted was left out, from the reason the
+ * analyzer recorded on it, so the parts and the total add up on the page.
+ */
+export function leftOutParts(graph: Pick<LocalGraph, "nodes">): {
+  found: number;
+  counted: number;
+  generated: number;
+  notEntryPoint: number;
+  infraSurface: number;
+  trivial: number;
+  ciAndTest: number;
+  other: number;
+} {
+  const out = { found: 0, counted: 0, generated: 0, notEntryPoint: 0, infraSurface: 0, trivial: 0, ciAndTest: 0, other: 0 };
+  for (const node of graph.nodes) {
+    if (node.kind !== "CodeSymbol" || node.stale === true) continue;
+    out.found += 1;
+    if (node.denominator_eligible === true) out.counted += 1;
+    else if (node.denominator_reason === GENERATED_CODE_REASON) out.generated += 1;
+    else if (node.denominator_reason === BOILERPLATE_REASON || node.denominator_reason === TRIVIAL_BODY_REASON) out.trivial += 1;
+    else if (node.denominator_reason === NON_PRODUCT_REASON) out.ciAndTest += 1;
+    else if (node.properties.denominator_reason_code === "not_entry_point_adjacent") out.notEntryPoint += 1;
+    else if (node.properties.denominator_reason_code === "infra_behavior_surface") out.infraSurface += 1;
+    else out.other += 1;
+  }
+  return out;
 }
 
 /**
@@ -221,12 +293,26 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
 
   const cls = data.configDisclosure.classification;
   const comp = denominatorComposition(graph);
-  const other = Math.max(0, comp.code_symbols_total - comp.code_export - comp.excluded_boilerplate - comp.excluded_infra - comp.excluded_generated);
+  const parts = leftOutParts(graph);
   const leftOut: string[] = [];
-  if (comp.excluded_generated) leftOut.push(`${n(comp.excluded_generated)} generated`);
-  if (other) leftOut.push(`${n(other)} ${other === 1 ? "type or constant" : "types and constants"}`);
-  if (comp.excluded_boilerplate) leftOut.push(`${n(comp.excluded_boilerplate)} trivial accessors`);
-  if (comp.excluded_infra) leftOut.push(`${n(comp.excluded_infra)} CI and test helpers`);
+  if (parts.generated) leftOut.push(`${n(parts.generated)} generated`);
+  if (parts.notEntryPoint) leftOut.push(`${n(parts.notEntryPoint)} not near an API, route, command or job`);
+  if (parts.infraSurface) leftOut.push(`${n(parts.infraSurface)} utility, model and tooling code`);
+  if (parts.other) leftOut.push(`${n(parts.other)} ${parts.other === 1 ? "type, constant or other declaration" : "types, constants and other declarations"}`);
+  if (parts.trivial) leftOut.push(`${n(parts.trivial)} trivial accessors`);
+  if (parts.ciAndTest) leftOut.push(`${n(parts.ciAndTest)} CI and test helpers`);
+  const leftOutTotal = parts.found - parts.counted;
+  const requirements = comp.markdown_requirement + comp.requirement_template;
+  const arithmetic = ((): string => {
+    const base = `${n(parts.found)} found \u2212 ${n(leftOutTotal)} left out = ${n(parts.counted)} ${input.noun.plural}`;
+    if (data.summary.total === parts.counted) return `${base} counted.`;
+    if (requirements > 0 && data.summary.total === parts.counted + requirements) {
+      const from = comp.requirement_template === 0 ? "from Markdown docs" : "from requirement files";
+      return `${base}, plus ${n(requirements)} ${requirements === 1 ? "requirement" : "requirements"} ${from} = ${n(data.summary.total)} counted.`;
+    }
+    return `The parts do not add up to the total: ${base}, but ${n(data.summary.total)} are counted.`;
+  })();
+  const links = testFileLinks(graph);
 
   const runtimeMeta = graph.analysis?.runtime_coverage as { artifacts?: Array<{ path: string; format?: string; files?: number }> } | undefined;
   const coverageFiles = (runtimeMeta?.artifacts ?? []).map((a) => a.path);
@@ -254,13 +340,17 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
       mapped: data.summary.total,
       ranked: rankedTotal(graph, repoRoot, build),
       testFiles: data.scan.tests.total,
+      testFilesLinked: links.linked,
+      testFilesUnlinked: links.unlinked,
       evidence,
       withEvidence,
       deletePaths: build.deleteTotal + build.provenDeleteGaps.length,
       proven
     },
     tool: prov.toolVersion,
-    analyzer: identity?.analyzer_version ?? ANALYZER_VERSION
+    analyzer: identity?.analyzer_version ?? ANALYZER_VERSION,
+    generatedAt: input.generatedAt,
+    timeZone: localTimeZone(input.generatedAt, input.timeZoneOffsetMinutes)
   };
 
   const model: ReportModel = {
@@ -270,6 +360,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
     tool: current.tool,
     analyzer: current.analyzer,
     generatedAt: input.generatedAt,
+    timeZone: current.timeZone,
     since: sinceLine(input.previous, current, input.runReason),
     ...testSupportNote(graph),
     noun: input.noun,
@@ -285,12 +376,13 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
         { k: "Repository", v: `${input.repoWeb ? input.repoWeb.base.replace(/^https:\/\/[^/]+\//, "") : data.repo}${prov.commit ? ` at ${prov.commit.slice(0, 7)}` : ""}${identity?.git_dirty ? ", with uncommitted changes" : ""}` },
         { k: "Git history", v: prov.churnState === "complete" ? `Full: ${plural(prov.commitsScanned ?? 0, "commit", "commits")} over the last ${days} days` : `Incomplete (${prov.history}); change counts may be low` },
         { k: "Coverage", v: coverageFiles.length ? `${coverageFiles.join(", ")}: ${n(evidence.runtime)} functions executed` : "None found. Run your tests with coverage to add this evidence." },
-        { k: "Tests", v: plural(data.scan.tests.total, "test file", "test files") }
+        { k: "Tests", v: testsInput(data.scan.tests.total, links) }
       ],
       counted: [
         { k: "Found", v: `${n(comp.code_symbols_total)} functions, types and constants` },
         { k: "Counted", v: `${n(data.summary.total)} ${input.noun.plural}, ${n(current.counts.ranked)} of them ranked` },
         ...(leftOut.length ? [{ k: "Left out", v: leftOut.join(", ") }] : []),
+        ...(leftOut.length || requirements ? [{ k: "Arithmetic", v: arithmetic }] : []),
         { k: "Scoring", v: "Deterministic. No AI model was used." }
       ],
       proofs: [
@@ -341,6 +433,13 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
     links: input.links
   };
   return model;
+}
+
+/** "1,022 test files: 69 call a counted function, 953 call none that OrangePro traced." */
+export function testsInput(total: number, links: { linked: number; unlinked: number }): string {
+  const files = plural(total, "test file", "test files");
+  if (total === 0) return files;
+  return `${files}: ${n(links.linked)} ${links.linked === 1 ? "calls" : "call"} a counted function, ${n(links.unlinked)} ${links.unlinked === 1 ? "calls" : "call"} none that OrangePro traced`;
 }
 
 let rankedTotalCache: { graph: LocalGraph; total: number } | null = null;
