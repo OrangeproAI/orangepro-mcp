@@ -1,7 +1,7 @@
 import type { ReportModel } from "./reportModel.js";
 import { BRAND_SVG, EVIDENCE_COLOR, FEEDBACK_SCRIPT, RUN_COMMAND, baseCss, esc, feedbackPromptHtml, fmt } from "./reportTheme.js";
 import { sinceHtml } from "./summaryReport.js";
-import { EVIDENCE_LABEL, VERB_LABEL, VERB_MEANING, VERB_ORDER, type Evidence } from "./worklist.js";
+import { EVIDENCE_LABEL, FILE_LINK_EVIDENCE_LABEL, VERB_LABEL, VERB_MEANING, VERB_ORDER, type Evidence } from "./worklist.js";
 import { TESTS_CSV_COLUMNS, TESTS_CSV_IMPORT } from "./testsExport.js";
 
 /**
@@ -116,7 +116,7 @@ export function renderDetailedReport(input: DetailedReportInput): string {
   const short = commit.slice(0, 7);
   const fb = model.feedback;
   const repoLabel = model.repo.web ? `<a href="${esc(model.repo.web.base)}" target="_blank" rel="noopener noreferrer">${esc(model.repo.name)}</a>` : esc(model.repo.name);
-  const labels = { verb: VERB_LABEL, meaning: VERB_MEANING, order: VERB_ORDER, evidence: EVIDENCE_LABEL };
+  const labels = { verb: VERB_LABEL, meaning: VERB_MEANING, order: VERB_ORDER, evidence: EVIDENCE_LABEL, fileLink: FILE_LINK_EVIDENCE_LABEL };
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -309,7 +309,8 @@ const DETAILED_JS = String.raw`
     runtime: "Your coverage run executed this function. No test is proven to fail when it breaks yet.",
     linked: "A test calls this function directly. It is not yet proven to fail when the function breaks.",
     unconfirmed: "A test file or a test name points here, but OrangePro could not trace a call from a test to this function. Calls through test-suite methods and helper constructors are not always traced.",
-    none: "No test file, test name or traced call points to this function."
+    none: "No test file, test name or traced call points to this function.",
+    fileLink: "A test file imports this function's file, or is named after it, but no test was traced calling the function itself. Read it before writing a new test."
   };
   var SLOT = { ready: "Ready", plan: "Plan only", not_drafted: "Not drafted" };
   var LENSES = [["all", "Everything"], ["deletes", "Deletes data"], ["changes", "Changes often (100+ lines)"], ["callers", "Many callers (10+)"], ["schedule", "Runs on a schedule"], ["tests", "Tests drafted"]];
@@ -510,7 +511,8 @@ const DETAILED_JS = String.raw`
     var h = '<div class="ident"><span class="kick">' + (r.rank == null ? "Done" : "#" + r.rank + " of " + fmt(M.counts.ranked) + " ranked &middot; priority " + esc(r.score)) + "</span>" +
       '<h2 class="mono">' + brk(r.title) + "</h2>" + pathLink(r.file, r.line) + "</div>";
     h += '<section class="verbline">' + chip(r.verb) + "<p>" + esc(r.reason) + "</p></section>";
-    h += '<section><h3>Evidence</h3><div><span class="chip e-' + r.evidence + '"><span class="dot"></span>' + esc(L.evidence[r.evidence]) + "</span></div><p class=\"small\">" + esc(EVI_TEXT[r.evidence]) + "</p>";
+    h += '<section><h3>Evidence</h3><div><span class="chip e-' + r.evidence + '"><span class="dot"></span>' + esc(r.fileLink ? L.fileLink : L.evidence[r.evidence]) + "</span></div><p class=\"small\">" + esc(EVI_TEXT[r.fileLink ? "fileLink" : r.evidence]) + "</p>";
+    if (r.fileLink) h += '<div class="box"><span class="tiny">Test file linked to its file</span>' + pathLink(r.fileLink, null) + "</div>";
     if (r.provenTest) h += '<div class="box"><span class="tiny">Test that catches a break</span>' + (r.provenTestPath ? pathLink(r.provenTestPath, null, r.provenTest) : '<span class="mono">' + brk(r.provenTest) + "</span>") + "</div>";
     if (r.readFirst) h += '<div class="box"><span class="tiny">Read before writing a new test</span>' + pathLink(r.readFirst, null) + "</div>";
     if (r.linkedTest) h += '<div class="box"><span class="tiny">Test that calls it</span>' + pathLink(r.linkedTest, null) + "</div>";
