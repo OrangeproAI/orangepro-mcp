@@ -60,7 +60,7 @@ import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFing
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import { assertMayRunRepositoryCode, isStaticOnly, STATIC_ONLY_REFUSAL } from "./staticOnly.js";
-import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
+import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget, isNoKeyMessage } from "./autoProve.js";
 import { AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT, RunHint, runnableRunHintsFor } from "./generate/runHints.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
 import { buildOracle, scoreArm, armMetrics, CompareDimensions, CompareMetrics } from "./generate/compareScore.js";
@@ -117,6 +117,7 @@ import {
   distillProofAttempts,
   loadProofAttempts,
   proofAttemptsFresh,
+  PROOF_BLOCKER_GUIDE,
   writeProofAttempts,
   type ProofDoctorResult
 } from "./proofDoctor.js";
@@ -357,6 +358,8 @@ export interface DynamicProofOracleSummary {
   baseline?: { exitCode?: number; timedOut?: boolean; failureSummary?: string | null };
   mutant?: { exitCode?: number; timedOut?: boolean; assertionFailure?: boolean };
   medianProofMs?: number | null;
+  /** The per-run time limit the proof script used (each language has its own default). */
+  timeoutMs?: number;
   /** Redacted runner diagnostics (command/cwd/exit/duration/tail), informational only. */
   diagnostics?: {
     command: string;
@@ -700,6 +703,7 @@ export interface GoDynamicProofJson {
   status: string;
   proven: boolean;
   reason?: string;
+  timeoutMs?: number;
   testRun?: string;
   target?: string;
   func?: string;
@@ -751,7 +755,8 @@ function mapGoOracle(go: GoDynamicProofJson): DynamicProofOracleSummary {
           runMutant.exitCode !== 0
       }
       : { assertionFailure: false },
-    medianProofMs: go.medianProofMs
+    medianProofMs: go.medianProofMs,
+    ...(typeof go.timeoutMs === "number" ? { timeoutMs: go.timeoutMs } : {})
   };
 }
 
@@ -765,6 +770,7 @@ export interface JavaDynamicProofJson {
   status: string;
   proven: boolean;
   reason?: string;
+  timeoutMs?: number;
   mode?: string;
   testClass?: string;
   testMethod?: string;
@@ -827,7 +833,8 @@ function mapJavaOracle(java: JavaDynamicProofJson): DynamicProofOracleSummary {
           runMutant.exitCode !== 0
       }
       : { assertionFailure: false },
-    medianProofMs: java.medianProofMs
+    medianProofMs: java.medianProofMs,
+    ...(typeof java.timeoutMs === "number" ? { timeoutMs: java.timeoutMs } : {})
   };
 }
 
@@ -2260,6 +2267,7 @@ export function opDynamicProof(
       oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
     }
   }
+  oracle = withTimeoutOutcome(oracle);
   const closed = dynamicProofSucceeded(oracle);
   const baselineGreen = oracle.baseline?.exitCode === 0 && oracle.baseline?.timedOut !== true;
   const mutantFailedAssertion = oracle.mutant?.assertionFailure === true && oracle.mutant?.timedOut !== true;
@@ -2327,9 +2335,46 @@ export function opDynamicProof(
       mutant: oracle.mutant
         ? { exitCode: oracle.mutant.exitCode, timedOut: oracle.mutant.timedOut, assertionFailure: oracle.mutant.assertionFailure }
         : undefined,
-      medianProofMs: oracle.medianProofMs
+      medianProofMs: oracle.medianProofMs,
+      ...(typeof oracle.timeoutMs === "number" ? { timeoutMs: oracle.timeoutMs } : {})
     }
   };
+}
+
+/** The mutant status of a mutated run that the time limit stopped: never a catch, never a survivor. */
+export const MUTANT_TIMED_OUT_STATUS = "mutant_timed_out";
+export const MUTANT_TIMEOUT_REASON = "the mutated code ran past the time limit";
+
+function limitText(ms: number | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return "its time limit";
+  return ms % 1000 === 0 ? `the ${ms / 1000} s time limit` : `the ${ms} ms time limit`;
+}
+
+/** "The original code's test ran past the 30 s time limit, so nothing was measured." */
+export function baselineTimeoutReason(ms: number | undefined): string {
+  return `The original code's test ran past ${limitText(ms)}, so nothing was measured.`;
+}
+
+/**
+ * One reading of a time-out for every language: a baseline the limit stopped measured
+ * nothing; a mutant the limit stopped did not show a catch (and is never Proven, even if
+ * the runner also saw an assertion failure before the kill).
+ */
+export function withTimeoutOutcome(oracle: DynamicProofOracleSummary): DynamicProofOracleSummary {
+  // Python's setup and collection steps carry their own category (the sandbox did not start): keep it.
+  if (oracle.baseline?.timedOut === true && !oracle.category) {
+    return { ...oracle, status: "unrunnable", proven: false, reason: baselineTimeoutReason(oracle.timeoutMs) };
+  }
+  if (oracle.mutant?.timedOut === true) {
+    return {
+      ...oracle,
+      status: MUTANT_TIMED_OUT_STATUS,
+      proven: false,
+      reason: MUTANT_TIMEOUT_REASON,
+      mutant: { ...oracle.mutant, assertionFailure: false }
+    };
+  }
+  return oracle;
 }
 
 const SETUP_DEFAULT_TIMEOUT_MS = 30_000;
@@ -3098,14 +3143,14 @@ export async function opStart(
         nextActions.push("Proof not run: test environment could not be started (see ledger)");
       }
       const dom = dominantBlockReason(autoProveResult.needs_setup);
-      if (dom) nextActions.push(`Dynamic proof closed 0: blocked because ${dom.label} (${dom.count}/${dom.total}). This is a sandbox setup gap, not a static-test failure; Static Associated signals are still shown.`);
+      if (dom) nextActions.push(`Dynamic proof closed 0: blocked because ${dom.label} (${dom.count}/${dom.total}). ${blockedRunMeaning(dom.category)} Static links are still shown.`);
     }
     for (const file of autoProveResult.generated_files) nextActions.push(`Auto-prove wrote generated test: ${file}`);
     for (const attempt of autoProveResult.needs_setup) nextActions.push(`Auto-prove needs setup for ${attempt.target_symbol} (${attempt.test_path}): ${attempt.reason ?? "baseline/setup did not run"}.`);
     // Fix 2: the existing-tests lane ran without a key but minted 0 Proven (all survived) —
     // still surface the add-a-key guidance, since a key would unlock the generation lane.
-    // (`reason` carries NO_KEY_MESSAGE only on the no-key path; skipped-no-key is handled above.)
-    if (autoProveResult.proven === 0 && autoProveResult.reason === NO_KEY_MESSAGE) nextActions.push(autoProveResult.reason);
+    // (`reason` is a no-key message only on the no-key path; when tests ran it says drafting, not proof, was skipped.)
+    if (autoProveResult.proven === 0 && isNoKeyMessage(autoProveResult.reason)) nextActions.push(autoProveResult.reason!);
   }
   if (rtm.summary.total > 0 && rtm.summary.proven === 0) {
     nextActions.push(
@@ -3700,6 +3745,19 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
     ...(written.csv ? { tests_csv_path: csvPath } : {}),
     ...(savedData ? { report_data_path: dataPath } : {})
   };
+}
+
+/**
+ * What a run blocked by `category` means (item 8): only a sandbox that could not start is
+ * a sandbox setup gap; a compile failure is a compile failure, with its remedy.
+ */
+export function blockedRunMeaning(category: string): string {
+  if (category === "environment_unavailable") return "This is a sandbox setup gap, not a static-test failure.";
+  if (category === "go_package_build_failure" || category === "module_not_found") {
+    return `The code did not compile in the proof copy: ${PROOF_BLOCKER_GUIDE[category].next_step}`;
+  }
+  if (category === "timeout") return `The test ran past the time limit, so nothing was measured: ${PROOF_BLOCKER_GUIDE.timeout.next_step}`;
+  return "The test could not run in the proof copy; this is not a test result.";
 }
 
 /** How many test files call at least one counted function, and how many call none (start result). */

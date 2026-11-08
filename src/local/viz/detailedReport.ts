@@ -382,6 +382,7 @@ const DETAILED_JS = String.raw`
 
   // The list names a test file by its file name; the panel shows the full path.
   function listReason(r) {
+    if (r.proofTimedOut) return r.reason;
     if (r.verb === "check" && r.readFirst) return "Read " + r.readFirst.split("/").pop() + " first: a test there may cover it.";
     if (r.verb === "prove" && r.linkedTest && r.evidence === "linked") return r.linkedTest.split("/").pop() + " calls it; not yet proven to catch a break.";
     return r.reason;

@@ -530,7 +530,7 @@ function main() {
     const baseline = runPytest(plan, relativeTest, args.timeoutMs);
     const baselineClass = classifyPytest(baseline, relativeTest);
     if (baselineClass.kind !== "passed") {
-      emit({ status: "unrunnable", proven: false, reason: "baseline test did not pass", runner: "pytest", project_root: projectRootRel, baseline: { exitCode: baseline.exitCode, timedOut: baseline.timedOut, failureSummary: summarize(baseline) }, diagnostics: diagnostic(baseline, diagnosticFailureClass(baseline, baselineClass, "baseline")), mutant: { assertionFailure: false } }, args.json);
+      emit({ status: "unrunnable", proven: false, reason: "baseline test did not pass", runner: "pytest", timeoutMs: args.timeoutMs, project_root: projectRootRel, baseline: { exitCode: baseline.exitCode, timedOut: baseline.timedOut, failureSummary: summarize(baseline) }, diagnostics: diagnostic(baseline, diagnosticFailureClass(baseline, baselineClass, "baseline")), mutant: { assertionFailure: false } }, args.json);
       return;
     }
 
@@ -547,8 +547,9 @@ function main() {
     emit({
       status: proven ? "proven" : survived ? "associated_survived" : "unrunnable",
       proven,
-      reason: proven ? "mutant failed at a trusted pytest assertion" : survived ? "mutant survived" : mutantClass.reason,
+      reason: proven ? "mutant failed at a trusted pytest assertion" : survived ? "mutant survived" : mutant.timedOut ? "the mutated code ran past the time limit" : mutantClass.reason,
       runner: "pytest",
+      timeoutMs: args.timeoutMs,
       replacementMode: args.mode,
       project_root: projectRootRel,
       test: args.test,

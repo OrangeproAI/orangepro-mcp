@@ -204,7 +204,8 @@ export interface BehaviorReportDataOptions {
 const BLOCK_CATEGORY_LABEL: Record<string, string> = {
   environment_unavailable: "a Python test environment that could not start",
   collection_error: "a Python test collection or import error",
-  go_package_build_failure: "a Go package that could not build for proof",
+  go_package_build_failure: "a Go package that did not compile",
+  timeout: "a test that ran past the time limit",
   runner_missing: "a missing test runner in the selected package",
   module_not_found: "a missing module or dependency in the sandbox",
   tsconfig_missing: "a monorepo tsconfig the sandbox can't resolve (a parent config the package extends)",

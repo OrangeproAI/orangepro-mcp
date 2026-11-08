@@ -469,8 +469,22 @@ export function proofLanguageOrder(graph: LocalGraph): string[] {
   return [...counts.keys()].sort((a, b) => (counts.get(b)! - counts.get(a)!) || (first.get(a)! - first.get(b)!));
 }
 
+/** Item 8: a compile failure is named as one, with the usual remedy, never as a sandbox gap. */
+export const GO_COMPILE_REASON =
+  "The Go package did not compile in the proof copy. If its modules are not downloaded yet, run `go mod download` (or build the package once), then rerun.";
+
 export const NO_KEY_MESSAGE =
   "No provider key; auto-prove skipped — add OPENAI_API_KEY / ANTHROPIC_API_KEY, or use the OrangePro MCP in your coding agent.";
+
+/** The no-key message when proof DID run on the repository's own tests: only drafting was skipped. */
+export function noKeyDraftingMessage(attempted: number, proven: number): string {
+  return `No provider key: proof ran on the repository's own tests (${attempted} attempted, ${proven} proven); drafting new tests was skipped. Add OPENAI_API_KEY / ANTHROPIC_API_KEY, or use the OrangePro MCP in your coding agent.`;
+}
+
+/** True for either no-key message, so callers can surface the add-a-key guidance once. */
+export function isNoKeyMessage(reason: string | undefined): boolean {
+  return reason === NO_KEY_MESSAGE || (reason ?? "").startsWith("No provider key: proof ran on the repository's own tests");
+}
 
 /** How a single attempted target resolved. Only `proven` moves public Proven. */
 export type AutoProveClass = "proven" | "non_killing" | "needs_setup" | "gen_failed";
@@ -693,10 +707,15 @@ function classifyProof(result: ProveLoopResult, ctx: ClassifyContext): ProofClas
   const cert = record.dynamic_proof;
   if (cert && cert.baseline_green === false) {
     const failureSummary = dyn.oracle.baseline?.failureSummary;
+    // A baseline the time limit stopped measured nothing: it could not run, it did not fail.
+    // Checked first, in every language, so partial output is never read as a real failure.
+    if (dyn.oracle.baseline?.timedOut === true) {
+      return { classification: "needs_setup", reason: dyn.oracle.reason ?? "The original code's test ran past its time limit, so nothing was measured.", category: "timeout" };
+    }
     if (ctx.targetFileRel.endsWith(".go") && /^#\s+\S+/m.test(failureSummary ?? "")) {
       return {
         classification: "needs_setup",
-        reason: "The Go package did not compile before the selected test could run.",
+        reason: GO_COMPILE_REASON,
         category: "go_package_build_failure"
       };
     }
@@ -1443,7 +1462,8 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     return {
       ran: ex.attempted > 0,
       status,
-      reason: NO_KEY_MESSAGE,
+      // "Skipped" only when nothing ran; when the existing tests were tried, only drafting was skipped.
+      reason: ex.attempted > 0 ? noKeyDraftingMessage(ex.attempted, ex.proven) : NO_KEY_MESSAGE,
       attempted: ex.attempted,
       proven: ex.proven,
       needs_setup: ex.needsSetup,

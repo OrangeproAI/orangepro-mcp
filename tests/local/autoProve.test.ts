@@ -13,12 +13,29 @@ import {
   orderRankedProofCandidates,
   proofLanguageOrder,
   proofRunnerRoot,
+  GO_COMPILE_REASON,
   NO_KEY_MESSAGE,
+  isNoKeyMessage,
+  noKeyDraftingMessage,
   AutoProveDeps
 } from "../../src/local/autoProve.js";
 import type { AutoProveAttempt } from "../../src/local/autoProve.js";
 import { loadLedger } from "../../src/local/ledger.js";
-import { opAnalyze, opDynamicProof, opInit, opProveLoop, opRtm, opStart } from "../../src/local/operations.js";
+import {
+  baselineTimeoutReason,
+  blockedRunMeaning,
+  MUTANT_TIMED_OUT_STATUS,
+  MUTANT_TIMEOUT_REASON,
+  opAnalyze,
+  opDynamicProof,
+  opInit,
+  opProveLoop,
+  opRtm,
+  opStart,
+  withTimeoutOutcome
+} from "../../src/local/operations.js";
+import { MUTANT_TIMEOUT_NOTE, nonKillingNoteFor } from "../../src/local/proofDoctor.js";
+import { latestProofOutcomes, verbFor } from "../../src/local/viz/worklist.js";
 import type { ProveLoopResult } from "../../src/local/operations.js";
 import { preloadTreeSitter } from "../../src/local/analyze/treeSitter/engine.js";
 import { runHintsFor, suggestedTestPath } from "../../src/local/generate/runHints.js";
@@ -149,7 +166,7 @@ function fakeGenerate(tests: GeneratedTest[]) {
   });
 }
 
-type OracleKind = "proven" | "non_killing" | "baseline_fail" | "crash";
+type OracleKind = "proven" | "non_killing" | "baseline_fail" | "crash" | "baseline_timeout" | "mutant_timeout";
 
 /** Oracle JSON the mocked dynamic-proof runner emits. */
 function oracle(kind: OracleKind) {
@@ -159,6 +176,14 @@ function oracle(kind: OracleKind) {
   }
   if (kind === "non_killing") {
     return JSON.stringify({ ...base, status: "associated_survived", proven: false, reason: "survived", baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 0, timedOut: false, assertionFailure: false } });
+  }
+  if (kind === "baseline_timeout") {
+    // The original code's run was killed by the limit: partial output that would otherwise read as a real failure.
+    return JSON.stringify({ ...base, timeoutMs: 30_000, status: "unrunnable", proven: false, reason: "baseline test did not pass", baseline: { exitCode: 1, timedOut: true, failureSummary: "AssertionError: expected 1 to be 2" }, mutant: { assertionFailure: false } });
+  }
+  if (kind === "mutant_timeout") {
+    // The worst case: the runner saw an assertion failure before the kill and still said "proven".
+    return JSON.stringify({ ...base, timeoutMs: 30_000, status: "proven", proven: true, reason: "baseline passed and mutant failed at an assertion", baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 1, timedOut: true, assertionFailure: true } });
   }
   if (kind === "crash") {
     // Baseline green, but the mutant crashes BEFORE any assertion (exit≠0, assertionFailure false):
@@ -833,7 +858,7 @@ describe("autoProve — Fix 1: dedup already-Proven symbols across runs", () => 
 });
 
 describe("autoProve — Fix 2: no-key run that mints 0 Proven still surfaces the add-a-key guidance", () => {
-  it("opStart next_actions includes NO_KEY_MESSAGE when every existing test survives with no key", async () => {
+  it("opStart next_actions carries the add-a-key guidance, saying drafting (not proof) was skipped, when every existing test survives", async () => {
     const W = makeWorkspaceWithExistingTests();
     // No key; every eligible symbol's existing test SURVIVES the null mutant → attempted > 0, proven 0.
     const res = await opStart(
@@ -843,7 +868,21 @@ describe("autoProve — Fix 2: no-key run that mints 0 Proven still surfaces the
     );
     expect(res.auto_prove.proven).toBe(0);
     expect(res.auto_prove.attempted).toBeGreaterThan(0);
-    expect(res.next_actions).toContain(NO_KEY_MESSAGE);
+    const drafting = noKeyDraftingMessage(res.auto_prove.attempted, 0);
+    expect(res.auto_prove.reason).toBe(drafting);
+    expect(res.next_actions).toContain(drafting);
+    // Item 7: the two messages never appear for the same run, and "skipped" never sits next to a run that ran.
+    expect(res.next_actions).not.toContain(NO_KEY_MESSAGE);
+    expect(res.next_actions.filter((a) => isNoKeyMessage(a))).toHaveLength(1);
+  });
+
+  it("a no-key run whose existing test proves says proof ran and only drafting was skipped", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const res = await autoProve(W, { autoLimit: 1 }, baseDeps(NO_ENV, { dynamicProofRunner: proofRunner("proven") }));
+    expect(res.status).toBe("proven-run");
+    expect(res.reason).toBe(noKeyDraftingMessage(res.attempted, res.proven));
+    expect(res.reason).toMatch(/^No provider key: proof ran on the repository's own tests \(1 attempted, 1 proven\); drafting new tests was skipped\./);
+    expect(res.reason).not.toMatch(/skipped —|auto-prove skipped/);
   });
 });
 
@@ -1657,5 +1696,85 @@ describe("item 34: start with a proof budget of 0, and in static-only mode", () 
     expect(res.warnings.join("\n")).toContain("--generate-coverage ignored");
     expect(res.generation.requested).toBe(1);
     expect(res.generation.generated).toBeGreaterThan(0);
+  });
+});
+
+describe("autoProve — item 11: a run the time limit stopped is never filed as a result", () => {
+  it("a baseline time-out could not run: needs_setup / timeout, and the reason names the limit", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const res = await autoProve(W, { autoLimit: 1 }, baseDeps(NO_ENV, { dynamicProofRunner: proofRunner("baseline_timeout") }));
+    expect(res.proven).toBe(0);
+    expect(res.attempts.length).toBeGreaterThan(0);
+    for (const a of res.attempts) {
+      expect(a.classification).toBe("needs_setup");
+      expect(a.category).toBe("timeout");
+      expect(a.reason).toBe(baselineTimeoutReason(30_000));
+    }
+    expect(baselineTimeoutReason(30_000)).toBe("The original code's test ran past the 30 s time limit, so nothing was measured.");
+    expect(baselineTimeoutReason(undefined)).toBe("The original code's test ran past its time limit, so nothing was measured.");
+    expect(opRtm(W, { format: "json" }).summary.proven).toBe(0);
+    // The worklist row says why the last proof could not run, as one sentence.
+    const out = latestProofOutcomes(loadGraph(workspacePaths(W).graphPath), loadLedger(W)).get(res.attempts[0]!.target_symbol);
+    expect(out?.status).toBe("unrunnable");
+    expect(verbFor({ evidence: "linked", proof: out!, linkedTest: "t.test.ts" }).reason).toBe(
+      "t.test.ts calls it; not yet proven to catch a break. The last proof could not run: The original code's test ran past the 30 s time limit, so nothing was measured."
+    );
+  });
+
+  it("a mutant time-out is never Proven, reads 'ran past the time limit' in the reports and the doctor, never 'survived'", async () => {
+    const W = makeWorkspaceWithExistingTests();
+    const res = await autoProve(W, { autoLimit: 1 }, baseDeps(NO_ENV, { dynamicProofRunner: proofRunner("mutant_timeout") }));
+    expect(res.proven).toBe(0);
+    expect(res.attempts.length).toBeGreaterThan(0);
+    for (const a of res.attempts) {
+      expect(a.classification).toBe("non_killing");
+      expect(a.mutant_status).toBe(MUTANT_TIMED_OUT_STATUS);
+      expect(a.reason).toBe(MUTANT_TIMEOUT_REASON);
+    }
+    const ledger = loadLedger(W);
+    expect(ledger.records.some((r) => r.closed)).toBe(false);
+    expect(ledger.records.every((r) => r.dynamic_proof?.mutant_failed_assertion !== true)).toBe(true);
+    expect(opRtm(W, { format: "json" }).summary.proven).toBe(0);
+
+    // The doctor's note for it.
+    expect(nonKillingNoteFor(MUTANT_TIMED_OUT_STATUS)).toBe(MUTANT_TIMEOUT_NOTE);
+    expect(MUTANT_TIMEOUT_NOTE).toMatch(/^Ran past the time limit/);
+    expect(MUTANT_TIMEOUT_NOTE).not.toMatch(/does not protect|survived|still passed/i);
+
+    // Both reports draw the row's reason from the worklist: it leads with the time limit.
+    const g = loadGraph(workspacePaths(W).graphPath);
+    const outcomes = latestProofOutcomes(g, ledger);
+    const target = res.attempts[0]!.target_symbol;
+    expect(outcomes.get(target)?.status).toBe("timed_out");
+    const v = verbFor({ evidence: "linked", proof: { status: "timed_out", current: true, test: "t.test.ts" }, linkedTest: "t.test.ts" });
+    expect(v.reason).toBe("Ran past the time limit: t.test.ts did not finish on the broken copy, so it neither caught nor missed the break.");
+    expect(v.reason).not.toMatch(/does not protect|survived|does not catch|still passed/i);
+  });
+
+  it("withTimeoutOutcome reads time-outs the same way for every language's oracle", () => {
+    const go = { status: "unrunnable", proven: false, reason: "mutant timed out", timeoutMs: 60_000, baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 1, timedOut: true, assertionFailure: false } };
+    expect(withTimeoutOutcome(go)).toMatchObject({ status: MUTANT_TIMED_OUT_STATUS, proven: false, reason: MUTANT_TIMEOUT_REASON, mutant: { assertionFailure: false } });
+    const java = { status: "unrunnable", proven: false, reason: "baseline target test did not compile+pass", timeoutMs: 180_000, baseline: { exitCode: 1, timedOut: true } };
+    expect(withTimeoutOutcome(java).reason).toBe("The original code's test ran past the 180 s time limit, so nothing was measured.");
+    // Python's setup or collection time-out is the sandbox not starting: its own category and reason stay.
+    const pySetup = { status: "unrunnable", proven: false, category: "environment_unavailable" as const, reason: "environment_unavailable: pytest collection failed before proof could run", baseline: { exitCode: 1, timedOut: true } };
+    expect(withTimeoutOutcome(pySetup)).toEqual(pySetup);
+    const fine = { status: "proven", proven: true, reason: "kill", baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 1, timedOut: false, assertionFailure: true } };
+    expect(withTimeoutOutcome(fine)).toBe(fine);
+  });
+});
+
+describe("item 8: a compile failure is named as one; only a sandbox that could not start is a sandbox gap", () => {
+  it("words each dominant block category", () => {
+    expect(blockedRunMeaning("go_package_build_failure")).toMatch(/^The code did not compile in the proof copy: Run `go mod download`/);
+    expect(blockedRunMeaning("go_package_build_failure")).not.toMatch(/sandbox/i);
+    expect(blockedRunMeaning("module_not_found")).toMatch(/^The code did not compile in the proof copy:/);
+    expect(blockedRunMeaning("environment_unavailable")).toBe("This is a sandbox setup gap, not a static-test failure.");
+    expect(blockedRunMeaning("timeout")).toMatch(/^The test ran past the time limit, so nothing was measured:/);
+    for (const c of ["runner_missing", "tsconfig_missing", "engine_mismatch", "db_or_external", "runnability"]) {
+      expect(blockedRunMeaning(c)).toBe("The test could not run in the proof copy; this is not a test result.");
+    }
+    expect(GO_COMPILE_REASON).toContain("go mod download");
+    expect(GO_COMPILE_REASON).not.toMatch(/sandbox/i);
   });
 });

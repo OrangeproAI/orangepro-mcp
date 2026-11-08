@@ -2648,6 +2648,10 @@ function classify({ baseline, mutant, testRel, repoRoot }) {
       reason: "mutated target did not change the test outcome"
     };
   }
+  // A mutant killed by the time limit never counts as caught, even if a report was written first.
+  if (mutant.timedOut) {
+    return { status: "unrunnable", proven: false, reason: "the mutated code ran past the time limit" };
+  }
   if (isAssertionFailure(mutant, testRel, repoRoot, baseline)) {
     return {
       status: "proven",
@@ -2718,10 +2722,11 @@ function runProof(args, root, binding) {
         exitCode: mutant.exitCode,
         timedOut: mutant.timedOut,
         elapsedMs: mutant.elapsedMs,
-        assertionFailure: isAssertionFailure(mutant, testRel, mutantCopy.repoRoot, baseline),
+        assertionFailure: !mutant.timedOut && isAssertionFailure(mutant, testRel, mutantCopy.repoRoot, baseline),
         failureSummary: failureSummary(mutant)
       },
       medianProofMs: Math.round((baseline.elapsedMs + mutant.elapsedMs) / 2),
+      timeoutMs,
       ...(boundPlan ? { bound: boundSummary(binding, boundPlan) } : {})
     };
   } finally {

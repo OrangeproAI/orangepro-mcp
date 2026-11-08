@@ -35,7 +35,7 @@ export const EVIDENCE_LABEL: Record<Evidence, string> = {
 export const FILE_LINK_EVIDENCE_LABEL = "Candidate link only, not confirmed";
 
 export interface ProofOutcome {
-  status: "proven" | "survived" | "non_assertion" | "unrunnable";
+  status: "proven" | "survived" | "non_assertion" | "unrunnable" | "timed_out";
   test?: string;
   reason?: string;
   /** The record was made against the function's current code. */
@@ -69,6 +69,10 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
   if (evidence === "proven") {
     return { verb: "done", reason: input.provenTest ? `${input.provenTest} fails when it breaks.` : "A test fails when it breaks." };
   }
+  // A mutant the time limit stopped neither caught nor missed the break: never "does not catch".
+  if (proof?.current && proof.status === "timed_out") {
+    return { verb: "prove", reason: `Ran past the time limit: ${proof.test ?? "the linked test"} did not finish on the broken copy, so it neither caught nor missed the break.` };
+  }
   if (proof?.current && proof.status === "survived") {
     return { verb: "write", reason: `${proof.test ?? "The linked test"} runs it but does not catch a break.` };
   }
@@ -78,7 +82,7 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
   if (proof && !proof.current && proof.status === "proven") {
     return { verb: "prove", reason: "The code changed since it was proven." };
   }
-  const couldNotRun = proof?.current && proof.status === "unrunnable" ? ` The last proof could not run: ${proof.reason ?? "setup failed"}.` : "";
+  const couldNotRun = proof?.current && proof.status === "unrunnable" ? ` The last proof could not run: ${(proof.reason ?? "setup failed").replace(/\.$/, "")}.` : "";
   if (evidence === "runtime") {
     return { verb: "prove", reason: `A coverage run executes it; no test is proven to catch a break.${couldNotRun}` };
   }
@@ -198,6 +202,8 @@ export interface WorkItem {
   reason: string;
   readFirst?: string;
   linkedTest?: string;
+  /** The last proof's mutated run hit the time limit: the row's reason says so, and nothing replaces it. */
+  proofTimedOut?: true;
   /** JS/TS "No test found" rows only: a test file linked to the function's file, not to the function. */
   fileLink?: string;
   deletes?: { via: string; store: string };
@@ -342,6 +348,7 @@ export function latestProofOutcomes(graph: LocalGraph, ledger: Ledger): Map<stri
       status === "proven" ? "proven"
         : status === "associated_survived" || status === "survived" ? "survived"
           : status === "associated_non_assertion_failure" ? "non_assertion"
+            : status === "mutant_timed_out" ? "timed_out"
             : status === "unrunnable" ? "unrunnable"
               : undefined;
     if (!mapped) continue;
@@ -473,6 +480,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       ...(readFirst ? { readFirst } : {}),
       ...(linkedTest ? { linkedTest } : {}),
       ...(fileLink ? { fileLink } : {}),
+      ...(proof?.current && proof.status === "timed_out" ? { proofTimedOut: true as const } : {}),
       ...(gap.sink_callee ? { deletes: { via: gap.sink_callee, store: store || "Stored data" } } : {}),
       churn: gap.git_churn,
       churnAvailable: gap.churn_available !== false,

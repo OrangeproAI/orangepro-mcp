@@ -93,6 +93,7 @@ export type ProofBlockerCategory =
   | "module_root_missing"
   | "assertion_binding"
   | "unsupported_language"
+  | "go_package_build_failure"
   | "setup_failed";
 
 interface BlockerGuide {
@@ -141,6 +142,14 @@ export const PROOF_BLOCKER_GUIDE: Record<ProofBlockerCategory, BlockerGuide> = {
     label: "no dynamic-proof profile exists for this language yet",
     next_step: "TS/JS, Go, Java and Python are dynamically provable today; other languages stay honestly in their static tiers."
   },
+  timeout: {
+    label: "the original code's test ran past the time limit, so nothing was measured",
+    next_step: "Run the test once on its own to see why it is slow; pass a longer limit with `--timeout-ms` when proving it by hand."
+  },
+  go_package_build_failure: {
+    label: "the Go package did not compile in the proof copy",
+    next_step: "Run `go mod download` (or build the package once with `go build ./...`) so its modules are in the cache, then re-run `opro start`."
+  },
   setup_failed: {
     label: "proof setup failed before the oracle could run",
     next_step: "Read the attempt reason, fix the named setup step, then re-run `opro start`."
@@ -161,7 +170,13 @@ export const NON_ASSERTION_NOTE =
   "The test does exercise the target; strengthen the assertion to check the target's returned value directly, or re-run — " +
   "whether the crash or the assertion is hit first can vary between runs.";
 
+/** A mutant the time limit stopped: it neither caught nor missed the fault. Never "survived". */
+export const MUTANT_TIMEOUT_NOTE =
+  "Ran past the time limit: the test did not finish on the mutated code, so it neither caught nor missed the fault. " +
+  "Not proven. Run it on its own with a longer `--timeout-ms` to get a result.";
+
 export function nonKillingNoteFor(mutantStatus?: string): string {
+  if (mutantStatus === "mutant_timed_out") return MUTANT_TIMEOUT_NOTE;
   return mutantStatus === "associated_non_assertion_failure" ? NON_ASSERTION_NOTE : NON_KILLING_NOTE;
 }
 
