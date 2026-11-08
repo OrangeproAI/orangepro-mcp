@@ -134,8 +134,8 @@ function numericFlag(value: string | boolean | undefined): number | undefined {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
-/** A budget where 0 means "none" (item 34). numericFlag reads 0 as "not given", which fell back to the default. */
-function budgetFlag(value: string | boolean | undefined): number | undefined {
+/** A limit where 0 means "none" (item 34). numericFlag reads 0 as "not given", which fell back to the default. */
+function limitFlag(value: string | boolean | undefined): number | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
@@ -327,8 +327,8 @@ async function main(): Promise<number> {
           aiAll: asBool(flags["ai-all"], false),
           aiFlows: !asBool(flags["no-ai-flows"], false),
           autoLimit: numericFlag(flags["auto-limit"]),
-          proofLimit: budgetFlag(flags["proof-limit"]),
-          generateLimit: budgetFlag(flags["generate-limit"]),
+          proofLimit: limitFlag(flags["proof-limit"]),
+          generateLimit: limitFlag(flags["generate-limit"]),
           noAuto: asBool(flags["no-auto"], false),
           promptVersion: flags["prompt-version"] === "v5" ? "v5" : undefined,
           provider: typeof flags.provider === "string" ? flags.provider : undefined,

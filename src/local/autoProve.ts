@@ -1351,7 +1351,7 @@ function proveExistingAssociatedTests(
  */
 export async function autoProve(root: string, opts: AutoProveOptions, deps: AutoProveDeps): Promise<AutoProveResult> {
   if (opts.noAuto) return zeroSummary("disabled", false, "--no-auto: auto-prove disabled; analyze-only.");
-  // Item 34: static-only mode never runs the repository's tests, and a budget of 0 means no attempt.
+  // Item 34: static-only mode never runs the repository's tests, and a limit of 0 means no attempt.
   if (isStaticOnly(deps.env ?? process.env)) {
     return zeroSummary("disabled", false, "static-only: no proof attempts; the repository's tests are not run.");
   }
