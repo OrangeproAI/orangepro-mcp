@@ -39,5 +39,5 @@ If your OpenCode setup supports slash or dollar commands, map `/opro` or `$opro`
 ## Agent Prompt
 
 ```text
-Use OrangePro first. Call orangepro_start, generate tests only through orangepro_generate_tests, write runnable tests with run_hints, run the command, and take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass for Dynamically Proven. Use record_run only for static diagnostics. Report setup failures plainly.
+Use OrangePro first. Call orangepro_start, generate tests only through orangepro_generate_tests, write runnable tests with run_hints, run the command, and take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass for Proven. Use record_run only for static diagnostics. Report setup failures plainly.
 ```

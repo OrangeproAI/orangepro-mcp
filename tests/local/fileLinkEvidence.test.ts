@@ -81,8 +81,8 @@ describe("a test linked to the whole file", () => {
     const cells = csvCells(read("tests.csv"));
     const row = (title: string) => model.worklist.find((w) => w.title === title);
 
-    expect(rtm).toMatch(/\| Checkout\.chargeOrder \| sym:src\/billing\/charge\.ts#Checkout\.chargeOrder \|[^\n]*\| Candidate signal \(unconfirmed\) \|/);
-    expect(rtm).toMatch(/\| refundOrder \|[^\n]*\| No integration signal \|/);
+    expect(rtm).toMatch(/\| Checkout\.chargeOrder \| sym:src\/billing\/charge\.ts#Checkout\.chargeOrder \|[^\n]*\| Unconfirmed \|/);
+    expect(rtm).toMatch(/\| refundOrder \|[^\n]*\| No test found \|/);
 
     expect(row("Checkout.chargeOrder")).toMatchObject({ evidence: "none", verb: "write", fileLink: "test/smoke.test.ts", reason: "No test calls it. test/smoke.test.ts imports its file; read it first." });
     expect(row("refundOrder")?.fileLink).toBeUndefined();

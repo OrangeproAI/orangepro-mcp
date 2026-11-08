@@ -467,7 +467,7 @@ function classify({ baseline, mutant }) {
     return { status: "unrunnable", proven: false, reason: "mutant did not compile" };
   }
   if (mutant.timedOut) {
-    return { status: "unrunnable", proven: false, reason: "mutant timed out" };
+    return { status: "unrunnable", proven: false, reason: "the mutated code ran past the time limit" };
   }
   const tc = mutant.report?.targetCase;
   if (!tc) {
@@ -558,6 +558,7 @@ function main() {
     const output = {
       ...verdict,
       mode: args.mode,
+      timeoutMs,
       testClass: args.testClass,
       testMethod: args.testMethod,
       target: targetRel,

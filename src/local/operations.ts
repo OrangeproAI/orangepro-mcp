@@ -60,7 +60,7 @@ import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFing
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import { assertMayRunRepositoryCode, isStaticOnly, STATIC_ONLY_REFUSAL } from "./staticOnly.js";
-import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
+import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget, isNoKeyMessage } from "./autoProve.js";
 import { AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT, RunHint, runnableRunHintsFor } from "./generate/runHints.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
 import { buildOracle, scoreArm, armMetrics, CompareDimensions, CompareMetrics } from "./generate/compareScore.js";
@@ -84,7 +84,7 @@ import { buildVizPayload } from "./viz/payload.js";
 import { renderVizHtml } from "./viz/html.js";
 import { buildBehaviorReportDataWithGaps, dominantBlockReason, type DynamicProofReportInput } from "./viz/behaviorReportData.js";
 import { denominatorNoun, proofTestLocation, repoWebFromRemote, shortReportPath, type RepoWeb } from "./viz/shortReport.js";
-import { buildReportModel, isReportModel, REPORT_DATA_FILE, REPORT_DATA_VERSION, REPORT_RENDERER_VERSION, worklistRanking, type ProofRow, type ReportModel } from "./viz/reportModel.js";
+import { buildReportModel, isReportModel, testFileLinks, REPORT_DATA_FILE, REPORT_DATA_VERSION, REPORT_RENDERER_VERSION, worklistRanking, type ProofRow, type ReportModel } from "./viz/reportModel.js";
 import { checkedText, renderSummaryReport } from "./viz/summaryReport.js";
 import { renderDetailedReport } from "./viz/detailedReport.js";
 import { testsCsv, TESTS_CSV_FILE } from "./viz/testsExport.js";
@@ -117,6 +117,7 @@ import {
   distillProofAttempts,
   loadProofAttempts,
   proofAttemptsFresh,
+  PROOF_BLOCKER_GUIDE,
   writeProofAttempts,
   type ProofDoctorResult
 } from "./proofDoctor.js";
@@ -155,6 +156,8 @@ export interface AnalyzeSummary {
   runtime_coverage_prepare?: RuntimeCoveragePrepareResult;
   /** Weak AI-suggested candidate links in the current graph; separate from coverage/proof. */
   ai_linked: AiLinkedSummary;
+  /** opro start only: test files that call at least one counted function (a traced link), and those that call none. */
+  test_links?: { test_files: number; linked: number; none: number };
   warnings: string[];
 }
 
@@ -355,6 +358,8 @@ export interface DynamicProofOracleSummary {
   baseline?: { exitCode?: number; timedOut?: boolean; failureSummary?: string | null };
   mutant?: { exitCode?: number; timedOut?: boolean; assertionFailure?: boolean };
   medianProofMs?: number | null;
+  /** The per-run time limit the proof script used (each language has its own default). */
+  timeoutMs?: number;
   /** Redacted runner diagnostics (command/cwd/exit/duration/tail), informational only. */
   diagnostics?: {
     command: string;
@@ -698,6 +703,7 @@ export interface GoDynamicProofJson {
   status: string;
   proven: boolean;
   reason?: string;
+  timeoutMs?: number;
   testRun?: string;
   target?: string;
   func?: string;
@@ -749,7 +755,8 @@ function mapGoOracle(go: GoDynamicProofJson): DynamicProofOracleSummary {
           runMutant.exitCode !== 0
       }
       : { assertionFailure: false },
-    medianProofMs: go.medianProofMs
+    medianProofMs: go.medianProofMs,
+    ...(typeof go.timeoutMs === "number" ? { timeoutMs: go.timeoutMs } : {})
   };
 }
 
@@ -763,6 +770,7 @@ export interface JavaDynamicProofJson {
   status: string;
   proven: boolean;
   reason?: string;
+  timeoutMs?: number;
   mode?: string;
   testClass?: string;
   testMethod?: string;
@@ -825,7 +833,8 @@ function mapJavaOracle(java: JavaDynamicProofJson): DynamicProofOracleSummary {
           runMutant.exitCode !== 0
       }
       : { assertionFailure: false },
-    medianProofMs: java.medianProofMs
+    medianProofMs: java.medianProofMs,
+    ...(typeof java.timeoutMs === "number" ? { timeoutMs: java.timeoutMs } : {})
   };
 }
 
@@ -1752,7 +1761,7 @@ export function opDoctor(root: string): DoctorResult {
 }
 
 /**
- * G1 — proof-focused doctor: why are top targets not Dynamically Proven?
+ * G1 — proof-focused doctor: why are top targets not Proven?
  * Read-only: consumes the canonical RTM judgment (buildRtm) plus the last run's
  * redacted proof-attempts sidecar. Mints nothing, mutates no ledger, writes no
  * files — under staleness or ambiguity it fails closed to "re-run".
@@ -1768,7 +1777,7 @@ export function opGaps(root: string, opts: { limit?: number; min_priority?: stri
   const graph = loadGraph(workspacePaths(root).graphPath);
   const gaps = findGaps(graph, opts);
   // Ledger proofs are invisible to the graph's hard edges; pass them so a type
-  // whose every method is Dynamically Proven is suppressed instead of ranked.
+  // whose every method is Proven is suppressed instead of ranked.
   const provenIds = provenSymbolIds(graph, loadLedger(root));
   const topRiskGaps = rankRiskGaps(graph, { limit: opts.limit ?? 10, repoRoot: root, provenIds }).map((gap) => ({
     external_id: gap.id,
@@ -1798,7 +1807,7 @@ export function opGaps(root: string, opts: { limit?: number; min_priority?: stri
     top_risk_gaps: topRiskGaps,
     risk_model: {
       formula: "OrangePro Risk Score = Probability(1-10) × Impact(1-10) × DetectionDifficulty(1|5|10); P = normalize(git_churn*0.35 + fan_out*0.30 + new_code*15 + complexity*0.20); I = normalize(fan_in*0.30 + route_weight*0.30 + flow_position*0.20 + data_sensitivity*0.20); D = {proven:1, associated:5, none:10}",
-      note: "Risk ranking is prioritization only. It does not change Proven, Runtime-covered, Associated signal, No integration signal, or coverage percentages."
+      note: "Risk ranking is prioritization only. It does not change Proven, Runs under tests, Linked, No test found, or coverage percentages."
     }
   };
 }
@@ -2258,6 +2267,7 @@ export function opDynamicProof(
       oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
     }
   }
+  oracle = withTimeoutOutcome(oracle);
   const closed = dynamicProofSucceeded(oracle);
   const baselineGreen = oracle.baseline?.exitCode === 0 && oracle.baseline?.timedOut !== true;
   const mutantFailedAssertion = oracle.mutant?.assertionFailure === true && oracle.mutant?.timedOut !== true;
@@ -2325,9 +2335,46 @@ export function opDynamicProof(
       mutant: oracle.mutant
         ? { exitCode: oracle.mutant.exitCode, timedOut: oracle.mutant.timedOut, assertionFailure: oracle.mutant.assertionFailure }
         : undefined,
-      medianProofMs: oracle.medianProofMs
+      medianProofMs: oracle.medianProofMs,
+      ...(typeof oracle.timeoutMs === "number" ? { timeoutMs: oracle.timeoutMs } : {})
     }
   };
+}
+
+/** The mutant status of a mutated run that the time limit stopped: never a catch, never a survivor. */
+export const MUTANT_TIMED_OUT_STATUS = "mutant_timed_out";
+export const MUTANT_TIMEOUT_REASON = "the mutated code ran past the time limit";
+
+function limitText(ms: number | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return "its time limit";
+  return ms % 1000 === 0 ? `the ${ms / 1000} s time limit` : `the ${ms} ms time limit`;
+}
+
+/** "The original code's test ran past the 30 s time limit, so nothing was measured." */
+export function baselineTimeoutReason(ms: number | undefined): string {
+  return `The original code's test ran past ${limitText(ms)}, so nothing was measured.`;
+}
+
+/**
+ * One reading of a time-out for every language: a baseline the limit stopped measured
+ * nothing; a mutant the limit stopped did not show a catch (and is never Proven, even if
+ * the runner also saw an assertion failure before the kill).
+ */
+export function withTimeoutOutcome(oracle: DynamicProofOracleSummary): DynamicProofOracleSummary {
+  // Python's setup and collection steps carry their own category (the sandbox did not start): keep it.
+  if (oracle.baseline?.timedOut === true && !oracle.category) {
+    return { ...oracle, status: "unrunnable", proven: false, reason: baselineTimeoutReason(oracle.timeoutMs) };
+  }
+  if (oracle.mutant?.timedOut === true) {
+    return {
+      ...oracle,
+      status: MUTANT_TIMED_OUT_STATUS,
+      proven: false,
+      reason: MUTANT_TIMEOUT_REASON,
+      mutant: { ...oracle.mutant, assertionFailure: false }
+    };
+  }
+  return oracle;
 }
 
 const SETUP_DEFAULT_TIMEOUT_MS = 30_000;
@@ -3074,7 +3121,8 @@ export async function opStart(
     ...analyze,
     analysis: finalGraph.analysis ?? analyze.analysis,
     candidate_relationships_count: finalGraph.candidate_edges.length,
-    ai_linked: aiLinked
+    ai_linked: aiLinked,
+    test_links: testLinksSummary(finalGraph)
   };
   reportProgress("artifacts: selecting gap targets", { current: 8, total: 8 });
   const gaps = opGaps(root, { limit: 10 });
@@ -3085,9 +3133,9 @@ export async function opStart(
   if (autoProveResult.status === "skipped-no-key") {
     nextActions.push(autoProveResult.reason ?? NO_KEY_MESSAGE);
   } else if (autoProveResult.status === "disabled") {
-    nextActions.push("Dynamic proof was not attempted (--no-auto); run without it to auto-mint Dynamically Proven from generated tests. Static mapping and Associated signals are unaffected.");
+    nextActions.push("Dynamic proof was not attempted (--no-auto); run without it to auto-mint Proven from generated tests. Static mapping and links are unaffected.");
   } else if (autoProveResult.ran) {
-    nextActions.push(`Dynamic proof: attempted the top ${autoProveResult.attempted} target(s); ${autoProveResult.proven} dynamically proven. Static breadth (behaviors, flows, Associated signals) is mapped regardless.`);
+    nextActions.push(`Dynamic proof: attempted the top ${autoProveResult.attempted} target(s); ${autoProveResult.proven} proven. Static breadth (behaviors, flows, links) is mapped regardless.`);
     if (autoProveResult.proven === 0) {
       const allEnvironmentUnavailable = autoProveResult.attempts.length > 0
         && autoProveResult.attempts.every((attempt) => attempt.category === "environment_unavailable" || attempt.category === "collection_error");
@@ -3095,18 +3143,18 @@ export async function opStart(
         nextActions.push("Proof not run: test environment could not be started (see ledger)");
       }
       const dom = dominantBlockReason(autoProveResult.needs_setup);
-      if (dom) nextActions.push(`Dynamic proof closed 0: blocked because ${dom.label} (${dom.count}/${dom.total}). This is a sandbox setup gap, not a static-test failure; Static Associated signals are still shown.`);
+      if (dom) nextActions.push(`Dynamic proof closed 0: blocked because ${dom.label} (${dom.count}/${dom.total}). ${blockedRunMeaning(dom.category)} Static links are still shown.`);
     }
     for (const file of autoProveResult.generated_files) nextActions.push(`Auto-prove wrote generated test: ${file}`);
     for (const attempt of autoProveResult.needs_setup) nextActions.push(`Auto-prove needs setup for ${attempt.target_symbol} (${attempt.test_path}): ${attempt.reason ?? "baseline/setup did not run"}.`);
     // Fix 2: the existing-tests lane ran without a key but minted 0 Proven (all survived) —
     // still surface the add-a-key guidance, since a key would unlock the generation lane.
-    // (`reason` carries NO_KEY_MESSAGE only on the no-key path; skipped-no-key is handled above.)
-    if (autoProveResult.proven === 0 && autoProveResult.reason === NO_KEY_MESSAGE) nextActions.push(autoProveResult.reason);
+    // (`reason` is a no-key message only on the no-key path; when tests ran it says drafting, not proof, was skipped.)
+    if (autoProveResult.proven === 0 && isNoKeyMessage(autoProveResult.reason)) nextActions.push(autoProveResult.reason!);
   }
   if (rtm.summary.total > 0 && rtm.summary.proven === 0) {
     nextActions.push(
-      "Dynamically Proven is 0 because no dynamic proof has closed yet; this is expected after analyze-only. In a coding agent, generate a test for the top gap and follow the returned prove_run/prove_loop handoff to mint Dynamically Proven through the dynamic oracle."
+      "Proven is 0 because no dynamic proof has closed yet; this is expected after analyze-only. In a coding agent, generate a test for the top gap and follow the returned prove_run/prove_loop handoff to mint Proven through the dynamic oracle."
     );
   }
   nextActions.push(
@@ -3699,6 +3747,25 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
   };
 }
 
+/**
+ * What a run blocked by `category` means (item 8): only a sandbox that could not start is
+ * a sandbox setup gap; a compile failure is a compile failure, with its remedy.
+ */
+export function blockedRunMeaning(category: string): string {
+  if (category === "environment_unavailable") return "This is a sandbox setup gap, not a static-test failure.";
+  if (category === "go_package_build_failure" || category === "module_not_found") {
+    return `The code did not compile in the proof copy: ${PROOF_BLOCKER_GUIDE[category].next_step}`;
+  }
+  if (category === "timeout") return `The test ran past the time limit, so nothing was measured: ${PROOF_BLOCKER_GUIDE.timeout.next_step}`;
+  return "The test could not run in the proof copy; this is not a test result.";
+}
+
+/** How many test files call at least one counted function, and how many call none (start result). */
+function testLinksSummary(graph: LocalGraph): { test_files: number; linked: number; none: number } {
+  const links = testFileLinks(graph);
+  return { test_files: links.testFiles, linked: links.linked, none: links.unlinked };
+}
+
 /** Both reports and the CSV from one model. Only the detailed report may fail the call. */
 function writeReports(model: ReportModel, htmlPath: string, summaryPath: string, csvPath: string): { summary: boolean; csv: boolean } {
   const csv = testsCsv(model.worklist, { repository: model.repo.name, commit: model.repo.commit, toolVersion: model.tool, generatedAt: model.generatedAt });
@@ -3740,7 +3807,7 @@ export function rerenderSavedReports(
   const dataPath = join(workspaceDir, REPORT_DATA_FILE);
   const saved = readReportModel(dataPath);
   if (!saved) return null;
-  const model: ReportModel = { ...saved, checked: { at: checked.at, text: checkedText(checked.previousGeneratedAt, checked.at, checked.rerendered, ORANGEPRO_VERSION) } };
+  const model: ReportModel = { ...saved, checked: { at: checked.at, text: checkedText(checked.previousGeneratedAt, checked.at, checked.rerendered, ORANGEPRO_VERSION, { previous: saved.timeZone }) } };
   const htmlPath = resolve(root, outputPath);
   const summaryPath = shortReportPath(htmlPath);
   const csvPath = join(workspaceDir, TESTS_CSV_FILE);

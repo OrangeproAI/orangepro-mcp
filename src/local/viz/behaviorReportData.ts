@@ -183,7 +183,7 @@ export interface BehaviorReportCandidateFlows {
 export interface DynamicProofReportInput {
   /** Targets the dynamic pass actually ran this run (existing + generation). */
   attempted: number;
-  /** Newly Dynamically Proven this run (informational; the KPI uses the RTM count). */
+  /** Newly Proven this run (informational; the KPI uses the RTM count). */
   proven: number;
   /** needs_setup attempts with their R-1 category + short redacted reason (for dominant-block naming). */
   needsSetup: Array<{ category?: string; reason?: string }>;
@@ -204,7 +204,8 @@ export interface BehaviorReportDataOptions {
 const BLOCK_CATEGORY_LABEL: Record<string, string> = {
   environment_unavailable: "a Python test environment that could not start",
   collection_error: "a Python test collection or import error",
-  go_package_build_failure: "a Go package that could not build for proof",
+  go_package_build_failure: "a Go package that did not compile",
+  timeout: "a test that ran past the time limit",
   runner_missing: "a missing test runner in the selected package",
   module_not_found: "a missing module or dependency in the sandbox",
   tsconfig_missing: "a monorepo tsconfig the sandbox can't resolve (a parent config the package extends)",
@@ -315,7 +316,7 @@ function isNoneTier(tier: RtmRow["evidence_tier"]): boolean {
 
 function summaryFromRows(rows: RtmRow[], flowIds: Set<string>): BehaviorReportData["summary"] {
   // buildRtm intentionally unions valid proof rows that fall outside the static
-  // denominator. They remain visible and count as Dynamically Proven, but must
+  // denominator. They remain visible and count as Proven, but must
   // never increase the "Methods found" denominator.
   const denominatorRows = rows.filter((r) => r.off_denominator !== true);
   const proven = rows.filter((r) => r.evidence_tier === "proven").length;
@@ -369,7 +370,7 @@ function pipeline(graph: LocalGraph, ledger: Ledger, summary: BehaviorReportData
 }
 
 const KEEP_ACTION =
-  "Keep generating tests for high-risk gaps and close each one through the proof handoff; Statically Linked signals stay separate.";
+  "Keep generating tests for high-risk gaps and close each one through the proof handoff; links stay separate.";
 const HANDOFF_ACTION =
   "Run OrangePro from a coding agent with a model key; follow the returned proof handoff so the agent generates a runnable test and calls orangepro_prove_loop. Direct CLI users can run prove-loop after writing or choosing a real passing test.";
 
@@ -381,14 +382,14 @@ function proofGuidance(
   if (summary.proven > 0) {
     return {
       state: "proven",
-      title: "Dynamically Proven is active",
-      body: `${summary.proven.toLocaleString()} behavior${summary.proven === 1 ? "" : "s"} closed with dynamic targeted proof. Each Dynamically Proven row requires a passing baseline, a targeted mutant failure at assertion, and the target running unmocked. Statically Linked signals stay separate.`,
+      title: "Proven is active",
+      body: `${summary.proven.toLocaleString()} behavior${summary.proven === 1 ? "" : "s"} closed with dynamic targeted proof. Each Proven row requires a passing baseline, a targeted mutant failure at assertion, and the target running unmocked. links stay separate.`,
       action: KEEP_ACTION
     };
   }
 
   // Prefer THIS RUN's dynamic-proof outcome (names the dominant block reason). Static breadth
-  // — behaviors, flows, Statically Linked signals — is unaffected; only the dynamic pass is small.
+  // — behaviors, flows, links — is unaffected; only the dynamic pass is small.
   if (dyn) {
     if (dyn.attempted === 0) {
       const why = dyn.status === "disabled"
@@ -402,8 +403,8 @@ function proofGuidance(
               : "";
       return {
         state: "not_started",
-        title: "0 Dynamically Proven — dynamic proof was not attempted",
-        body: `Dynamic proof was not attempted in this run.${why} Static behavior mapping and Statically Linked signals are still available.`,
+        title: "0 Proven — dynamic proof was not attempted",
+        body: `Dynamic proof was not attempted in this run.${why} Static behavior mapping and links are still available.`,
         action: HANDOFF_ACTION
       };
     }
@@ -426,8 +427,8 @@ function proofGuidance(
     if (allBlocked && dom) {
       return {
         state: "attempted",
-        title: `0 Dynamically Proven — top ${dyn.attempted} attempted, all setup-blocked`,
-        body: `Dynamic proof attempted ${dyn.attempted} target${plural}; none reached a green baseline. Most common block: ${dom.label} (${dom.count}/${dom.total} actual attempts). This is a test-environment/setup gap, not a static-test failure — the Statically Linked signals are still shown.`,
+        title: `0 Proven — top ${dyn.attempted} attempted, all setup-blocked`,
+        body: `Dynamic proof attempted ${dyn.attempted} target${plural}; none reached a green baseline. Most common block: ${dom.label} (${dom.count}/${dom.total} actual attempts). This is a test-environment/setup gap, not a static-test failure — the links are still shown.`,
         action: nextStepFor(dom) ?? HANDOFF_ACTION,
         attempted: dyn.attempted
       };
@@ -435,8 +436,8 @@ function proofGuidance(
     const because = dom ? ` Blocked because: ${dom.label} (${dom.count}/${dom.total}).` : "";
     return {
       state: "attempted",
-      title: `0 Dynamically Proven — top ${dyn.attempted} attempted, 0 closed`,
-      body: `OrangePro mapped this repo statically. Dynamic proof is a targeted verification pass: it runs existing or generated tests, mutates the exact behavior, and promotes only tests that fail at an assertion. This run attempted the top ${dyn.attempted} eligible behavior${plural} and closed 0.${because} Static test signals stay Statically Linked.`,
+      title: `0 Proven — top ${dyn.attempted} attempted, 0 closed`,
+      body: `OrangePro mapped this repo statically. Dynamic proof is a targeted verification pass: it runs existing or generated tests, mutates the exact behavior, and promotes only tests that fail at an assertion. This run attempted the top ${dyn.attempted} eligible behavior${plural} and closed 0.${because} Static test signals stay Linked.`,
       action: nextStepFor(dom) ?? HANDOFF_ACTION,
       attempted: dyn.attempted
     };
@@ -456,15 +457,15 @@ function proofGuidance(
     }
     return {
       state: "attempted",
-      title: "0 Dynamically Proven — dynamic proof ran, none closed yet",
-      body: "OrangePro found dynamic proof attempts in the local ledger, but none satisfied the full Dynamically Proven gate. Static tests still show as Statically Linked only.",
+      title: "0 Proven — dynamic proof ran, none closed yet",
+      body: "OrangePro found dynamic proof attempts in the local ledger, but none satisfied the full Proven gate. Static tests still show as Linked only.",
       action: "Use the coding-agent handoff to repair or regenerate the test, then run the provided prove_loop step again."
     };
   }
   return {
     state: "not_started",
-    title: "0 Dynamically Proven means no dynamic proof has run yet",
-    body: "This report is an analysis pass. It can find behaviors, static test evidence, risk, and reachable flows, but it will not label anything Dynamically Proven until a real test kills a targeted mutant of the behavior.",
+    title: "0 Proven means no dynamic proof has run yet",
+    body: "This report is an analysis pass. It can find behaviors, static test evidence, risk, and reachable flows, but it will not label anything Proven until a real test kills a targeted mutant of the behavior.",
     action: HANDOFF_ACTION
   };
 }
@@ -1169,7 +1170,7 @@ function riskTodo(
   generatedTests: Array<{ runnable?: boolean; blocker?: GeneratedDraftBlocker }>
 ): string {
   if (generatedTests.length && generatedTests.every((t) => t.runnable !== false)) {
-    return "Run the generated test below in your repo; follow its prove handoff so a mutation failure can mint Dynamically Proven.";
+    return "Run the generated test below in your repo; follow its prove handoff so a mutation failure can mint Proven.";
   }
   if (
     generatedTests.some((t) => t.runnable !== false) &&
@@ -1316,7 +1317,7 @@ export interface BehaviorReportBuild {
   deleteGaps: RiskGap[];
   deleteTotal: number;
   /**
-   * Destructive paths that are already Dynamically Proven. The worklist ranks only
+   * Destructive paths that are already Proven. The worklist ranks only
    * unproven paths, so these never appear in `deleteGaps`; a summary that counts
    * delete paths needs them to keep its denominator whole. Empty when nothing is proven.
    */

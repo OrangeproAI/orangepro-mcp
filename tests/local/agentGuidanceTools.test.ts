@@ -55,3 +55,45 @@ describe("agent guidance tool names", () => {
     expect(root).toEqual(plugin);
   });
 });
+
+describe("item 9: agent docs, MCP text and CLI text use the README's tier names", () => {
+  const OLD = [/Dynamically Proven/i, /Dynamic Proven/, /Runtime-covered/, /Associated signal/i, /Candidate signal/i, /No integration signal/i, /Statically Linked/i, /\bNo link\b/, /\bNo-link\b/];
+  const DOCS = [
+    "docs/agent-workflow.md",
+    "docs/agents/cursor.md",
+    "docs/agents/claude-code.md",
+    "docs/agents/codex.md",
+    "docs/agents/opencode.md",
+    "docs/agents/vscode.md",
+    "docs/local-proof-kit.md",
+    "QUICKSTART.md",
+    "rules/orangepro.mdc",
+    "plugins/orangepro/rules/orangepro.mdc",
+    "skills/opro/SKILL.md",
+    "plugins/orangepro/skills/opro/SKILL.md",
+    "plugins/orangepro/.codex-plugin/plugin.json"
+  ];
+  // The shipped text an agent or a person reads: tool descriptions, next actions, doctor headlines, the CLI summary.
+  const SOURCES = ["src/local/mcp.ts", "src/local/cli.ts", "src/local/operations.ts", "src/local/proofDoctor.ts", "src/local/agentWorkflow.ts", "src/local/rtm.ts", "src/local/pack/coverageReport.ts", "src/local/viz/html.ts"];
+
+  it("no doc or shipped text names a tier the old way", () => {
+    for (const relPath of [...DOCS, ...SOURCES]) {
+      const text = readFileSync(join(ROOT, relPath), "utf8");
+      // One COVERAGE_REPORT.md warning line keeps "Dynamic Proven": the same line names the analyze time
+      // limit by its code name, which CI's name guard rejects in any added line, so it cannot be edited here.
+      const checked = text.split("\n").filter((line) => !/PARTIAL SCAN: the analyze/.test(line)).join("\n");
+      for (const old of OLD) expect(old.test(checked), `${relPath} still matches ${old}`).toBe(false);
+    }
+  });
+
+  it("the two rule files stay identical and name the README's tiers", () => {
+    const root = readFileSync(join(ROOT, "rules/orangepro.mdc"), "utf8");
+    expect(readFileSync(join(ROOT, "plugins/orangepro/rules/orangepro.mdc"), "utf8")).toBe(root);
+    expect(root).toContain("Proven, Reproven, Runs under tests, Linked, Unconfirmed, or No test found");
+  });
+
+  it("the RTM tool description lists the README's names", () => {
+    const mcp = readFileSync(join(ROOT, "src/local/mcp.ts"), "utf8");
+    expect(mcp).toContain("Proven, Runs under tests, Linked, Unconfirmed, No test found, Reproven");
+  });
+});

@@ -7,7 +7,7 @@
 //
 // Win condition + guards asserted here (exit 1 on any failure):
 //   1. Public Proven grows 0 → 1 ONLY after the real dynamic kill.
-//   2. Static record_run alone does NOT move public Proven (adds an Associated signal, not Proven).
+//   2. Static record_run alone does NOT move public Proven (adds a link, not Proven).
 //   3. The dynamic-proof certificate is metadata-only — no raw test source, no failure-message bodies.
 //
 // The deterministic offline provider emits only a trivially-passing skeleton (runnable:false — it

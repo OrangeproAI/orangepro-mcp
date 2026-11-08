@@ -291,7 +291,7 @@ describe("rankRiskGaps", () => {
   });
 
   // Regression (Temporal, consts.staleStateError at rank #10): both methods were
-  // Dynamically Proven, but proof lives in the ledger — not in a TESTED_BY edge —
+  // Proven, but proof lives in the ledger — not in a TESTED_BY edge —
   // and the proven methods sit outside the static denominator, so the hard-edge-only
   // container check never fired and the container outranked its own proven methods.
   it("suppresses a container whose every member_of child is proven only in the ledger", () => {

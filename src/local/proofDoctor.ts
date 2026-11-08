@@ -1,5 +1,5 @@
 /**
- * G1 — `opro doctor --proof`: explain WHY top targets are not Dynamically Proven.
+ * G1 — `opro doctor --proof`: explain WHY top targets are not Proven.
  *
  * Read-only diagnostics over already-produced, already-redacted data:
  *   - `.orangepro/proof-attempts.json` — a distilled sidecar of the last run's
@@ -93,6 +93,7 @@ export type ProofBlockerCategory =
   | "module_root_missing"
   | "assertion_binding"
   | "unsupported_language"
+  | "go_package_build_failure"
   | "setup_failed";
 
 interface BlockerGuide {
@@ -141,6 +142,14 @@ export const PROOF_BLOCKER_GUIDE: Record<ProofBlockerCategory, BlockerGuide> = {
     label: "no dynamic-proof profile exists for this language yet",
     next_step: "TS/JS, Go, Java and Python are dynamically provable today; other languages stay honestly in their static tiers."
   },
+  timeout: {
+    label: "the original code's test ran past the time limit, so nothing was measured",
+    next_step: "Run the test once on its own to see why it is slow; pass a longer limit with `--timeout-ms` when proving it by hand."
+  },
+  go_package_build_failure: {
+    label: "the Go package did not compile in the proof copy",
+    next_step: "Run `go mod download` (or build the package once with `go build ./...`) so its modules are in the cache, then re-run `opro start`."
+  },
   setup_failed: {
     label: "proof setup failed before the oracle could run",
     next_step: "Read the attempt reason, fix the named setup step, then re-run `opro start`."
@@ -150,7 +159,7 @@ export const PROOF_BLOCKER_GUIDE: Record<ProofBlockerCategory, BlockerGuide> = {
 /** Wording is load-bearing: a survivor is a proven negative, never a user failure. */
 export const NON_KILLING_NOTE =
   "Not proven: the test still passed while the target was mutated (possibly an equivalent mutation). " +
-  "The mutant surviving is a proven negative about assertion strength — it is never counted as Dynamically Proven.";
+  "The mutant surviving is a proven negative about assertion strength — it is never counted as Proven.";
 
 /** Opposite failure mode: the mutant DID make the test fail, but via a runtime
  *  crash rather than a trusted assertion. The test exercises the target; the
@@ -161,7 +170,13 @@ export const NON_ASSERTION_NOTE =
   "The test does exercise the target; strengthen the assertion to check the target's returned value directly, or re-run — " +
   "whether the crash or the assertion is hit first can vary between runs.";
 
+/** A mutant the time limit stopped: it neither caught nor missed the fault. Never "survived". */
+export const MUTANT_TIMEOUT_NOTE =
+  "Ran past the time limit: the test did not finish on the mutated code, so it neither caught nor missed the fault. " +
+  "Not proven. Run it on its own with a longer `--timeout-ms` to get a result.";
+
 export function nonKillingNoteFor(mutantStatus?: string): string {
+  if (mutantStatus === "mutant_timed_out") return MUTANT_TIMEOUT_NOTE;
   return mutantStatus === "associated_non_assertion_failure" ? NON_ASSERTION_NOTE : NON_KILLING_NOTE;
 }
 
@@ -180,7 +195,7 @@ export interface ProofDoctorBlocker {
 export interface ProofDoctorResult {
   schema_version: string;
   /**
-   * proven  — RTM says ≥1 behavior is Dynamically Proven.
+   * proven  — RTM says ≥1 behavior is Proven.
    * blocked — 0 proven and we have current blocker evidence.
    * stale   — attempt data predates the current graph/commit; re-run for current reasons.
    * no_data — no attempt sidecar and nothing to preflight.
@@ -511,17 +526,17 @@ export function buildProofDoctor(
       "Proof-attempt data is stale (the graph or commit changed since the last run) — re-run `opro start` for current blocker reasons.";
   } else if (proven > 0) {
     status = "proven";
-    headline = `${proven} of ${denominator} behaviors are Dynamically Proven (RTM). Blockers below explain the rest.`;
+    headline = `${proven} of ${denominator} behaviors are Proven (RTM). Blockers below explain the rest.`;
   } else if (blockers.length > 0) {
     const top = blockers[0];
     status = "blocked";
     headline =
       top.count > 1
-        ? `0 Dynamically Proven — one root cause blocked ${top.count} target${top.count === 1 ? "" : "s"}: ${top.label}.`
-        : `0 Dynamically Proven — top blocker: ${top.label}.`;
+        ? `0 Proven — one root cause blocked ${top.count} target${top.count === 1 ? "" : "s"}: ${top.label}.`
+        : `0 Proven — top blocker: ${top.label}.`;
   } else if (non_killing.length > 0) {
     status = "blocked";
-    headline = `0 Dynamically Proven — ${non_killing.length} attempt(s) ran but did not close (see non_killing for the per-target outcome).`;
+    headline = `0 Proven — ${non_killing.length} attempt(s) ran but did not close (see non_killing for the per-target outcome).`;
   } else {
     status = "no_data";
     headline = "No proof-attempt data yet — run `opro start` to attempt dynamic proof and record blockers.";

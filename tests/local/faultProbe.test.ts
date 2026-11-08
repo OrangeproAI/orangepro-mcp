@@ -832,3 +832,57 @@ describe('seconds when', function () {
     expect(spike(args).json).toMatchObject({ status: "associated_non_assertion_failure", proven: false });
   });
 });
+
+describe("item 10: a run folder ignores operating-system metadata files, and only those", () => {
+  const made: string[] = [];
+  afterAll(() => {
+    for (const dir of made) rmSync(dir, { recursive: true, force: true });
+  });
+  const finishedRun = (): string => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opro-manifest-"));
+    made.push(dir);
+    mkdirSync(path.join(dir, "logs"), { recursive: true });
+    writeFileSync(path.join(dir, "result.json"), '{"ok":true}\n');
+    writeFileSync(path.join(dir, "logs", "run.log"), "ran\n");
+    writeRunManifest(dir, "run-1", "0.0.0-test");
+    return dir;
+  };
+
+  it("passes with .DS_Store (top level and nested), Thumbs.db and desktop.ini beside the listed files", () => {
+    const dir = finishedRun();
+    writeFileSync(path.join(dir, ".DS_Store"), "finder");
+    writeFileSync(path.join(dir, "logs", ".DS_Store"), "finder");
+    writeFileSync(path.join(dir, "Thumbs.db"), "explorer");
+    writeFileSync(path.join(dir, "logs", "desktop.ini"), "explorer");
+    expect(verifyRunFolder(dir).ok).toBe(true);
+  });
+
+  it("still refuses any other unlisted file, with the same message", () => {
+    const dir = finishedRun();
+    writeFileSync(path.join(dir, ".DS_Store"), "finder");
+    writeFileSync(path.join(dir, "notes.txt"), "added later");
+    expect(verifyRunFolder(dir)).toEqual({ ok: false, message: "files not listed in MANIFEST.json: notes.txt." });
+    // A near-miss name is not metadata.
+    const other = finishedRun();
+    writeFileSync(path.join(other, ".DS_Store.bak"), "x");
+    expect(verifyRunFolder(other)).toEqual({ ok: false, message: "files not listed in MANIFEST.json: .DS_Store.bak." });
+  });
+
+  it("never lists a metadata file in a new manifest, and a manifest that does list one still checks its hash", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opro-manifest-"));
+    made.push(dir);
+    writeFileSync(path.join(dir, "result.json"), "{}\n");
+    writeFileSync(path.join(dir, ".DS_Store"), "finder");
+    const manifest = writeRunManifest(dir, "run-2", "0.0.0-test");
+    expect(manifest.files.map((f) => f.path)).toEqual(["result.json"]);
+    // An older manifest written with the file in it: the listed entry is checked like any other.
+    const listed = mkdtempSync(path.join(tmpdir(), "opro-manifest-"));
+    made.push(listed);
+    writeFileSync(path.join(listed, ".DS_Store"), "finder");
+    const sha = createHash("sha256").update("finder").digest("hex");
+    writeFileSync(path.join(listed, "MANIFEST.json"), JSON.stringify({ ...manifest, files: [{ path: ".DS_Store", sha256: sha, bytes: 6 }] }));
+    expect(verifyRunFolder(listed).ok).toBe(true);
+    writeFileSync(path.join(listed, ".DS_Store"), "changed");
+    expect(verifyRunFolder(listed)).toEqual({ ok: false, message: ".DS_Store does not match its hash in MANIFEST.json." });
+  });
+});

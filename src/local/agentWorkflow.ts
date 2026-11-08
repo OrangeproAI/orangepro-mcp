@@ -60,7 +60,7 @@ export function buildAgentWorkflowPack(cliPath: string, client: AgentClient = "g
       "Use only generated tests that include `run_hints`; grounded drafts are context, not runnable claims.",
       "Write each runnable test body to its `suggested_path`, run its `run_command` from the owning package, then call the returned `prove_run` args after a pass to attempt public Proven. Use `record_run` only for static diagnostics.",
       "Report pass/fail with stack traces; if the command fails because dependencies or tools are missing, report the setup issue instead of editing around it.",
-      "Summarize whether the graph status changed: Proven, Reproven, Runtime-covered, Associated signal, or No integration signal."
+      "Summarize whether the graph status changed: Proven, Reproven, Runs under tests, Linked, Unconfirmed, or No test found."
     ],
     cli_fallback: [
       "opro",

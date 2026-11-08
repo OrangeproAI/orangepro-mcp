@@ -64,7 +64,7 @@ npx -y @orangepro/mcp-server@latest agent --client generic
 ```
 
 Use the printed MCP configuration. The agent can write and run generated tests, then call
-`orangepro_prove` so only a real mutation kill becomes Dynamically Proven.
+`orangepro_prove` so only a real mutation kill becomes Proven.
 
 ---
 

@@ -120,7 +120,7 @@ try {
   };
   console.log(JSON.stringify(result, null, 2));
   if (
-    result.baseline_status !== "No integration signal" ||
+    result.baseline_status !== "No test found" ||
     !result.generated_handoff_for_target ||
     result.proof_status !== "reproven" ||
     result.proof_closed !== true ||

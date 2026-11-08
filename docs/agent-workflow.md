@@ -62,7 +62,7 @@ For PR work:
 3. Use only generated tests that include run_hints.
 4. Write each body to its suggested_path.
 5. Run the run_command from the owning package directory.
-6. After a pass, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` to attempt Dynamically Proven; use `record_run` only for static diagnostics.
+6. After a pass, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` to attempt Proven; use `record_run` only for static diagnostics.
 7. Report pass/fail with stack traces and exact setup problems.
 
 For baseline work:
@@ -70,10 +70,10 @@ For baseline work:
 2. Pick one high-priority gap.
 3. Call orangepro_generate_tests for that target.
 4. Write, run, and report only runnable tests.
-5. After a pass, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` to attempt Dynamically Proven; use `record_run` only for static diagnostics.
+5. After a pass, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` to attempt Proven; use `record_run` only for static diagnostics.
 
 Do not treat drafts as runnable tests. Drafts are context.
-Do not claim coverage changed unless OrangePro reports Proven, Reproven, Runtime-covered, Associated signal, or No integration signal changed.
+Do not claim coverage changed unless OrangePro reports Proven, Reproven, Runs under tests, Linked, Unconfirmed, or No test found changed.
 ```
 
 ## CLI Fallback
@@ -126,9 +126,10 @@ Go and Java do not take `replacement`. They take `test_run` (`^TestName$` for Go
   not a runnable-test claim.
 - **Proven**: the report count of behaviors whose current code still matches a dynamic proof certificate. The test passed on the original code, and the same test failed at an assertion after the function body was replaced. Static matches and model output are not Proven.
 - **Reproven**: the ledger status `reproven`, written for every successful `orangepro_prove`, including the first time. The oracle reports that same success as `proven: true`. The traceability row says Reproven (this run). That label does not mean the function was proved earlier.
-- **Runtime-covered**: the repo's own coverage tool executed the code; this is runtime observation, not assertion-level proof.
-- **Associated signal**: OrangePro found a name, path, import, or structural test signal, but not semantic proof.
-- **No integration signal**: no static test signal was found.
+- **Runs under tests**: the repo's own coverage tool executed the code; this is runtime observation, not assertion-level proof.
+- **Linked**: a test calls this exact function. That is a structural link, not proof.
+- **Unconfirmed**: a test file or a test with a similar name points here, but no call was traced. That is a lead, not evidence.
+- **No test found**: nothing links a test to it.
 
 Generated-test promotion numbers should count only tests that run in the target
 repo, reference real product symbols, and contain non-vacuous assertions.
@@ -145,8 +146,8 @@ For repos that use an `AGENTS.md`, keep the OrangePro instruction short:
 - For baseline gaps, run `opro gaps --limit 10`, pick one target, then run
   `opro generate --target <target-id> --single --limit 1`.
 - Write only tests that include `run_hints`; drafts are context, not runnable claims.
-- Write each generated body to `suggested_path`, run `run_command`, then take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass to attempt Dynamically Proven. Use `record_run` only for static diagnostics.
-- Report coverage status as Proven / Reproven / Runtime-covered / Associated signal / No integration signal. A successful proof stores ledger status `reproven` and the oracle says `proven: true`, including the first time. Proven is the report count. Reproven (this run) is the traceability label for that certificate, not a second proof. Do not promote Associated signal or AI links to Proven.
+- Write each generated body to `suggested_path`, run `run_command`, then take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` after a pass to attempt Proven. Use `record_run` only for static diagnostics.
+- Report coverage status as Proven / Reproven / Runs under tests / Linked / Unconfirmed / No test found. A successful proof stores ledger status `reproven` and the oracle says `proven: true`, including the first time. Proven is the report count. Reproven (this run) is the traceability label for that certificate, not a second proof. Do not promote Linked, Unconfirmed or AI links to Proven.
 ```
 
 ## Verification Loop
@@ -160,5 +161,5 @@ opro status
 opro gaps --limit 10
 ```
 
-Report what changed. If nothing moved from No integration signal or Associated signal to Proven, say so
+Report what changed. If nothing moved from No test found or Linked to Proven, say so
 plainly.

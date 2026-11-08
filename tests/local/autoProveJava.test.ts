@@ -159,7 +159,7 @@ describe("isEligibleProvableTarget — Java methods only", () => {
 
 // ── auto-drive integration — needs Java + Maven. ──
 
-describe.skipIf(!MAVEN)("autoProve auto-drives Java to Dynamically Proven", () => {
+describe.skipIf(!MAVEN)("autoProve auto-drives Java to Proven", () => {
   it("mints DP≥1 for a Java single-return method automatically (no key, no explicit test_run)", async () => {
     const { ws } = analyzedJava("auto-drive");
     keepOnlyCodeTargets(ws, [`${TARGET}#createTotal`]);

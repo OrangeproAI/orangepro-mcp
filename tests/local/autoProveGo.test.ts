@@ -238,7 +238,7 @@ describe("existingAssociatedTests — a Go METHOD is admitted only via a hard ed
 
 const SLOW_GO_AUTO = process.env.OPRO_SLOW_GO_AUTO === "1";
 
-describe.skipIf(!GO || !SLOW_GO_AUTO)("autoProve auto-drives Go to Dynamically Proven", () => {
+describe.skipIf(!GO || !SLOW_GO_AUTO)("autoProve auto-drives Go to Proven", () => {
   it("mints DP≥1 for a Go free-fn automatically (no key, no explicit test_run) and does NOT prove a method or an equivalent survivor", async () => {
     const { ws } = analyzedGo("auto-drive");
     expect(opRtm(ws, { format: "json" }).summary.proven).toBe(0);

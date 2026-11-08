@@ -31,5 +31,5 @@ If your Codex build supports plugin/shortcut commands, map `$opro` (or `/opro`) 
 ## Agent Prompt
 
 ```text
-Use OrangePro first. Call orangepro_start for this checkout, inspect the returned next_actions, then generate tests only through orangepro_generate_tests. Write only runnable tests with run_hints. After running them, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` for Dynamically Proven. Use record_run only for static diagnostics.
+Use OrangePro first. Call orangepro_start for this checkout, inspect the returned next_actions, then generate tests only through orangepro_generate_tests. Write only runnable tests with run_hints. After running them, take the `prove_run` args returned by `orangepro_generate_tests` and pass them to `orangepro_prove` for Proven. Use record_run only for static diagnostics.
 ```

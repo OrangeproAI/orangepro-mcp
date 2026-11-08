@@ -20,6 +20,8 @@ export type BaselineCategory =
   | "experimental_builtin"
   | "engine_mismatch"
   | "db_or_external"
+  /** The original code's test ran past the proof's time limit, so nothing was measured. */
+  | "timeout"
   | "logic_failure"
   | "unknown";
 

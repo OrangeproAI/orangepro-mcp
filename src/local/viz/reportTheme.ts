@@ -21,17 +21,63 @@ export const breakable = (label: string): string => esc(label).replace(/([./])/g
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** "9 Oct 2026" from an ISO timestamp, in UTC, so the same data renders the same bytes. */
-export function dateText(iso: string | undefined): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso ?? "");
-  if (!m) return iso ?? "";
-  return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1] ?? m[2]} ${m[1]}`;
+/**
+ * The time zone a run happened in, saved with the report data so a re-render on
+ * another machine shows the same local time (same data, same bytes).
+ */
+export interface ReportTimeZone {
+  /** Minutes east of UTC, e.g. -480 for UTC−08:00. */
+  offsetMinutes: number;
+  label: string;
 }
 
-/** "9 Oct 2026, 03:00 UTC". */
-export function dateTimeText(iso: string | undefined): string {
-  const t = /T(\d{2}):(\d{2})/.exec(iso ?? "");
-  return t ? `${dateText(iso)}, ${t[1]}:${t[2]} UTC` : dateText(iso);
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+export function timeZoneLabel(offsetMinutes: number): string {
+  if (offsetMinutes === 0) return "UTC";
+  const abs = Math.abs(offsetMinutes);
+  return `UTC${offsetMinutes < 0 ? "\u2212" : "+"}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+
+/** This machine's zone at the given instant (read once, when the run happens). */
+export function localTimeZone(iso: string, offsetMinutes?: number): ReportTimeZone {
+  const t = Date.parse(iso);
+  const raw = offsetMinutes ?? (Number.isFinite(t) ? -new Date(t).getTimezoneOffset() : 0);
+  const off = Number.isFinite(raw) ? Math.round(raw) : 0;
+  return { offsetMinutes: off, label: timeZoneLabel(off) };
+}
+
+function parts(iso: string | undefined, tz: ReportTimeZone | undefined): { y: string; mo: number; d: number; hh: string; mm: string } | null {
+  if (tz && Number.isFinite(tz.offsetMinutes)) {
+    const t = Date.parse(iso ?? "");
+    if (Number.isFinite(t)) {
+      const at = new Date(t + tz.offsetMinutes * 60_000);
+      return { y: String(at.getUTCFullYear()), mo: at.getUTCMonth() + 1, d: at.getUTCDate(), hh: pad2(at.getUTCHours()), mm: pad2(at.getUTCMinutes()) };
+    }
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(iso ?? "");
+  if (!m) return null;
+  return { y: m[1]!, mo: Number(m[2]), d: Number(m[3]), hh: m[4] ?? "", mm: m[5] ?? "" };
+}
+
+/**
+ * "3 Nov 2026" from an ISO timestamp: the local date of the run when its zone was
+ * saved, the UTC date otherwise (older report data). Never the viewer's zone.
+ */
+export function dateText(iso: string | undefined, tz?: ReportTimeZone): string {
+  const p = parts(iso, tz);
+  if (!p) return iso ?? "";
+  return `${p.d} ${MONTHS[p.mo - 1] ?? p.mo} ${p.y}`;
+}
+
+/** "3 Nov 2026, 21:31 local time (UTC−08:00)", or "9 Oct 2026, 03:00 UTC" without a saved zone. */
+export function dateTimeText(iso: string | undefined, tz?: ReportTimeZone): string {
+  const p = parts(iso, tz);
+  if (!p || !p.hh) return dateText(iso, tz);
+  const date = dateText(iso, tz);
+  return tz && Number.isFinite(tz.offsetMinutes) ? `${date}, ${p.hh}:${p.mm} local time (${tz.label})` : `${date}, ${p.hh}:${p.mm} UTC`;
 }
 
 export interface Swatch { fg: string; bg: string; fill: string }

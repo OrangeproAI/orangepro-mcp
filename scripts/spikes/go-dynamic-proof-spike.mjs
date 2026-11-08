@@ -521,7 +521,7 @@ function classify({ baseline, mutant, name, pkgDirAbs, assertionLine }) {
     return { status: "unrunnable", proven: false, reason: "mutant did not compile" };
   }
   if (mutant.timedOut) {
-    return { status: "unrunnable", proven: false, reason: "mutant timed out" };
+    return { status: "unrunnable", proven: false, reason: "the mutated code ran past the time limit" };
   }
   // Equivalent-value mutation: the target test still passes -> survives.
   if (mutant.exitCode === 0 && targetTestPassed(mutant, name) && !targetTestFailed(mutant, name)) {
@@ -607,6 +607,7 @@ function main() {
     const output = {
       ...verdict,
       mode: args.mode,
+      timeoutMs,
       testRun: args.testRun,
       target: targetRel,
       func: args.func,

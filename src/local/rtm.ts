@@ -4,7 +4,7 @@ import { languageOf } from "./analyze/classify.js";
 import { targetFingerprint, type Ledger } from "./ledger.js";
 
 export type RtmFormat = "md" | "csv" | "json";
-export type RtmStatus = "Proven" | "Runtime-covered" | "Associated signal" | "Candidate signal (unconfirmed)" | "No integration signal" | "Reproven (this run)" | "Generated-unverifiable";
+export type RtmStatus = "Proven" | "Runs under tests" | "Linked" | "Unconfirmed" | "No test found" | "Reproven (this run)" | "Generated-unverifiable";
 export type RtmEvidenceTier = "proven" | "runtime" | "associated" | "candidate" | "none";
 
 export interface RtmRow {
@@ -67,11 +67,11 @@ interface RtmIndexes {
 }
 
 const STATUS_ORDER: Record<RtmStatus, number> = {
-  "No integration signal": 0,
-  "Candidate signal (unconfirmed)": 1,
-  "Associated signal": 2,
+  "No test found": 0,
+  "Unconfirmed": 1,
+  "Linked": 2,
   "Generated-unverifiable": 3,
-  "Runtime-covered": 4,
+  "Runs under tests": 4,
   "Proven": 5,
   "Reproven (this run)": 6
 };
@@ -120,7 +120,7 @@ export function buildRtm(
 }
 
 /**
- * CodeSymbol ids the RTM would call Dynamically Proven — the SAME selection
+ * CodeSymbol ids the RTM would call Proven — the SAME selection
  * buildRtm uses (`selectLedgerBySymbol(...).proven`), so proof judgment has one
  * definition. Consumers outside the RTM (risk ranking's container suppression)
  * need it because a proof leaves no graph edge and its target frequently sits
@@ -135,7 +135,7 @@ export function provenSymbolIds(graph: LocalGraph, ledger: Ledger): Set<string> 
 }
 
 /**
- * The current proof record behind each Dynamically Proven symbol, chosen exactly as
+ * The current proof record behind each Proven symbol, chosen exactly as
  * buildRtm chooses it. Display only (for example, naming the test that proved it).
  */
 export function provenLedgerRecords(graph: LocalGraph, ledger: Ledger): Map<string, Ledger["records"][number]> {
@@ -168,14 +168,14 @@ export function renderRtmMarkdown(result: RtmResult): string {
     "| Metric | Value |",
     "|---|---:|",
     `| Total denominator behaviors | ${s.total} |`,
-    `| Dynamically Proven | ${provenValue} |`,
-    `| Runtime-covered | ${s.runtime_covered} |`,
-    `| Associated signal | ${s.associated} |`,
-    `| Candidate signal (unconfirmed) | ${s.candidate} |`,
-    `| No integration signal | ${s.no_link} |`,
+    `| Proven | ${provenValue} |`,
+    `| Runs under tests | ${s.runtime_covered} |`,
+    `| Linked | ${s.associated} |`,
+    `| Unconfirmed | ${s.candidate} |`,
+    `| No test found | ${s.no_link} |`,
     `| Reproven this run | ${s.reproven_this_run} |`,
     `| Generated unverifiable | ${s.generated_unverifiable} |`,
-    `| Dynamic Proven source | ${s.coverage_confirmed} / ${s.coverage_total} (${s.coverage_pct}%) |`,
+    `| Proven source | ${s.coverage_confirmed} / ${s.coverage_total} (${s.coverage_pct}%) |`,
     `| Current graph kept rate | ${s.kept_rate}% (${s.reproven_this_run}/${s.attempted}) |`,
     ""
   ];
@@ -185,7 +185,7 @@ export function renderRtmMarkdown(result: RtmResult): string {
   }
   if (offDenominatorProven > 0) {
     lines.push(
-      `> ${offDenominatorProven} dynamically-proven symbol(s) sit OUTSIDE the deterministic denominator (marked \`off-denominator\` below). They are counted in Dynamically Proven but NOT in the denominator or Dynamic Proven source ratio.`,
+      `> ${offDenominatorProven} proven symbol(s) sit OUTSIDE the deterministic denominator (marked \`off-denominator\` below). They are counted in Proven but NOT in the denominator or Proven source ratio.`,
       ""
     );
   }
@@ -286,17 +286,17 @@ function evidenceTierFor(indexes: RtmIndexes, node: GraphNode, file: string, dyn
 
 function statusFor(evidence: RtmEvidenceTier, ledgerRecord: Ledger["records"][number] | undefined, dynamicProof: boolean): RtmStatus {
   if (evidence === "proven") return dynamicProof && ledgerRecord?.status === "reproven" && ledgerRecord.closed ? "Reproven (this run)" : "Proven";
-  if (evidence === "runtime") return "Runtime-covered";
+  if (evidence === "runtime") return "Runs under tests";
   if (ledgerRecord?.status === "generated_unverifiable") return "Generated-unverifiable";
-  if (evidence === "associated") return "Associated signal";
-  if (evidence === "candidate") return "Candidate signal (unconfirmed)";
-  return "No integration signal";
+  if (evidence === "associated") return "Linked";
+  if (evidence === "candidate") return "Unconfirmed";
+  return "No test found";
 }
 
 /**
  * `rows` = the deterministic denominator rows (drives ALL denominator math). `unionRows`
  * = off-denominator symbols with a current valid dynamic-proof cert; they add ONLY to
- * `proven` (the honest "Dynamically Proven" headline), never to total/coverage_total/
+ * `proven` (the honest "Proven" headline), never to total/coverage_total/
  * coverage_pct. Splitting the two keeps the denominator stable while the headline counts
  * every genuinely-proven symbol.
  */
@@ -458,7 +458,7 @@ function dynamicProofSignalFor(record: Ledger["records"][number] | undefined): s
 }
 
 function suggestedNextTest(node: GraphNode, file: string, status: RtmStatus): string {
-  if (status === "Proven" || status === "Reproven (this run)" || status === "Runtime-covered") return "";
+  if (status === "Proven" || status === "Reproven (this run)" || status === "Runs under tests") return "";
   const haystack = `${node.title ?? ""} ${node.external_id} ${file}`.toLowerCase();
   const category =
     haystack.match(/auth|permission|role|rbac|login|session|token/) ? "auth-permission" :
@@ -475,12 +475,13 @@ function normalizeStatusFilter(statuses: string[] | undefined): Set<RtmStatus> |
   if (!statuses || statuses.length === 0) return null;
   const out = new Set<RtmStatus>();
   for (const raw of statuses) {
-    const s = raw.trim().toLowerCase().replace(/_/g, "-");
+    // The README's names and the old ones both work: outside tools pass either.
+    const s = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
     if (s === "proven") out.add("Proven");
-    else if (s === "runtime" || s === "runtime-covered" || s === "runtimecovered") out.add("Runtime-covered");
-    else if (s === "associated") out.add("Associated signal");
-    else if (s === "candidate" || s === "candidate-signal") out.add("Candidate signal (unconfirmed)");
-    else if (s === "no-link" || s === "nolink" || s === "none") out.add("No integration signal");
+    else if (s === "runtime" || s === "runtime-covered" || s === "runtimecovered" || s === "runs-under-tests") out.add("Runs under tests");
+    else if (s === "associated" || s === "associated-signal" || s === "linked") out.add("Linked");
+    else if (s === "candidate" || s === "candidate-signal" || s === "candidate-signal-(unconfirmed)" || s === "unconfirmed") out.add("Unconfirmed");
+    else if (s === "no-link" || s === "nolink" || s === "none" || s === "no-integration-signal" || s === "no-test-found") out.add("No test found");
     else if (s === "reproven" || s === "reproven-this-run") out.add("Reproven (this run)");
     else if (s === "generated-unverifiable" || s === "unverifiable") out.add("Generated-unverifiable");
   }

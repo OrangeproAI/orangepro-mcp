@@ -9,7 +9,10 @@ import { defineConfig, configDefaults } from "vitest/config";
 // `.orangepro/`). Keep vitest's defaults otherwise.
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**"],
+    // `artifacts/` (milestone evidence, never committed) can hold test files from measured
+    // repositories, and `.claude/worktrees/` holds whole copies of this repository: neither
+    // is this project's suite.
+    exclude: [...configDefaults.exclude, "**/__fixtures__/**", "**/.orangepro/**", "private/reviews/**", "artifacts/**", "**/.claude/worktrees/**"],
     // A full parallel run on a busy machine starves single tests of CPU: one that
     // takes a second alone can pass vitest's default 5 s limit. Tests that need
     // more than 30 s still set their own limit.

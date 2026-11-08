@@ -47,10 +47,10 @@ export function renderCoverageReport(graph: LocalGraph, ledger: Ledger = emptyLe
   const { coverage: staticCov, denominator: comp } = resolveCoverage(graph);
   const rtm = buildRtm(graph, ledger);
   const s = rtm.summary;
-  lines.push("## Dynamic Proven");
+  lines.push("## Proven");
   lines.push("");
   lines.push(
-    `**${s.proven} of ${s.total} behaviors Proven (${s.coverage_pct}%)** — public Proven requires a closed dynamic targeted-proof ledger record. Static TESTED_BY/COVERS edges are Associated signal diagnostics, not proof.`
+    `**${s.proven} of ${s.total} behaviors Proven (${s.coverage_pct}%)** — public Proven requires a closed dynamic targeted-proof ledger record. Static TESTED_BY/COVERS edges are Linked diagnostics, not proof.`
   );
   const gate = a?.resolver_gate;
   if (gate) {
@@ -198,7 +198,7 @@ export function renderCoverageReport(graph: LocalGraph, ledger: Ledger = emptyLe
         `- ⚠ PARTIAL SCAN: the analyze budget (${budget.budget_ms}ms) stopped after ${budget.elapsed_ms}ms with ${budget.files_not_analyzed} file(s) NOT analyzed. The denominator is incomplete, so the Dynamic Proven headline is a partial view. Raise \`ORANGEPRO_MAX_ANALYZE_MS\` or scope with \`--base\`.`
       );
     }
-    if (a?.symbol_cap_hit) lines.push("- Symbol cap hit: some code symbols were omitted; the denominator understates the repo, so Dynamic Proven reads low. Raise `ORANGEPRO_MAX_SYMBOLS`.");
+    if (a?.symbol_cap_hit) lines.push("- Symbol cap hit: some code symbols were omitted; the denominator understates the repo, so Proven reads low. Raise `ORANGEPRO_MAX_SYMBOLS`.");
     if (a?.files_cap_hit) lines.push("- File cap hit: not all files were scanned; coverage measured an unknown fraction of the repo. Raise `ORANGEPRO_MAX_FILES`.");
     lines.push("");
   }
