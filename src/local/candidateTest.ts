@@ -34,6 +34,8 @@ import {
   ProbeFaultRefusal,
   readFixture,
   realInside,
+  REPORT_ENV,
+  REPORT_TAMPERED,
   REPORTER_TARGET,
   trackedStatus,
   treeHashes,
@@ -499,22 +501,27 @@ function sameShape(path: string, kept: Buffer, siteStart: number, keptSiteEnd: n
 }
 
 const LIMITS = [
-  "The new test runs inside the container, but verify-test does not stop a test written to tamper with its own runner (for example by rewriting the runner's report); review the patch before it is delivered.",
+  "The new test runs in the same process as the runner's reporter, so the report channel is not unforgeable from inside it. What holds: before any stage runs, verify-test refuses a test that writes to anything it did not make, built-ins and their prototypes included (the checks on the test's code, candidatePatch.ts); and the reporter takes what it uses when it loads, before any test file, and signs its one report with a key only it was given, so a report printed or written by anything else makes the result inconclusive. A test that reaches Mocha's own objects, the reporter or a built-in through a route those checks do not refuse is not excluded. Review the patch before it is delivered.",
   "The text controls catch common ways a test can follow the code's text instead of its behavior, not every way; a test written to get past them, or to replace a built-in through an alias, is not excluded.",
   "Whether the declared assertion checks the oracle's expected value is not checked by the tool; it rests on review of the test."
 ];
 
-export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeFaultDeps): VerifyTestResult {
-  refusingCommand = "verify-test";
-  // ── everything that can be checked before a copy exists ──
-  const run = loadFaultRun(root, opts.from_run);
-  const sourceRoot = resolve(opts.source ?? root);
-  const briefDir = runFolderOf(root, opts.brief, "brief_invalid");
+export interface CheckedBrief {
+  briefDir: string;
+  briefCheck: ReturnType<typeof verifyRunFolder>;
+  requestBytes: Buffer;
+  briefMdBytes: Buffer;
+  requestSha: string;
+}
+
+/** A test-brief run for this fault run: its manifest verifies, and its two files are the bytes test-brief writes for this fault run and checkout. */
+export function checkBrief(root: string, run: FaultRun, brief: string, sourceRoot: string): CheckedBrief {
+  const briefDir = runFolderOf(root, brief, "brief_invalid");
   const briefCheck = verifyRunFolder(briefDir);
-  if (!briefCheck.ok) return refuse("brief_invalid", `${opts.brief}: ${briefCheck.message}`);
+  if (!briefCheck.ok) return refuse("brief_invalid", `${brief}: ${briefCheck.message}`);
   const requestPath = join(briefDir, "brief", "generation-request.json");
   const briefTagPath = join(briefDir, "fault-run.json");
-  if (!existsSync(requestPath) || !existsSync(briefTagPath)) refuse("brief_invalid", `${opts.brief} is not a test-brief run.`);
+  if (!existsSync(requestPath) || !existsSync(briefTagPath)) refuse("brief_invalid", `${brief} is not a test-brief run.`);
   const briefTag = readJson(briefTagPath) as { kind?: string; fault_run?: { manifest_sha256?: string }; source?: string | null };
   if (briefTag.kind !== "test_brief" || briefTag.fault_run?.manifest_sha256 !== run.manifestSha) refuse("brief_invalid", "the brief was written for another fault run.");
   const requestBytes = readFileSync(requestPath);
@@ -524,7 +531,15 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   if (!requestBytes.equals(recordBytes(rebuilt)) || !briefMdBytes.equals(briefMdRebuilt)) {
     refuse("brief_invalid", "the brief is not the one test-brief writes for this fault run and this checkout (edited, or written by another version).");
   }
-  const requestSha = sha256Hex(requestBytes);
+  return { briefDir, briefCheck, requestBytes, briefMdBytes, requestSha: sha256Hex(requestBytes) };
+}
+
+export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeFaultDeps): VerifyTestResult {
+  refusingCommand = "verify-test";
+  // ── everything that can be checked before a copy exists ──
+  const run = loadFaultRun(root, opts.from_run);
+  const sourceRoot = resolve(opts.source ?? root);
+  const { briefDir, briefCheck, requestBytes, briefMdBytes, requestSha } = checkBrief(root, run, opts.brief, sourceRoot);
 
   const recordCheck = checkAssertionRecord(opts.assertion);
   if (!recordCheck.ok) return refuse("assertion_invalid", recordCheck.message);
@@ -641,7 +656,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     const fileArgv = [...mochaHead, applied.path];
     const fullArgv = [...mochaHead, ...fixture.mocha.operands];
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
-    const reportEnv = { OPRO_DYNAMIC_PROOF_REPORT: `${WORK_OUT}/report.json` };
+    const reportEnv = REPORT_ENV;
 
     const copyRoots = asThisCommand(() =>
       prepareFaultCopies({
@@ -808,6 +823,7 @@ export function issueOf(stage: StageObservation | undefined): string | null {
   if (stage.boundary.failures.length > 0) return "boundary_check_failed";
   if (!stage.stopped) return "container_not_stopped";
   if (stage.timed_out) return "timeout";
+  if (stage.output_problems.some((problem) => problem.startsWith(REPORT_TAMPERED))) return REPORT_TAMPERED;
   const t = stage.tests;
   if (!t || stage.report === null) return "runner_error";
   if (t.hook_failures > 0) return "hook_failure";
@@ -1005,7 +1021,8 @@ const ISSUE_WORDS: Record<string, string> = {
   timeout: "the stage timed out",
   runner_error: "the test runner gave no clean account",
   hook_failure: "a setup hook failed",
-  runner_totals_mismatch: "the runner's totals disagree with its report"
+  runner_totals_mismatch: "the runner's totals disagree with its report",
+  report_tampered: "the runner's report did not arrive as the one signed report the reporter writes"
 };
 
 /** Plain words for a reason code, including a stage's issue (`fault_repeat_timeout`). */

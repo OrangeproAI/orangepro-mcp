@@ -75,6 +75,8 @@ opro verify-test --from-run <run> --brief <run> --candidate <patch> --assertion 
 opro install-github-action --profile-from <folder>   # preview an opt-in post-merge workflow; --yes writes it (never commits or pushes)
 opro actions-run --event-name push --event <file> --profile <file> --repo <checkout> --out <folder>
                                 # the workflow's step: the whole chain above for one merged change, under one time limit
+opro draft-test --from-run <run> --brief <run> [--provider anthropic] [--model <id>]
+                                # your model writes that test from the brief, with your key; then verify-test runs on it
 opro export --out orangepro-evidence-pack.json
 opro analyze . --no-coverage-html # skip the behavior report HTML (it is written by default)
 opro export --format graph-html # write just the explorer (orangepro-graph.html)
@@ -379,9 +381,44 @@ the whole suite with it passes on the original with one more test. Otherwise it 
 at most three candidates, counted over every probe-fault run of it (whatever its rationale, and
 also verify runs made before the fault's key was recorded), and a repair keeps the first
 attempt's declared assertion and condition. The verdict lists the earlier attempts and what the
-result does not establish: a test written to tamper with its own runner is not stopped, so the
-patch is reviewed before it is delivered. The exit code is 0 for every result; the `result` field
-decides. The checkout is not changed.
+result does not establish, including that a test which reaches Mocha's own objects is not excluded,
+so the patch is reviewed before it is delivered. The exit code is 0 for every result; the `result`
+field decides. The checkout is not changed.
+
+**How a stage reports.** The new test runs in the same process as OrangePro's Mocha reporter, so
+the channel is not unforgeable from inside that process. Two things hold together. First, before any
+stage runs, verify-test refuses a test that writes to anything it did not make, built-ins and their
+prototypes included (`Buffer.prototype.base64Slice = …`, through an alias, a computed name,
+`Object.defineProperty` or `Object.assign`); these are the checks on the test's code in
+`candidatePatch.ts`. Second, when the reporter loads, before Mocha loads any test file, it takes what
+it uses: it encodes and signs the report from character codes and functions it holds itself, never
+through a method a test could replace later. It also reads a key that is new for every stage, which
+the parent gives only to the reporter, on stdin; the key is in no argument, variable, mount or file.
+The reporter writes one report to stdout, signed with that key, and nothing to the output folder. A
+stage's report counts only when there is exactly one signed frame and it verifies. A missing, extra
+or unsigned frame, or a `report.json` in the output folder, makes the stage `report_tampered`, and
+the result inconclusive, never a pass or a catch. A test that reaches Mocha's own objects, the
+reporter or a built-in through a route those checks do not refuse is not excluded, so the patch is
+still reviewed. `probe-fault` and `export-tests` use the same channel.
+
+`opro draft-test --from-run <run> --brief <brief run> [--provider anthropic|openai|ollama] [--model <id>]`
+lets OrangePro write that test with your model and your key. The key comes only from that command's
+environment (`ANTHROPIC_API_KEY=… opro draft-test …`); name the provider when more than one key is set.
+Once the provider is built, every provider variable is removed from the environment, before
+verify-test, git or docker starts. Nothing it writes may hold the key's exact value, and error text
+is redacted by that value. A `*_BASE_URL` value is printed and recorded only as its variable's name
+(`<ANTHROPIC_BASE_URL>`), here and in every log the kit redacts. The default model is `claude-opus-5-5`. It checks the brief as verify-test
+does, then sends the brief's `generation-request.json`, verbatim, under a fixed header, and nothing
+else. The model returns one JSON object: the file, the describe block, the `it(…)` call, the
+assertion line and its condition. OrangePro adds the test at the end of that block, indented like its
+neighbours, and writes `candidate.patch` and `assertion-record.json` (generation `by: provider`, the
+provider and model as `agent`, marked assisted). It then runs verify-test on them unchanged. There are
+at most three attempts per fault, counted as verify-test counts them, plus attempts that never ran.
+A repair is shown its own earlier test and verify-test's verdict, and may change only setup lines,
+never the file, the describe block, the title, the declared assertion line, its condition or another
+assertion line. `not_caught` and `blocked` stop the attempts, and so does a provider error, which is
+not counted. Each attempt keeps its own run folder (kind `test_draft`): the prompt, the reply, the
+patch and record when they were made, and `draft.json`, which names its verify run.
 
 `opro export-tests --from-run <verify-test run>` turns a `verified_gap` run into what a reviewer gets.
 It writes `orangepro-tests.patch`, rebuilt from the verified bytes: one allowed test file, lines added

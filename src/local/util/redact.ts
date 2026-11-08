@@ -15,8 +15,25 @@ const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|client[_-]?secret)\b\s*[:=]\s*["']?[^\s"']{8,}/gi, "<redacted:credential>"]
 ];
 
-export function redactSecrets(text: string): string {
+/** The provider endpoint variables: where a key is sent is a setting, never printed or recorded by value. */
+export const PROVIDER_ENDPOINT_VARS = ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OLLAMA_BASE_URL"] as const;
+
+/**
+ * Replace each configured provider endpoint (the value of a `*_BASE_URL` variable, with or without a trailing
+ * slash) by the variable's name. `values` defaults to what the environment holds now.
+ */
+export function redactProviderEndpoints(text: string, values: Partial<Record<string, string>> = process.env): string {
   let out = text;
+  for (const name of PROVIDER_ENDPOINT_VARS) {
+    const value = values[name]?.trim();
+    if (!value || value.length < 8) continue;
+    for (const form of [...new Set([value, value.replace(/\/+$/, "")])].sort((a, b) => b.length - a.length)) out = out.split(form).join(`<${name}>`);
+  }
+  return out;
+}
+
+export function redactSecrets(text: string): string {
+  let out = redactProviderEndpoints(text);
   for (const [pattern, replacement] of SECRET_PATTERNS) {
     out = out.replace(pattern, replacement);
   }
@@ -24,7 +41,7 @@ export function redactSecrets(text: string): string {
 }
 
 export function redactSecretsPreservingLineCount(text: string): string {
-  let out = text;
+  let out = redactProviderEndpoints(text);
   for (const [pattern, replacement] of SECRET_PATTERNS) {
     out = out.replace(pattern, (match) => {
       const newlineCount = match.match(/\r\n|\n|\r/g)?.length ?? 0;

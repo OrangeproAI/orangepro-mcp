@@ -1,7 +1,7 @@
 // Shared by the probe-fault (A2) and verify-test (A3) tests: a small two-commit CommonJS library
 // with a real target record, and a stand-in for the container that runs the same commands on this machine.
 import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -219,7 +219,8 @@ export function hostExecutor(probe: (request: ContainerRequest) => unknown = pas
         cwd: toHost(request.workdir),
         env,
         encoding: "utf8",
-        timeout: request.deadlineMs
+        timeout: request.deadlineMs,
+        ...(request.input !== undefined ? { input: request.input } : {})
       });
       // Longest first: on macOS the temp folder /var/… is really /private/var/…, which contains it.
       const names = [...new Set([repo, realpathSync(repo)])].sort((a, b) => b.length - a.length);
@@ -236,11 +237,23 @@ export function hostExecutor(probe: (request: ContainerRequest) => unknown = pas
         }
       };
       rewrite(out);
+      // The signed report names host paths here; the container would name /work/repo. Rewritten, and signed
+      // again with the stage's key (the double stands in for the container, which the key was given to).
+      let stdout = child.stdout ?? "";
+      if (request.input !== undefined) {
+        const key = Buffer.from(request.input.trim(), "hex");
+        stdout = stdout.replace(/<<OPRO-FRAME:v1:[0-9a-f]{64}:([A-Za-z0-9+/=]*)>>/, (_whole, payload: string) => {
+          let text = Buffer.from(payload, "base64").toString("utf8");
+          for (const host of names) text = text.split(host).join(WORK_REPO);
+          const next = Buffer.from(text, "utf8").toString("base64");
+          return `<<OPRO-FRAME:v1:${createHmac("sha256", key).update(next, "latin1").digest("hex")}:${next}>>`;
+        });
+      }
       return {
         exitCode: child.status,
         signal: child.signal,
         timedOut: (child.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT",
-        stdout: child.stdout ?? "",
+        stdout,
         stderr: child.stderr ?? "",
         durationMs: Date.now() - started,
         dockerArgv: ["docker", "run", "<host test double>"],
