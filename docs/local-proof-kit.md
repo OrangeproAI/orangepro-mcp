@@ -461,6 +461,40 @@ does not have the image fetches it by that digest first. It writes
 `result.json`, the job summary and the run folders for upload, and exits 0 for every outcome
 except an internal error. It opens no pull request.
 
+**Delivering a draft test PR (opt-in).** `opro install-github-action … --deliver draft-pr` adds a second job,
+`deliver`. It is the only job with `contents: write` and `pull-requests: write`, and it checks out nothing and runs
+no repository code: it downloads this run's artifact and runs `opro publish-tests --from-actions … --yes`. The
+repository must allow the workflow's token to open pull requests (Settings → Actions → General → Workflow
+permissions). Without `--deliver`, the workflow is the one above, byte for byte.
+
+`opro publish-tests (--from-run <export run> | --from-actions <actions-run output>) --repo <owner/name> --base
+<branch> [--merged <sha>] [--yes]` is the publisher, and uses no git. It checks:
+- the export run's manifest, its receipt (`verified_gap`, rows A–H met), the patch's hash and its shape (one file,
+  lines added only);
+- the fault run the receipt names, and that run's allowlist;
+- that no line of the diagnostic fault is in the patch;
+- that the receipt was made by the same build.
+
+Then it checks that `--base` still points at the proven merged commit. A moved base is `stale_base`: nothing is
+written, and the next push proves the new head. With `--yes`, it reads the test file at the merged commit, applies
+the patch in memory, and writes one commit through the GitHub REST API on `orangepro/tests/<merged sha, 12>`. It
+never force-pushes, and a branch holding someone else's commit is `diverged`. It then opens one draft PR, or finds
+the existing one, and reads it back: its address, draft flag, base, head and files. It writes `delivery-record.json`
+in a run folder of its own. The token comes from `GITHUB_TOKEN` or `GH_TOKEN`, and only goes to api.github.com (or
+a loopback address for tests). It is never written or printed. Without `--yes`, it prints the plan and makes no
+request at all. It exits 0 for every outcome; `status` decides.
+
+**Patch status in the reports.** When `.orangepro/proof-runs/` holds a finished export run, both reports show the
+function's **patch status** next to its evidence:
+- Verified test patch (not merged);
+- in this checkout;
+- stale;
+- delivered as a draft PR;
+- adopted (merged), only when a merge was read back.
+
+It is not an evidence tier. The row keeps its tier and its verb, and the five tier counts are unchanged, until the
+merged test is proven. A run whose folder does not verify is not used, and Run details names it with the reason.
+
 ### Dynamic proof language profiles
 
 Dynamic targeted proof ships as per-ecosystem **profiles**, all passing the same trust

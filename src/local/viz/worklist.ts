@@ -217,6 +217,19 @@ export interface WorkItem {
   /** Two slots for the functions tests are drafted for; absent below that cut. */
   slots?: TestSlot[];
   prove: string;
+  /** V3: a finished proof run's patch status for this row. Never changes its evidence or verb. */
+  patch?: RowPatch;
+}
+
+/** A row's patch status (V3), from `loadPatchStatuses`; links are relative to the report's folder. */
+export interface RowPatch {
+  state: "verified_not_merged" | "verified_in_checkout" | "verified_stale" | "delivered" | "adopted" | "closed" | "no_claim";
+  label: string;
+  text: string;
+  run: string;
+  page: string;
+  patch: string;
+  pr?: { number: number; url: string };
 }
 
 export interface GenerationContext {

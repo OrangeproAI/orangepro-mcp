@@ -723,6 +723,7 @@ export function createLocalServer(): McpServer {
         opro_version: z.string().optional().describe("OrangePro version the workflow installs. Default: this one."),
         build_sha256: z.string().optional().describe("That version's build stamp. Default: this build's."),
         uninstall: z.boolean().optional().describe("Remove the files OrangePro wrote (only those still unchanged)."),
+        deliver: z.enum(["draft-pr"]).optional().describe("Opt-in: add the separate deliver job that opens one draft test PR for a verified gap (the only job with write permissions; it runs no repository code)."),
         dry_run: z.boolean().optional().describe("Default true: preview only."),
         confirm: z.enum(["install", "uninstall"]).optional().describe("Required with dry_run: false; must match the action.")
       },
@@ -741,7 +742,8 @@ export function createLocalServer(): McpServer {
             version: input.opro_version,
             build_sha256: input.build_sha256,
             apply,
-            uninstall: input.uninstall
+            uninstall: input.uninstall,
+            ...(input.deliver ? { deliver: input.deliver } : {})
           })
         );
       } catch (error) {

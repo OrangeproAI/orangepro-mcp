@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { coverageArtifactPathsForReuse } from "./analyze/coverage.js";
@@ -119,6 +119,11 @@ export function inputsKey(opts: InputKeyOptions): string {
     add(`${base}:coverage-suites`, join(base, ".orangepro", "coverage-suites.json"));
     add(`${base}:ledger`, join(base, ".orangepro", "ledger.json"));
     add(`${base}:ignore`, join(base, ".orangeproignore"));
+    // V3: a finished proof run changes the report (a row's patch status), so each one's manifest joins the key.
+    const runs = join(base, ".orangepro", "proof-runs");
+    if (existsSync(runs)) {
+      for (const id of readdirSync(runs).sort()) add(`${base}:proof-run:${id}`, join(runs, id, "MANIFEST.json"));
+    }
   }
   for (const rel of coverageArtifactPathsForReuse(opts.scanRoot)) add(`coverage:${rel}`, join(opts.scanRoot, rel));
   const sortedFlags = Object.fromEntries(Object.entries(opts.flags).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)));
