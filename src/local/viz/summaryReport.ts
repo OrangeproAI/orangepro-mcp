@@ -21,8 +21,9 @@ const VERB_PHRASE: Record<Verb, (n: number) => string> = {
 };
 
 export function sinceHtml(model: ReportModel): string {
-  if (model.checked) return `<p class="since same">${esc(model.checked.text)}</p>`;
-  return `<p class="since${model.since.kind === "unchanged" ? " same" : ""}">${esc(model.since.text)}</p>`;
+  const note = model.testSupport ? `<p class="since" style="margin-top:8px">${esc(model.testSupport.text)}</p>` : "";
+  if (model.checked) return `<p class="since same">${esc(model.checked.text)}</p>${note}`;
+  return `<p class="since${model.since.kind === "unchanged" ? " same" : ""}">${esc(model.since.text)}</p>${note}`;
 }
 
 export function checkedText(previousGeneratedAt: string, checkedAt: string, rerendered: boolean, tool: string): string {
@@ -33,7 +34,12 @@ export function checkedText(previousGeneratedAt: string, checkedAt: string, rere
 function headline(model: ReportModel): string {
   const n = model.slotRows;
   if (model.counts.mapped === 0) return "No code was found to analyse.";
-  if (n === 0) return `Every ranked ${model.noun.singular} is proven. Nothing is left on the worklist.`;
+  if (n === 0) {
+    // An empty worklist means everything is proven only when something is proven.
+    if (model.testSupport) return `Nothing to rank: the ${model.noun.plural} counted here are test support.`;
+    if (model.counts.proven === 0) return `Nothing is on the worklist: no ${model.noun.singular} counted here is ranked.`;
+    return `Every ranked ${model.noun.singular} is proven. Nothing is left on the worklist.`;
+  }
   const parts = VERB_ORDER.filter((v) => model.top[v] > 0).map((v) => VERB_PHRASE[v](model.top[v]));
   const subject = n === 1 ? `this ${model.noun.singular}` : `these ${fmt(n)} ${model.noun.plural}`;
   return `Start with ${subject}: ${parts.join(", ")}.`;

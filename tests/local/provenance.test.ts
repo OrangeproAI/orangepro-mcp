@@ -30,6 +30,26 @@ const inputs = {
 };
 
 describe("artifact identity", () => {
+  it("records the launcher version next to the engine's, outside every fingerprint", () => {
+    const g = graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } });
+    const saved = process.env.ORANGEPRO_LAUNCHER_VERSION;
+    try {
+      delete process.env.ORANGEPRO_LAUNCHER_VERSION;
+      const direct = buildArtifactIdentity(g, inputs);
+      process.env.ORANGEPRO_LAUNCHER_VERSION = "0.2.59";
+      const launched = buildArtifactIdentity(g, inputs);
+      expect(direct.launcher_version).toBeNull();
+      expect(launched.launcher_version).toBe("0.2.59");
+      const { launcher_version: _a, ...directRest } = direct;
+      const { launcher_version: _b, ...launchedRest } = launched;
+      expect(launchedRest).toEqual(directRest);
+      expect(comparisonCompatibility(direct, launched)).toBe("comparable");
+    } finally {
+      if (saved === undefined) delete process.env.ORANGEPRO_LAUNCHER_VERSION;
+      else process.env.ORANGEPRO_LAUNCHER_VERSION = saved;
+    }
+  });
+
   it("hashes included paths and bytes deterministically, independent of manifest order", () => {
     const a = graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" }, "src/b.ts": { hash: "sha256:b", size: 1, kind: "code" } });
     const reordered = graph({ "src/b.ts": { hash: "sha256:b", size: 1, kind: "code" }, "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } });
@@ -56,14 +76,14 @@ describe("artifact identity", () => {
     expect(comparisonCompatibility(null, base)).toBe("provenance_incomplete");
   });
 
-  it("pins analyzer v11, targeted-mutation oracle v4, and the stable-population ORS identity", () => {
+  it("pins analyzer v12, targeted-mutation oracle v4, and the stable-population ORS identity", () => {
     const identity = buildArtifactIdentity(graph({ "src/a.ts": { hash: "sha256:a", size: 1, kind: "code" } }), inputs);
 
-    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v11");
+    expect(ANALYZER_VERSION).toBe("orangepro.analyzer.v12");
     expect(PROOF_ORACLE_VERSION).toBe("orangepro.targeted_mutation_oracle.v4");
     expect(ORS_VERSION).toBe("orangepro.ors.stable_population.v3");
     expect(identity).toMatchObject({
-      analyzer_version: "orangepro.analyzer.v11",
+      analyzer_version: "orangepro.analyzer.v12",
       oracle_version: "orangepro.targeted_mutation_oracle.v4",
       ors_version: "orangepro.ors.stable_population.v3"
     });

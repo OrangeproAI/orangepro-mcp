@@ -1,11 +1,11 @@
 import type { AnalysisMeta, ArtifactIdentity, LocalGraph } from "./graph/ontology.js";
 import { LOCAL_GRAPH_SCHEMA_VERSION } from "./graph/ontology.js";
 import { ORS_VERSION } from "./score/risk.js";
-import { ORANGEPRO_VERSION } from "./version.js";
+import { launcherVersion, ORANGEPRO_VERSION } from "./version.js";
 import { hashString } from "./util/hash.js";
 
 export const ARTIFACT_IDENTITY_VERSION = "orangepro.artifact_identity.v1" as const;
-export const ANALYZER_VERSION = "orangepro.analyzer.v11" as const;
+export const ANALYZER_VERSION = "orangepro.analyzer.v12" as const;
 export const PROOF_ORACLE_VERSION = "orangepro.targeted_mutation_oracle.v4" as const;
 
 export type ComparisonCompatibilityState =
@@ -91,6 +91,7 @@ export function buildArtifactIdentity(graph: LocalGraph, inputs: ArtifactIdentit
     oracle_version,
     risk_config_hash: inputs.configHash,
     tool_version: ORANGEPRO_VERSION,
+    launcher_version: launcherVersion(),
     git_commit: graph.manifest.git?.commit ?? null,
     git_dirty: graph.manifest.git?.dirty ?? null
   };

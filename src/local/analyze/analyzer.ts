@@ -11,7 +11,7 @@ import { buildImportGraph, type GateMetrics } from "../resolve/importGraph.js";
 import { walkBarrel } from "../resolve/barrelWalker.js";
 import { resetResolverCaches } from "../resolve/resolver.js";
 import { resetExportIndexCache } from "../resolve/exportIndex.js";
-import { builtInRankExclusion } from "../score/rankEligibility.js";
+import { builtInRankExclusion, importRankExclusion } from "../score/rankEligibility.js";
 import {
   baseName,
   extOf,
@@ -1068,6 +1068,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         const cliEntries = language === "typescript" || language === "javascript" ? cliEntrySymbols(content) : new Map<string, CliFramework>();
         if (extraction.truncated) symbolFilesTruncated++;
         const isTsJs = language === "typescript" || language === "javascript";
+        // A non-test file built on a test framework (a page object, a fixture) is test support.
+        const importExclusion = isTsJs ? importRankExclusion(content) : undefined;
         // What 0.2.58's rules decide for one symbol. A symbol made visible by an
         // export shape (`seen_by`) is never eligible here: it goes through the
         // export gate below.
@@ -1204,7 +1206,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           const eligible = gate ? gate.counted : base.eligible;
           const behaviorSurfaceExcluded = callableBehaviorCandidate && surfaceExclusionReason !== null && !cliDenominatorOverride;
           const notEntryPointAdjacent = callableBehaviorCandidate && !eligible && !behaviorSurfaceExcluded;
-          const rankingExclusion = builtInRankExclusion(file.relPath);
+          const rankingExclusion = builtInRankExclusion(file.relPath) ?? importExclusion;
           const pythonRankingExclusion = treeStructure?.pythonRankingExclusions?.find((candidate) => candidate.symbol === sym.name);
           if (isBoilerplate || gateReasons[0] === "trivial_body") excludedBoilerplate++;
           nodes.push(

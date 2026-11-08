@@ -1,4 +1,4 @@
-import { EVIDENCE_LABEL, VERB_LABEL, type TestSlot, type WorkItem } from "./worklist.js";
+import { EVIDENCE_LABEL, FILE_LINK_EVIDENCE_LABEL, VERB_LABEL, type TestSlot, type WorkItem } from "./worklist.js";
 
 /**
  * Every drafted test, one row per slot, as a spreadsheet file (R14 §4). Opens in
@@ -156,7 +156,7 @@ export function testsCsvRows(items: readonly WorkItem[], meta: TestsCsvMeta): st
         ref,
         `${VERB_LABEL[item.verb]}: ${item.reason}`,
         item.facts.join(" "),
-        EVIDENCE_LABEL[item.evidence],
+        item.fileLink ? FILE_LINK_EVIDENCE_LABEL : EVIDENCE_LABEL[item.evidence],
         STATUS_LABEL[slot.state],
         slot.reason ?? "",
         slot.addTo ?? "",

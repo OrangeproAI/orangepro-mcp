@@ -2,6 +2,7 @@ import type { LocalGraph } from "../graph/ontology.js";
 import { denominatorComposition } from "../graph/factories.js";
 import type { Ledger } from "../ledger.js";
 import { ANALYZER_VERSION } from "../provenance.js";
+import { TEST_SUPPORT_RANKING_REASON_CODE } from "../score/rankEligibility.js";
 import { rankRiskGaps } from "../score/risk.js";
 import type { ReportFeedback } from "../feedback.js";
 import type { BehaviorReportBuild, DynamicProofReportInput } from "./behaviorReportData.js";
@@ -13,7 +14,7 @@ import { areaOf, buildWorklist, verbCounts, type Evidence, type GenerationContex
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 1;
+export const REPORT_DATA_VERSION = 2;
 /** Bump when either renderer changes what it draws from the same data. */
 export const REPORT_RENDERER_VERSION = "r14.1";
 export const REPORT_DATA_FILE = "report-data.json";
@@ -52,6 +53,8 @@ export interface ReportModel {
   /** Set when a later run found nothing changed and reused this report. */
   checked?: { at: string; text: string };
   since: ReportSince;
+  /** Set when test-support code is most of what OrangePro counts: the line both reports show. */
+  testSupport?: { count: number; counted: number; text: string };
   noun: { plural: string; singular: string; title: string };
   history: { state: string; commits: number; days: number; complete: boolean };
   counts: {
@@ -158,6 +161,29 @@ export function sinceLine(previous: ReportModel | null | undefined, current: Pic
   return { kind: "compared", text: `Since the report of ${when}${cause ? ` (${cause})` : ""}: ${changes.join(", ")}.` };
 }
 
+/**
+ * One plain line when most counted functions are test support (page objects, fixtures,
+ * helpers on a test framework): they are mapped but kept out of the worklist, and the
+ * application they test is often in another repository.
+ */
+export function testSupportNote(graph: LocalGraph): { testSupport?: NonNullable<ReportModel["testSupport"]> } {
+  let counted = 0;
+  let count = 0;
+  for (const node of graph.nodes) {
+    if (node.kind !== "CodeSymbol" || node.denominator_eligible !== true || node.stale) continue;
+    counted += 1;
+    if (node.properties.ranking_exclusion_reason_code === TEST_SUPPORT_RANKING_REASON_CODE) count += 1;
+  }
+  if (count * 2 <= counted) return {};
+  return {
+    testSupport: {
+      count,
+      counted,
+      text: `Most functions OrangePro counted here (${n(count)} of ${n(counted)}) are test support: page objects, fixtures and helpers that import a test framework. They stay mapped but are left out of the worklist. The application code they test may not be in this repository.`
+    }
+  };
+}
+
 export function buildReportModel(input: ReportModelInput): ReportModel {
   const { graph, ledger, build, repoRoot } = input;
   const data = build.data;
@@ -245,6 +271,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
     analyzer: current.analyzer,
     generatedAt: input.generatedAt,
     since: sinceLine(input.previous, current, input.runReason),
+    ...testSupportNote(graph),
     noun: input.noun,
     history: { state: prov.history, commits: prov.commitsScanned ?? 0, days, complete: prov.churnState === "complete" },
     counts: current.counts,

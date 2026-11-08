@@ -28,6 +28,11 @@ export const EVIDENCE_LABEL: Record<Evidence, string> = {
   unconfirmed: "Unconfirmed",
   none: "No test found"
 };
+/**
+ * A "No test found" row whose file a test file is linked to (it imports the file, or is
+ * named after it): the trace matrix counts that as a Candidate, so the row says so too.
+ */
+export const FILE_LINK_EVIDENCE_LABEL = "Candidate link only, not confirmed";
 
 export interface ProofOutcome {
   status: "proven" | "survived" | "non_assertion" | "unrunnable";
@@ -88,8 +93,9 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
         : "A test name points here, but no call was traced."
     };
   }
-  return { verb: "write", reason: "No test points here." };
+  return { verb: "write", reason: NO_TEST_REASON };
 }
+const NO_TEST_REASON = "No test points here.";
 
 // ── Test slots ──
 
@@ -192,6 +198,8 @@ export interface WorkItem {
   reason: string;
   readFirst?: string;
   linkedTest?: string;
+  /** JS/TS "No test found" rows only: a test file linked to the function's file, not to the function. */
+  fileLink?: string;
   deletes?: { via: string; store: string };
   churn: number;
   churnAvailable: boolean;
@@ -278,6 +286,28 @@ export function testPointers(graph: LocalGraph): { linked: Map<string, TestPoint
     if (f) files.add(f);
   }
   return { linked, candidate, files };
+}
+
+const JS_TS_FILE_RE = /\.[cm]?[jt]sx?$/i;
+
+/** Test files linked to a whole source file (not to one function), as the trace matrix reads them. */
+export function fileLinks(graph: LocalGraph): Map<string, Array<{ file: string; imports: boolean }>> {
+  const isFileKey = (id: string): boolean => !id.startsWith("sym:") && !id.startsWith("test:") && !id.startsWith("flow:");
+  const out = new Map<string, Array<{ file: string; imports: boolean }>>();
+  for (const e of graph.candidate_edges ?? []) {
+    if (e.review_status === "ai_suggested") continue;
+    if (e.relationship_type !== "MAY_RELATE_TO" && e.relationship_type !== "MAY_BE_TESTED_BY" && e.relationship_type !== "MAY_COVER") continue;
+    const imports = e.reason.startsWith("Test resolved-imports");
+    for (const [key, other] of [[e.from_external_id, e.to_external_id], [e.to_external_id, e.from_external_id]] as const) {
+      if (!isFileKey(key)) continue;
+      const list = out.get(key) ?? [];
+      const seen = list.find((l) => l.file === other);
+      if (seen) seen.imports ||= imports;
+      else list.push({ file: other, imports });
+      out.set(key, list);
+    }
+  }
+  return out;
 }
 
 /**
@@ -392,6 +422,7 @@ function factsFor(gap: RiskGap, store: string | undefined, days: number): string
 
 export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonly RiskGap[], opts: WorklistOptions): WorkItem[] {
   const pointers = testPointers(graph);
+  const linksByFile = fileLinks(graph);
   const proofs = latestProofOutcomes(graph, ledger);
   const nodes = new Map<string, GraphNode>(graph.nodes.map((n) => [n.external_id, n]));
   const slotRows = opts.slotRows ?? 20;
@@ -409,13 +440,22 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
     // test that already reaches it, else where the language's convention puts it.
     const addTo = own && pointers.files.has(own) ? own : linkedTest ?? readFirst ?? own;
     const proof = proofs.get(gap.id);
-    const { verb, reason } = verbFor({
+    const verdict = verbFor({
       evidence,
       ...(proof ? { proof } : {}),
       ...(readFirst ? { readFirst } : {}),
       ...(linkedTest ? { linkedTest } : {}),
       ...(opts.provenTests?.get(gap.id) ? { provenTest: opts.provenTests.get(gap.id) } : {})
     });
+    const { verb } = verdict;
+    let { reason } = verdict;
+    // The matrix counts a test linked to the whole file as a Candidate; say so instead of "No test found".
+    const links = evidence === "none" && JS_TS_FILE_RE.test(gap.file) ? linksByFile.get(gap.file) : undefined;
+    const fileLink = links ? (pickTestFile(gap.file, links.map((l) => l.file)) ?? [...links].map((l) => l.file).sort()[0]) : undefined;
+    if (fileLink && reason === NO_TEST_REASON) {
+      const imports = links?.find((l) => l.file === fileLink)?.imports === true;
+      reason = `No test calls it. ${fileLink} ${imports ? "imports its file" : "is named after its file"}; read it first.`;
+    }
     const owner = gap.sink_owner ? nodes.get(gap.sink_owner)?.title : undefined;
     const store = gap.sink_callee ? storeLabel(gap.sink_callee, owner) : undefined;
     const line = (nodes.get(gap.id)?.properties as { start_line?: number } | undefined)?.start_line;
@@ -432,6 +472,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       reason,
       ...(readFirst ? { readFirst } : {}),
       ...(linkedTest ? { linkedTest } : {}),
+      ...(fileLink ? { fileLink } : {}),
       ...(gap.sink_callee ? { deletes: { via: gap.sink_callee, store: store || "Stored data" } } : {}),
       churn: gap.git_churn,
       churnAvailable: gap.churn_available !== false,
