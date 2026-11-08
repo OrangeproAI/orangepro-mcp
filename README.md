@@ -16,7 +16,7 @@
 
 ---
 
-OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Mapping, gap ranking and proof work with no model key. Drafting a runnable test needs a provider. `orangepro_generate_tests` with `provider` set to `deterministic` runs with no key and returns placeholders only: the body is `expect(true).toBe(true); // placeholder — replace with a concrete assertion`, `runnable` is false, and there is no `suggested_path`, `run_command` or `prove_run`. That mode smoke-tests the pipeline.
+OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Mapping, gap ranking and proof work with no model key. Drafting a test with real assertions needs a model provider. `orangepro_generate_tests` with `provider` set to `deterministic` runs with no key and returns placeholders only. A placeholder checks nothing (`expect(true).toBe(true)`, `assert True`, a `t.Fatalf` that never runs), so it can never prove anything; under Mocha its `toBe` line fails outright, because Chai's `expect` has no `toBe`. A placeholder is still marked `runnable: true`, with a run hint (`suggested_path`, `run_command`, and a `prove_run` when it targets a counted JavaScript, TypeScript or Python function), whenever its checks pass: in Python and Java when its syntax check passes (Python needs `python3`); in Go when `gofmt` passes and, next to Go source, a compile check passes (never under `--static-only`); in JavaScript and TypeScript when OrangePro can reuse a related test file's imports (even one matched only by name, whose imports may not include the code under test) or derive an import from a source file, and every import resolves. Otherwise it is `runnable: false`, with no run hint. That mode smoke-tests the pipeline.
 
 ```bash
 npx -y @orangepro/mcp-server@latest start .
@@ -87,7 +87,7 @@ npx -y @orangepro/mcp-server@latest start .
 open .orangepro/short_behavior-coverage.html
 ```
 
-Mapping, gap ranking and proof work with no model key. Drafting a runnable test needs a provider (see [Model setup](#reference)). Deterministic mode returns placeholders only, as described above.
+Mapping, gap ranking and proof work with no model key. Drafting a test with real assertions needs a model provider (see [Model setup](#reference)). Deterministic mode returns placeholders only, as described above.
 
 **Tips for the most accurate run:**
 - **Use a full clone, not a shallow one.** Change history drives part of the ranking, and the report says when history was partial.
@@ -107,7 +107,7 @@ Mapping, gap ranking and proof work with no model key. Drafting a runnable test 
 ├── rtm.md                         ← traceability matrix
 └── config.json                    ← optional per-repo settings
 
-orangepro_generated/               ← generated tests (a runnable draft needs a provider; deterministic mode returns placeholders only); your files are never edited
+orangepro_generated/               ← generated tests (real assertions need a model provider; deterministic mode returns placeholders only); your files are never edited
 ```
 
 ---
@@ -130,7 +130,8 @@ A successful `orangepro_prove` sets the oracle field `proven` to true and writes
 **What OrangePro doesn't count, so linked numbers are a floor, not a coverage percentage:**
 - tests that only assert on mocks;
 - calls made over HTTP or from end-to-end suites;
-- in Python, objects that reach a test only through a fixture.
+- in Python, objects that reach a test only through a fixture;
+- in JavaScript and TypeScript, calls on an object a test gets from a fixture (for example Playwright's `test.extend`), and calls to an inherited method, which are not linked to the class that defines it.
 
 Check the tests before writing new ones for a flagged path.
 
@@ -311,7 +312,7 @@ opro gaps --limit 10          # top unproven behaviors, ranked
 opro prove-loop ...           # mutation proof for one function (see above)
 opro roast .                  # find tests whose mutant survives (no key needed)
 opro doctor --proof           # why top targets aren't proven yet
-opro generate --base main     # runnable tests for this branch (needs a provider; --provider deterministic returns placeholders only)
+opro generate --base main     # tests for this branch (needs a model provider; --provider deterministic returns placeholders only)
 opro rtm                      # traceability matrix
 opro export                   # metadata-only evidence pack
 opro coverage                 # find or generate runtime coverage artifacts
@@ -331,7 +332,7 @@ Add `--json` to any read command for machine output. Run `opro help` for every f
 | `orangepro_find_test_gaps` | Unproven behaviors ranked by ORS |
 | `orangepro_prove_loop` | Setup + mutation proof + report refresh for one behavior |
 | `orangepro_prove` | Mutation proof only |
-| `orangepro_generate_tests` | Grounded tests. A runnable draft needs a provider. `provider: deterministic` returns placeholders only, with no key. |
+| `orangepro_generate_tests` | Grounded tests. A test with real assertions needs a model provider. `provider: deterministic` returns placeholders only, with no key. |
 | `orangepro_changed_impact` | What a diff touches |
 | `orangepro_status` | Workspace state without running anything |
 | `orangepro_doctor` | What evidence to add next |
