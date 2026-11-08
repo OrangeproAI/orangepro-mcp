@@ -69,10 +69,18 @@ export interface RunManifest {
   files: RunManifestEntry[];
 }
 
+/**
+ * Files an operating system's file browser drops into any folder it opens (macOS Finder,
+ * Windows Explorer). They are never part of a run, so a run folder's manifest neither lists
+ * them nor refuses a folder because of them. Matched by exact file name, at any depth.
+ */
+export const OS_METADATA_FILES: ReadonlySet<string> = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
+
 function listFiles(dir: string, base = dir): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir).sort(byCodeUnit)) {
     const abs = join(dir, name);
+    if (OS_METADATA_FILES.has(name) && lstatSync(abs).isFile()) continue;
     const stat = lstatSync(abs);
     if (stat.isDirectory()) out.push(...listFiles(abs, base));
     else if (stat.isFile()) out.push(relative(base, abs).split(sep).join("/"));
