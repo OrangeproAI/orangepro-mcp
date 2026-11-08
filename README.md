@@ -16,7 +16,7 @@
 
 ---
 
-OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Mapping, gap ranking and proof work with no model key. Drafting a test with real assertions needs a model provider. `orangepro_generate_tests` with `provider` set to `deterministic` runs with no key and returns placeholders only. A placeholder checks nothing (`expect(true).toBe(true)`, `assert True`, a `t.Fatalf` that never runs), so it can never prove anything; under Mocha its `toBe` line fails outright, because Chai's `expect` has no `toBe`. A placeholder is still marked `runnable: true`, with a run hint (`suggested_path`, `run_command`, and a `prove_run` when it targets a counted JavaScript, TypeScript or Python function), whenever its checks pass: in Python and Java when its syntax check passes (Python needs `python3`); in Go when `gofmt` passes and, next to Go source, a compile check passes (never under `--static-only`); in JavaScript and TypeScript when OrangePro can reuse a related test file's imports (even one matched only by name, whose imports may not include the code under test) or derive an import from a source file, and every import resolves. Otherwise it is `runnable: false`, with no run hint. That mode smoke-tests the pipeline.
+OrangePro maps every public function in your repository, links each one to the tests that actually call it, and ranks what's left by what it can break. For a test you care about, it breaks the function in an isolated copy and checks that the test fails. It runs on your machine, uses no AI model for scoring, and sends nothing to OrangePro. Mapping, gap ranking and proof work with no model key. Drafting a test with real assertions needs a model provider; with no key, `provider: deterministic` returns placeholders only (see Model setup under [Reference](#reference)).
 
 ```bash
 npx -y @orangepro/mcp-server@latest start .
@@ -87,7 +87,7 @@ npx -y @orangepro/mcp-server@latest start .
 open .orangepro/short_behavior-coverage.html
 ```
 
-Mapping, gap ranking and proof work with no model key. Drafting a test with real assertions needs a model provider (see [Model setup](#reference)). Deterministic mode returns placeholders only, as described above.
+Mapping, gap ranking and proof work with no model key. Drafting a test with real assertions needs a model provider (see [Model setup](#reference)); deterministic mode returns placeholders only.
 
 **Tips for the most accurate run:**
 - **Use a full clone, not a shallow one.** Change history drives part of the ranking, and the report says when history was partial.
@@ -376,6 +376,13 @@ Auto-detect order: OpenAI → Ollama → Anthropic. Override with `--provider` a
 - **Model output never changes an evidence tier.** Only the mutation proof can mark a behavior Proven.
 - **Generated tests land in `orangepro_generated/`** with the files and existing tests they're grounded on, and where and how to run them.
 - **Drafts whose code fails the compile check are kept as plans** ("Plan only"), with the reason named. Without a key, each of the top 20 shows two empty slots with a prompt you can copy into your coding agent.
+- **Without a key, `orangepro_generate_tests` with `provider: deterministic` returns placeholders only.** That mode smoke-tests the pipeline.
+  - A placeholder checks nothing (`expect(true).toBe(true)`, `assert True`, a `t.Fatalf` that never runs), so it can never prove anything. Under Mocha its `toBe` line fails outright, because Chai's `expect` has no `toBe`.
+  - It is still marked `runnable: true`, with a run hint (`suggested_path`, `run_command`, and a `prove_run` when it targets a counted JavaScript, TypeScript or Python function), whenever its checks pass:
+    - Python and Java: its syntax check passes (Python needs `python3`).
+    - Go: `gofmt` passes and, next to Go source, a compile check passes (never under `--static-only`).
+    - JavaScript and TypeScript: OrangePro can reuse a related test file's imports (even one matched only by name, whose imports may not include the code under test) or derive an import from a source file, and every import resolves.
+  - Otherwise it is `runnable: false`, with no run hint.
 </details>
 
 <details>
