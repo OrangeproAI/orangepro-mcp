@@ -177,6 +177,11 @@ export interface GenerateOptions {
    * view must always call the model for BOTH arms, so it leaves this off.
    */
   pin_unchanged?: boolean;
+  /**
+   * Static-only mode (item 34): never run repository code while checking a draft. The Go
+   * compile check is skipped and its drafts say "Not compile-checked".
+   */
+  static_only?: boolean;
 }
 
 // ── Explain ──────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ export type GeneratedDraftBlocker =
   | "generated_code"
   | "unresolved_import"
   | "toolchain_or_runner"
+  | "not_compile_checked"
   | "validation_timeout"
   | "unknown";
 
@@ -9,6 +10,7 @@ export type GeneratedDraftBlocker =
  * failures stay unknown rather than being mislabeled as a repo setup problem. */
 export function classifyGeneratedDraftBlocker(reason: string | undefined): GeneratedDraftBlocker {
   const text = reason ?? "";
+  if (/^Not compile-checked: static-only/i.test(text)) return "not_compile_checked";
   if (/timed?\s*out|timeout|ETIMEDOUT|signal:\s*killed/i.test(text)) return "validation_timeout";
   if (
     /(?:^|\b)(?:go|gofmt|python3|pytest|mvn|gradle|node|npm|vitest|jest|mocha)(?:\b[^.\n]*)?(?:not found|ENOENT|not installed)/i.test(text) ||
@@ -31,6 +33,8 @@ export function generatedDraftRemediation(reason: string | undefined): string {
       return "Verify that the generated import path exists and is already declared by this repo; install dependencies only when the repo expects that import, then regenerate.";
     case "toolchain_or_runner":
       return "Install or configure the named toolchain/test runner, then re-run `opro start`.";
+    case "not_compile_checked":
+      return "This run was static-only, so the draft was not compiled. Run `opro start` in your own checkout to check it.";
     case "validation_timeout":
       return "Warm the dependency cache or raise the relevant OrangePro validation timeout, then re-run `opro start`.";
     default:

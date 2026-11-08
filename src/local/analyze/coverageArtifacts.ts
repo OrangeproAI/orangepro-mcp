@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { reportProgress } from "../util/progress.js";
+import { isStaticOnly, STATIC_ONLY_REFUSAL } from "../staticOnly.js";
 import { coverageSuiteForArtifact } from "./coverage.js";
 
 export type CoverageArtifactFormat =
@@ -636,6 +637,8 @@ function isGoCoverprofileName(rel: string): boolean {
 }
 
 function defaultRunner(cwd: string, command: string, args: string[], timeoutMs: number): ReturnType<CommandRunner> {
+  // Item 34 backstop: a coverage run starts the repository's tests.
+  if (isStaticOnly()) return { status: null, stdout: "", stderr: "", error: new Error(STATIC_ONLY_REFUSAL) };
   const res = spawnSync(command, args, { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 1_000_000 });
   return {
     status: res.status,

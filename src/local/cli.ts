@@ -77,6 +77,7 @@ import { buildLabel, checkBuild } from "./buildInfo.js";
 import { opActionsRun, renderActionsRun } from "./actionsRun.js";
 import { InstallError, opInstallGithubAction, renderInstall } from "./actionsInstall.js";
 import { loadRiskConfig } from "./score/riskConfig.js";
+import { STATIC_ONLY_ENV } from "./staticOnly.js";
 import { feedbackPrefsPath, feedbackUrl, invitationCooldownDays, readFeedbackPrefs, setInvitations } from "./feedback.js";
 
 function out(line = ""): void {
@@ -133,12 +134,20 @@ function numericFlag(value: string | boolean | undefined): number | undefined {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
+/** A limit where 0 means "none" (item 34). numericFlag reads 0 as "not given", which fell back to the default. */
+function limitFlag(value: string | boolean | undefined): number | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+}
+
 const HELP = `opro — OrangePro (local-first, BYOK, metadata-only artifacts)
 
 Usage:
   opro                                       # one-command start: analyze, optional AI links + flows, report, RTM, agent handoff
-  opro start [path] [--base <ref>] [--no-ai] [--no-ai-flows] [--generate-coverage] [--proof-limit 5] [--generate-limit 20] [--prompt-version v5] [--fresh] [--json]
+  opro start [path] [--base <ref>] [--no-ai] [--no-ai-flows] [--generate-coverage] [--proof-limit 5] [--generate-limit 20] [--prompt-version v5] [--static-only] [--fresh] [--json]
     # writes .orangepro/behavior-coverage.html (detailed), short_behavior-coverage.html (summary) and tests.csv;
+    # --static-only (or ORANGEPRO_STATIC_ONLY=1): draft tests but run nothing from the repository (no proof, no coverage run, no compile check)
     # when nothing changed since the last run, reuses its reports at once (--fresh runs in full anyway)
   opro roast [path] [--limit 5] [--json]     # keyless: find passing tests whose targeted mutant still survives
   opro init
@@ -276,6 +285,8 @@ async function main(): Promise<number> {
   const { positionals, flags } = parseArgs(rest);
   const json = asBool(flags.json, false);
   const cwd = process.cwd();
+  // --static-only: read and draft, never run the repository's code. The variable carries it to every check and child.
+  if (asBool(flags["static-only"], false)) process.env[STATIC_ONLY_ENV] = "1";
 
   if (command === "help" || flags.help || flags.version) {
     if (flags.version) {
@@ -316,8 +327,8 @@ async function main(): Promise<number> {
           aiAll: asBool(flags["ai-all"], false),
           aiFlows: !asBool(flags["no-ai-flows"], false),
           autoLimit: numericFlag(flags["auto-limit"]),
-          proofLimit: numericFlag(flags["proof-limit"]),
-          generateLimit: numericFlag(flags["generate-limit"]),
+          proofLimit: limitFlag(flags["proof-limit"]),
+          generateLimit: limitFlag(flags["generate-limit"]),
           noAuto: asBool(flags["no-auto"], false),
           promptVersion: flags["prompt-version"] === "v5" ? "v5" : undefined,
           provider: typeof flags.provider === "string" ? flags.provider : undefined,

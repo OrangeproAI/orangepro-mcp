@@ -59,6 +59,7 @@ import { findGaps } from "./gaps/gaps.js";
 import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint, withRankingCache } from "./score/risk.js";
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
+import { assertMayRunRepositoryCode, isStaticOnly, STATIC_ONLY_REFUSAL } from "./staticOnly.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget } from "./autoProve.js";
 import { AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT, RunHint, runnableRunHintsFor } from "./generate/runHints.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
@@ -642,6 +643,7 @@ function dynamicProofSpikePathFor(language: string): string {
 }
 
 export function defaultDynamicProofRunner(args: string[], opts: { cwd?: string; scriptPath?: string } = {}): ReturnType<DynamicProofRunner> {
+  assertMayRunRepositoryCode("a dynamic proof run");
   const script = opts.scriptPath ?? dynamicProofSpikePath();
   if (!existsSync(script)) {
     throw new Error(
@@ -2357,6 +2359,7 @@ function runProveLoopSetup(
   commands: ReturnType<typeof validateSetupCommand>[],
   defaultTimeoutMs: number | undefined
 ): { ok: true } | { ok: false; reason: string } {
+  if (commands.length > 0 && isStaticOnly()) return { ok: false, reason: STATIC_ONLY_REFUSAL };
   for (const command of commands) {
     const timeoutMs = command.timeout_ms ?? defaultTimeoutMs ?? SETUP_DEFAULT_TIMEOUT_MS;
     const result = spawnSync(command.command, command.args, {
@@ -2666,6 +2669,8 @@ export async function opStart(
     if (reused) return reused;
   }
   const runReason = reuseCheck.decision.kind === "full" ? reuseCheck.decision.reason : "missing_outputs";
+  // Item 34: static-only reads and drafts, and runs nothing from the repository (no coverage run, no proof).
+  const staticOnly = isStaticOnly(providerEnv);
   // `start` writes advisory/intermediate views before the final report. Keep
   // those helpers from advancing report-baseline.json mid-run.
   const providerDeps = { ...deps, env: providerEnv, suppressBehaviorReportRefresh: true };
@@ -2677,13 +2682,14 @@ export async function opStart(
     {
       source: opts.source ?? root,
       includeMarkdown: opts.includeMarkdown,
-      generateCoverage: opts.generateCoverage,
+      generateCoverage: opts.generateCoverage && !staticOnly,
       coverageTimeoutMs: opts.coverageTimeoutMs,
       suppressProgress: true
     },
     deps
   );
   const warnings = [...analyze.warnings];
+  if (staticOnly && opts.generateCoverage) warnings.push("static-only: --generate-coverage ignored; the repository's tests are not run.");
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
   // A per-repo/user risk config that fails to parse must announce itself here, not
   // silently revert to defaults (round-three review finding #1).
@@ -2752,7 +2758,11 @@ export async function opStart(
   reportProgress(
     opts.noAuto
       ? "auto-prove: disabled (--no-auto)"
-      : opts.ai === false
+      : staticOnly
+        ? "auto-prove: disabled (static-only: the repository's tests are not run)"
+        : opts.proofLimit === 0
+          ? "auto-prove: disabled (--proof-limit 0)"
+          : opts.ai === false
         ? "auto-prove: proving with existing tests only (--no-ai: no test generation)"
         : "auto-prove: driving generate → prove on the top provable targets",
     { current: 6, total: 8 }
@@ -2780,7 +2790,7 @@ export async function opStart(
       { ...providerDeps, proveLoop: opProveLoop }
     );
     autoProveResult = await runAutoProve(scopedFiles);
-    if (scopedFiles && autoProveResult.attempted === 0 && !opts.baseRef && !opts.noAuto) {
+    if (scopedFiles && autoProveResult.attempted === 0 && !opts.baseRef && !opts.noAuto && autoProveResult.status !== "disabled") {
       // An uncommitted working tree implicitly scoped the pass, but nothing in that
       // scope was provable. Fall back to the global top targets instead of reporting
       // "not attempted" for a reason the user cannot see. --base keeps strict scoping.
@@ -3166,7 +3176,9 @@ function startRunKeyInput(root: string, scanRoot: string, opts: StartOptions, pr
     noAuto: opts.noAuto,
     promptVersion: opts.promptVersion,
     provider: providerOpts.provider,
-    model: providerOpts.model
+    model: providerOpts.model,
+    // Absent unless on, so the key of every other run is unchanged.
+    staticOnly: isStaticOnly(providerEnv) || undefined
   };
   const providerConfigured =
     deps.aiProvider !== undefined ||
@@ -3339,7 +3351,8 @@ export async function opGenerate(
       manual_planning_fallback: opts.manual_planning_fallback,
       // Persisting lane: a runnable draft for an unchanged target is reused as-is
       // rather than re-bought from the model on every run.
-      pin_unchanged: opts.pin_unchanged ?? true
+      pin_unchanged: opts.pin_unchanged ?? true,
+      static_only: opts.static_only ?? isStaticOnly(providerEnv)
     },
     provider,
     reader,
