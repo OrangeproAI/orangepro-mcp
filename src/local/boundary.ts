@@ -64,6 +64,11 @@ export interface ContainerRequest {
   deadlineMs: number;
   /** "bridge" only for V1's install stage (`npm ci`); every other stage has no network. */
   network?: "none" | "bridge";
+  /**
+   * Bytes for the command's stdin (`docker run --interactive`), written once and closed. Used for the
+   * per-stage report key: it is in no argument, variable, mount or file. Never recorded.
+   */
+  input?: string;
 }
 
 export interface ContainerResult {
@@ -137,7 +142,8 @@ export function dockerRunArgs(name: string, request: ContainerRequest, forRecord
     "--network",
     request.network ?? "none",
     "--workdir",
-    request.workdir
+    request.workdir,
+    ...(request.input !== undefined ? ["--interactive"] : [])
   ];
   for (const [key, value] of Object.entries({ ...(request.network === "bridge" ? INSTALL_ENV : SHAPE_ENV), ...request.env })) args.push("--env", `${key}=${value}`);
   for (const mount of request.mounts) {
@@ -204,7 +210,8 @@ export function dockerExecutor(dockerBin: string | null = resolveDocker()): Cont
       timeout: request.deadlineMs,
       killSignal: "SIGKILL",
       maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"]
+      ...(request.input !== undefined ? { input: request.input } : {}),
+      stdio: [request.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"]
     });
     const code = (child.error as NodeJS.ErrnoException | undefined)?.code;
     const timedOut = code === "ETIMEDOUT";

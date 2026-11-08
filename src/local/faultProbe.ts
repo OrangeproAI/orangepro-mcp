@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
@@ -118,6 +119,36 @@ export const MOCHA_ENTRY = "node_modules/mocha/bin/mocha.js";
 // files to the selection, skip some, or not run tests at all (dry-run). Only the profile's options apply.
 export const MOCHA_NO_REPO_CONFIG = ["--no-config", "--no-package"];
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * How every Mocha stage reports (FP-4): the reporter signs one frame on stdout with a per-stage key it
+ * reads from stdin when it loads, before any test file exists. Nothing is read from the output folder.
+ */
+export const REPORT_ENV: Record<string, string> = { OPRO_DYNAMIC_PROOF_FRAME: "1" };
+const FRAME_MARK = "OPRO-FRAME";
+const FRAME_RE = /<<OPRO-FRAME:v1:([0-9a-f]{64}):([A-Za-z0-9+/=]*)>>/;
+/** The output-problem prefix that makes a stage's account unusable: someone other than the reporter spoke, or it did not. */
+export const REPORT_TAMPERED = "report_tampered";
+
+/**
+ * The stage's report from its output: exactly one frame, on stdout, whose HMAC verifies with the
+ * stage's key. Anything else (no frame, two, one on stderr, a bad signature) is a problem, never a report.
+ */
+export function readReportFrame(stdout: string, stderr: string, key: Buffer): { bytes: Buffer } | { problem: string } {
+  const count = (text: string): number => text.split(FRAME_MARK).length - 1;
+  const inOut = count(stdout);
+  const inErr = count(stderr);
+  if (inOut + inErr === 0) return { problem: "the reporter wrote no signed report (the run stopped, or something kept it from writing)" };
+  if (inOut + inErr > 1 || inErr > 0) return { problem: `${inOut + inErr} report frames were written; only the reporter's one counts` };
+  const match = FRAME_RE.exec(stdout);
+  if (!match) return { problem: "the report frame is malformed" };
+  const expected = createHmac("sha256", key).update(match[2]!, "latin1").digest();
+  const given = Buffer.from(match[1]!, "hex");
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return { problem: "the report frame's signature does not verify" };
+  const bytes = Buffer.from(match[2]!, "base64");
+  if (bytes.length > MAX_REPORT_BYTES) return { problem: `the report is larger than ${MAX_REPORT_BYTES} bytes` };
+  return { bytes };
+}
 const MAX_COVERAGE_FILE_BYTES = 256 * 1024 * 1024;
 
 // ── the fixture manifest ─────────────────────────────────────────────────────────
@@ -462,6 +493,7 @@ function sameCounts(a: Map<string, number>, b: Map<string, number>): boolean {
 function runIssue(stage: StageObservation | undefined): string | null {
   if (!stage) return "stage_missing";
   if (stage.timed_out) return "timeout";
+  if (stage.output_problems.some((problem) => problem.startsWith(REPORT_TAMPERED))) return REPORT_TAMPERED;
   const t = stage.tests;
   if (!t || stage.report === null) return "runner_error";
   if (t.hook_failures > 0) return "hook_failure";
@@ -828,7 +860,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       mustHold: tests
     });
     const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), join(runDir, WITNESS_STORED));
-    const reportEnv = { OPRO_DYNAMIC_PROOF_REPORT: `${WORK_OUT}/report.json` };
+    const reportEnv = REPORT_ENV;
     const coverageEnv = { NODE_V8_COVERAGE: `${WORK_OUT}/coverage` };
 
     const profile: RunProfile = {
@@ -1021,8 +1053,11 @@ export function createStageRunner(ctx: StageRunnerContext): {
     // deleted one, and every write to it fails.
     const probeOut = mkdtempSync(join(tmp, `probe-${stage}-`));
     const out = mkdtempSync(join(tmp, `out-${stage}-`));
-    const request: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, out), env, workdir: WORK_REPO, command, deadlineMs };
-    const probeRequest: ContainerRequest = { ...request, mounts: mountsFor(copy, probeOut) };
+    const framed = env.OPRO_DYNAMIC_PROOF_FRAME === "1";
+    // A new key for every stage, handed only to the reporter on stdin; never written anywhere.
+    const reportKey = framed ? randomBytes(32) : null;
+    const request: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, out), env, workdir: WORK_REPO, command, deadlineMs, ...(reportKey ? { input: `${reportKey.toString("hex")}\n` } : {}) };
+    const probeRequest: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, probeOut), env, workdir: WORK_REPO, command, deadlineMs };
     const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy], ctx.targetRel)));
     const startedAt = ctx.clock();
     const probe = executor(boundaryProbeRequest(probeRequest));
@@ -1038,18 +1073,28 @@ export function createStageRunner(ctx: StageRunnerContext): {
     const outputProblems: string[] = [];
     let report: FileRef | null = null;
     let observedTests: StageObservation["tests"] = null;
-    if (run && env.OPRO_DYNAMIC_PROOF_REPORT) {
-      const read = readUntrustedFile(join(out, "report.json"), MAX_REPORT_BYTES);
-      if ("bytes" in read) {
-        report = fileRef(runDir, `reports/${stage}.json`, read.bytes);
-        try {
-          observedTests = testsFromReport(JSON.parse(read.bytes.toString("utf8")));
-        } catch {
-          outputProblems.push("report.json is not valid JSON");
-        }
-      } else if (read.problem !== "missing") {
-        outputProblems.push(`report.json was not read: ${read.problem}`);
+    if (run && reportKey) {
+      // The reporter writes nothing to the output folder: a report file there was written by something else.
+      let stray = false;
+      try {
+        lstatSync(join(out, "report.json"));
+        stray = true;
+      } catch {
+        stray = false;
       }
+      const read = readReportFrame(run.stdout, run.stderr, reportKey);
+      if (stray) outputProblems.push(`${REPORT_TAMPERED}: a report.json was written to the output folder; the reporter never writes one`);
+      else if (!("bytes" in read)) outputProblems.push(`${REPORT_TAMPERED}: ${read.problem}`);
+      else {
+        try {
+          const parsed = JSON.parse(read.bytes.toString("utf8"));
+          report = fileRef(runDir, `reports/${stage}.json`, read.bytes);
+          observedTests = testsFromReport(parsed);
+        } catch {
+          outputProblems.push(`${REPORT_TAMPERED}: the signed report is not valid JSON`);
+        }
+      }
+      reportKey.fill(0);
     }
     let coverage: FileRef | null = null;
     let spanCount: number | null = null;
@@ -1099,7 +1144,7 @@ export function createStageRunner(ctx: StageRunnerContext): {
       signal: run?.signal ?? null,
       timed_out: run?.timedOut ?? false,
       tests: observedTests,
-      output: run && !env.OPRO_DYNAMIC_PROOF_REPORT ? lastJsonLine(run.stdout) : null,
+      output: run && !framed ? lastJsonLine(run.stdout) : null,
       fault_span_count: coverageTarget ? spanCount : null,
       stdout,
       stderr,

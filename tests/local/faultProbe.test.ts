@@ -626,16 +626,17 @@ describe("review findings — the boundary and what the host reads back", { time
     const linking: ContainerExecutor = (request) => {
       const result = inner(request);
       const out = request.mounts.find((mount) => mount.target === WORK_OUT)!.source;
-      if (request.command[1] !== "-e" && request.env.OPRO_DYNAMIC_PROOF_REPORT) {
+      if (request.command[1] !== "-e" && request.env.OPRO_DYNAMIC_PROOF_FRAME) {
         rmSync(path.join(out, "report.json"), { force: true });
         symlinkSync(secret, path.join(out, "report.json"));
       }
       return result;
     };
     const result = probe(w, ROUNDING, {}, linking);
-    expect(result.classification).toMatchObject({ classification: "inconclusive", reason: "original_runner_error" });
+    // The reporter never writes a report file: one in the output folder, a link or not, is someone else's and is never read.
+    expect(result.classification).toMatchObject({ classification: "inconclusive", reason: "original_report_tampered" });
     const stage = readRun(w, result, "stages/original_selected.json");
-    expect(stage.output_problems).toEqual(["report.json was not read: a symbolic link"]);
+    expect(stage.output_problems).toEqual(["report_tampered: a report.json was written to the output folder; the reporter never writes one"]);
     const files = readdirSync(path.join(w.repo, result.run_dir), { recursive: true }) as string[];
     for (const file of files) {
       const abs = path.join(w.repo, result.run_dir, file);

@@ -33,6 +33,7 @@ import {
   ProbeFaultRefusal,
   readFixture,
   realInside,
+  REPORT_ENV,
   REPORTER_TARGET,
   trackedStatus,
   treeHashes,
@@ -371,7 +372,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     const fileArgv = [...mochaHead, testPath];
     const fullArgv = [...mochaHead, ...fixture.mocha.operands];
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
-    const reportEnv = { OPRO_DYNAMIC_PROOF_REPORT: `${WORK_OUT}/report.json` };
+    const reportEnv = REPORT_ENV;
     const copyRoots = asExport(() =>
       prepareFaultCopies({ runner: deps.dynamicProofRunner ?? defaultDynamicProofRunner, sourceRoot, targetRel: symbolTarget.file, method: symbolTarget.method, targetAbs: tsjs.targetAbs, bound, plan, tmp, mustHold: run.profile.selected_tests })
     );

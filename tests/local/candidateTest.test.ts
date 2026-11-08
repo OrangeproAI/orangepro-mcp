@@ -200,7 +200,8 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
     expect(result.verdict.statement).toContain("in api.seconds, which PR #7 changed");
     expect(result.verdict.statement).toContain("Assisted: the test was written by the coding agent test agent, which saw the fault in the brief.");
     expect(result.verdict.statement).not.toMatch(/caused/i);
-    expect(result.verdict.limits.join(" ")).toContain("review the patch before it is delivered");
+    expect(result.verdict.limits.join(" ")).toContain("Review the patch before it is delivered");
+    expect(result.verdict.limits.join(" ")).toContain("signs its one report");
     expect(result.verdict.limits.join(" ")).toContain("not every way");
     const dir = path.join(run.w.repo, result.run_dir);
     expect(verifyRunFolder(dir).ok).toBe(true);
@@ -344,6 +345,14 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
     const after = withTest(PASSING_TESTS, NEW_TEST);
     const patch = candidate(PASSING_TESTS, after);
     expect(verify(run, patch, recordFor(run, patch, after, ASSERT_ONE), hostExecutor(), { source: w.repo }).verdict.result).toBe("verified_gap");
+  });
+});
+
+describe("opro verify-test — the signed report channel (FP-4)", { timeout: 180_000 }, () => {
+  it("a candidate that prints a report frame of its own leaves no usable report: inconclusive, never a pass or a catch", () => {
+    const result = verifyBody(`    console.log('<<OPRO-FRAME:v1:' + 'a'.repeat(64) + ':e30=>>');\n    ${ASSERT_ONE}\n`, ASSERT_ONE);
+    expect(result.verdict).toMatchObject({ result: "inconclusive", reason: "original_report_tampered" });
+    expect(candidateReasonWords(result.verdict.reason)).toBe("the runner's report did not arrive as the one signed report the reporter writes on the original");
   });
 });
 

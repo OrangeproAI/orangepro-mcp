@@ -43,6 +43,7 @@ import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
 import { opTestBrief, opVerifyTest, renderTestBrief, renderVerifyTest } from "./candidateTest.js";
 import { opExportTests, renderExportTests } from "./exportTests.js";
+import { opDraftTest, renderDraftTest } from "./draftTest.js";
 import { systemClock } from "./util/time.js";
 import { opRecipeDbSqljs } from "./recipe/dbSqljs.js";
 import { runExportCli } from "./exportCli.js";
@@ -173,6 +174,10 @@ Usage:
   opro verify-test --from-run <probe-fault run folder> --brief <test-brief run folder> --candidate <patch> --assertion <assertion-record.json> [--source <checkout>] [--json]
     # the new test, as a patch that only adds one it(…) call, on the original, the same fault, two text controls, restored,
     # and the whole suite, inside the container; the result field decides (the exit code is 0 for every result)
+  opro draft-test --from-run <probe-fault run folder> --brief <test-brief run folder> [--provider anthropic|openai|ollama] [--model <id>] [--source <checkout>] [--json]
+    # sends the brief's generation-request.json, and nothing else, to your model with your key (from this command's environment only;
+    # name the provider when more than one key is set), writes candidate.patch and assertion-record.json from its one test, and runs
+    # verify-test on them unchanged; at most 3 attempts per fault, each kept in its own run folder (default model: claude-opus-5-5)
   opro export-tests --from-run <verify-test run folder> [--source <checkout>] [--json]
     # from a verified_gap run: orangepro-tests.patch (test-only), diagnostic-fault.patch, a fresh replay inside the container
     # (the whole suite, with the patch, with the patch on the same fault, restored), verification-receipt.json (rows A-H) and summary.html
@@ -867,6 +872,31 @@ async function main(): Promise<number> {
       } catch (e) {
         if (json && e instanceof InstallError) {
           printJson({ error: e.message, refusal: "install_invalid" });
+          return 1;
+        }
+        throw e;
+      }
+    }
+
+    case "draft-test": {
+      const need = (flag: string): string => {
+        const value = flags[flag];
+        if (typeof value !== "string" || value.trim() === "") throw new Error(`draft-test requires --${flag}`);
+        return value;
+      };
+      const optional = (flag: string): string | undefined => (typeof flags[flag] === "string" ? (flags[flag] as string) : undefined);
+      try {
+        const res = await opDraftTest(
+          cwd,
+          { from_run: need("from-run"), brief: need("brief"), provider: optional("provider"), model: optional("model"), source: optional("source") },
+          { clock: systemClock }
+        );
+        if (json) printJson(res);
+        else for (const line of renderDraftTest(res)) out(line);
+        return 0;
+      } catch (e) {
+        if (json && (e instanceof ProofRefusalError || e instanceof ProbeFaultRefusal)) {
+          printJson({ error: e.message, refusal: e.code });
           return 1;
         }
         throw e;
