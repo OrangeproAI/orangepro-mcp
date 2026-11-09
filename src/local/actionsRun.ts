@@ -23,7 +23,7 @@ import { recordBytes, recordSha256, sha256Hex, writeFileAtomic } from "./contrac
 import type { TargetRecord } from "./contracts/targetRecord.js";
 import { opExportTests } from "./exportTests.js";
 import { MOCHA_ENTRY, opProbeFault, ProbeFaultRefusal, readFixture } from "./faultProbe.js";
-import { opAnalyze, ProofRefusalError } from "./operations.js";
+import { opAnalyze, opBehaviorCoverageHtml, ProofRefusalError } from "./operations.js";
 import { redactSecrets } from "./util/redact.js";
 import type { Clock } from "./util/time.js";
 import { ORANGEPRO_VERSION } from "./version.js";
@@ -622,6 +622,21 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
       if (!id) continue;
       const from = join(runsDir, "proof-runs", id);
       if (existsSync(from)) cpSync(from, join(out, "runs", id), { recursive: true });
+    }
+    // M2: both reports in the artifact, beside the run folders they link (runs/<id>/…), with the
+    // export run's patch status. Only when the change was analysed; a report never fails the run.
+    if (existsSync(workspacePaths(repo).graphPath)) {
+      try {
+        opBehaviorCoverageHtml(repo, join(out, "behavior-coverage.html"), undefined, {
+          persistBaseline: false,
+          feedbackInvite: false,
+          proofRunsDir: join(out, "runs"),
+          csvPath: join(out, "tests.csv"),
+          dataPath: join(out, "report-data.json")
+        });
+      } catch {
+        // the reports are a convenience in the artifact; result.json is the result
+      }
     }
     writeFileAtomic(join(out, "result.json"), recordBytes(result));
     const summary = actionsSummary(result);

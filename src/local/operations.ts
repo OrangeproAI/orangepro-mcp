@@ -3674,7 +3674,17 @@ export function opBehaviorCoverageHtml(
   return withRankingCache(() => writeBehaviorReports(root, outputPath, dynamicProof, options));
 }
 
-interface ReportWriteOptions { persistBaseline?: boolean; feedbackInvite?: boolean; runReason?: string }
+interface ReportWriteOptions {
+  persistBaseline?: boolean;
+  feedbackInvite?: boolean;
+  runReason?: string;
+  /** M2: where finished proof runs are read from (default: the workspace's proof-runs). */
+  proofRunsDir?: string;
+  /** M2: where tests.csv goes (default: the workspace folder). */
+  csvPath?: string;
+  /** M2: also write the report data here, whatever persistBaseline says (an artifact folder). */
+  dataPath?: string;
+}
 interface ReportWriteResult { behavior_coverage_path: string; short_report_path?: string; tests_csv_path?: string; report_data_path?: string }
 
 function writeBehaviorReports(root: string, outputPath: string, dynamicProof: DynamicProofReportInput | undefined, options: ReportWriteOptions): ReportWriteResult {
@@ -3712,7 +3722,7 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
   const workspaceDir = resolve(root, WORKSPACE_DIR);
   mkdirSync(workspaceDir, { recursive: true });
   const dataPath = join(workspaceDir, REPORT_DATA_FILE);
-  const csvPath = join(workspaceDir, TESTS_CSV_FILE);
+  const csvPath = options.csvPath ?? join(workspaceDir, TESTS_CSV_FILE);
   const ctx = reportContext(graph, ledger);
   const model = buildReportModel({
     graph,
@@ -3729,10 +3739,11 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
     ...(options.runReason ? { runReason: options.runReason } : {}),
     generatedAt: new Date().toISOString(),
     // V3: finished proof runs give rows a patch status; the tiers above are untouched by it.
-    patches: loadPatchStatuses(join(workspaceDir, "proof-runs"), graph.workspace.root, dirname(htmlPath)),
+    patches: loadPatchStatuses(options.proofRunsDir ?? join(workspaceDir, "proof-runs"), graph.workspace.root, dirname(htmlPath)),
     links: { detailed: basename(htmlPath), summary: basename(summaryPath), csv: relative(dirname(htmlPath), csvPath).split(sep).join("/") }
   });
   const written = writeReports(model, htmlPath, summaryPath, csvPath);
+  if (options.dataPath) writeFileAtomic(options.dataPath, `${JSON.stringify(model)}\n`);
   let savedData = false;
   if (options.persistBaseline !== false) {
     try {
@@ -3770,7 +3781,7 @@ function testLinksSummary(graph: LocalGraph): { test_files: number; linked: numb
 }
 
 /** Both reports and the CSV from one model. Only the detailed report may fail the call. */
-function writeReports(model: ReportModel, htmlPath: string, summaryPath: string, csvPath: string): { summary: boolean; csv: boolean } {
+export function writeReports(model: ReportModel, htmlPath: string, summaryPath: string, csvPath: string): { summary: boolean; csv: boolean } {
   const csv = testsCsv(model.worklist, { repository: model.repo.name, commit: model.repo.commit, toolVersion: model.tool, generatedAt: model.generatedAt });
   let csvOk = true;
   try {

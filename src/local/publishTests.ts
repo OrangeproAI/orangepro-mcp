@@ -10,6 +10,10 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { testOnlyChange } from "./actionsEvent.js";
 import { allowedPaths } from "./candidateTest.js";
+import { ACTIONS_DIR, WORKFLOW_PATH } from "./actionsInstall.js";
+import { readReportModel, writeReports } from "./operations.js";
+import { patchesLine } from "./viz/reportModel.js";
+import type { PatchState } from "./proofRuns.js";
 import { newRunId, recordBytes, sha256Hex, verifyRunFolder, writeFileAtomic, writeRunManifest } from "./contracts/io.js";
 import { checkBuild } from "./buildInfo.js";
 import { ORANGEPRO_VERSION } from "./version.js";
@@ -136,7 +140,7 @@ export function prTitle(r: VerificationReceipt): string {
 }
 
 /** The PR body, from the receipt and the oracle only. Deterministic for the same inputs. */
-export function prBody(r: VerificationReceipt, receiptSha: string, oracle: { behavior?: string; expected?: string } | null, links: { run_url?: string | null } = {}): string {
+export function prBody(r: VerificationReceipt, receiptSha: string, oracle: { behavior?: string; expected?: string } | null, links: { run_url?: string | null; base_note?: string | null } = {}): string {
   const rows = r.rows.map((row) => `| ${row.row} | ${md(row.meaning)} | ${row.met ? "met" : "not met"} |`).join("\n");
   const who = r.generation.by === "provider"
     ? `OrangePro drafted the test with the repository owner's model key (${md(r.generation.agent)}) from its brief, and verified it.`
@@ -154,6 +158,7 @@ export function prBody(r: VerificationReceipt, receiptSha: string, oracle: { beh
     "|---|---|---|",
     rows,
     "",
+    links.base_note ? links.base_note : "",
     "**This PR changes one test file and adds lines only.** It is a draft: review it like any other test. OrangePro does not merge it.",
     "",
     "**Not established:**",
@@ -290,7 +295,18 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
     // Freshness (AD-5): the base must still point at the proven commit.
     const baseHead = async (): Promise<string> => expect(await api!.get(`${repoPath}/git/ref/heads/${encodePath(opts.base)}`), [200], `reading ${opts.base}`)?.object?.sha;
     const head0 = await baseHead();
-    if (head0 !== r.source.merged_commit) throw new Stop("stale_base", "base_moved", `${opts.base} is at ${String(head0).slice(0, 12)}, not the proven ${r.source.merged_commit.slice(0, 12)}: nothing delivered. The next run proves the new head.`);
+    let baseNote: string | null = null;
+    if (head0 !== r.source.merged_commit) {
+      // M2: the base may be the proven commit plus only the files the installer owns (the workflow and its
+      // profile): the code under the PR is then the code that was proven. Anything else is stale.
+      const cmp = await api.get(`${repoPath}/compare/${r.source.merged_commit}...${head0}`);
+      const files: string[] = Array.isArray(cmp.body?.files) ? cmp.body.files.map((f: any) => String(f?.filename)) : [];
+      const onlyOurs = cmp.status === 200 && cmp.body?.status === "ahead" && cmp.body?.behind_by === 0 && files.length > 0 && files.length < 300 && files.every((f) => f === WORKFLOW_PATH || f.startsWith(`${ACTIONS_DIR}/`));
+      if (!onlyOurs) throw new Stop("stale_base", "base_moved", `${opts.base} is at ${String(head0).slice(0, 12)}, not the proven ${r.source.merged_commit.slice(0, 12)}, and it changes more than OrangePro's own workflow files: nothing delivered. The next run proves the new head.`);
+      baseNote = `**Base.** Proven on \`${r.source.merged_commit.slice(0, 12)}\`; \`${opts.base}\` (\`${String(head0).slice(0, 12)}\`) adds only OrangePro's workflow files since (${files.map((f) => `\`${md(f)}\``).join(", ")}), so the code under this PR is the code that was proven.`;
+    }
+    const finalBody = prBody(r, receiptSha, oracle, { run_url: runUrl, base_note: baseNote });
+    plan = { ...plan, body_sha256: sha256Hex(Buffer.from(finalBody, "utf8")) };
 
     // The file the patch leaves, from the file at the merged commit.
     const contents = await api.get(`${repoPath}/contents/${encodePath(run.patch.file)}?ref=${r.source.merged_commit}`);
@@ -312,7 +328,7 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
 
     // The branch: absent, ours (a commit with our trailer on the proven commit's line), or someone else's.
     const branchRef = await api.get(`${repoPath}/git/ref/heads/${encodePath(branch)}`);
-    let parent = r.source.merged_commit;
+    let parent = head0;
     let reuse: string | null = null;
     if (branchRef.status === 200) {
       const tip = branchRef.body?.object?.sha as string;
@@ -320,7 +336,8 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
       const ours = typeof tipCommit?.message === "string" && /\nOrangePro-Receipt: [0-9a-f]{64}\b/.test(tipCommit.message) && tipCommit.message.includes(`OrangePro-Merged-Commit: ${r.source.merged_commit}`);
       if (!ours) throw new Stop("diverged", "branch_not_ours", `${branch} has a commit OrangePro did not write: nothing changed.`);
       const tipFile = await api.get(`${repoPath}/contents/${encodePath(run.patch.file)}?ref=${tip}`);
-      if (tipFile.status === 200 && tipFile.body?.sha === blobSha && tipCommit.message.includes(trailer)) reuse = tip;
+      // A rerun with the same file reuses the branch: no commit per rerun (M2). The description is refreshed below.
+      if (tipFile.status === 200 && tipFile.body?.sha === blobSha) reuse = tip;
       else parent = tip;
     } else if (branchRef.status !== 404) expect(branchRef, [200], `reading ${branch}`);
 
@@ -339,7 +356,7 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
 
     // Recheck the base just before the PR (it may have moved while we wrote the branch).
     const head1 = await baseHead();
-    if (head1 !== r.source.merged_commit) throw new Stop("stale_base", "base_moved", `${opts.base} moved to ${String(head1).slice(0, 12)} during delivery: no PR opened. The branch ${branch} stays.`);
+    if (head1 !== head0) throw new Stop("stale_base", "base_moved", `${opts.base} moved to ${String(head1).slice(0, 12)} during delivery: no PR opened. The branch ${branch} stays.`);
 
     const owner = opts.repo.split("/")[0];
     const listed = expect(await api.get(`${repoPath}/pulls?head=${encodeURIComponent(`${owner}:${branch}`)}&base=${encodeURIComponent(opts.base)}&state=all&per_page=10`), [200], "listing pull requests");
@@ -351,10 +368,10 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
       status = "unchanged";
     } else if (existing) {
       number = existing.number;
-      if (existing.body !== body) expect(await api.send("PATCH", `${repoPath}/pulls/${number}`, { body }), [200], "updating the PR's description");
+      if (existing.body !== finalBody) expect(await api.send("PATCH", `${repoPath}/pulls/${number}`, { body: finalBody }), [200], "updating the PR's description");
       status = reuse ? "unchanged" : "updated";
     } else {
-      const pr = expect(await api.send("POST", `${repoPath}/pulls`, { title: plan.title, head: branch, base: opts.base, body, draft: true, maintainer_can_modify: false }), [201], "opening the draft PR");
+      const pr = expect(await api.send("POST", `${repoPath}/pulls`, { title: plan.title, head: branch, base: opts.base, body: finalBody, draft: true, maintainer_can_modify: false }), [201], "opening the draft PR");
       number = pr.number;
       status = "delivered";
     }
@@ -388,11 +405,43 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
       : readBack.state === "closed"
         ? `PR #${number} was closed without merging; it is not reopened: ${readBack.url}`
         : `${status === "delivered" ? "Opened" : status === "updated" ? "Updated" : "Already open, unchanged:"} draft PR #${number}: ${readBack.url}`;
+    if (opts.from_actions) rerenderDelivered(resolve(opts.from_actions), basename(exportDir), readBack);
     return finish(status, null, detail, { commit, pr: readBack });
   } catch (error) {
     if (error instanceof Stop) return finish(error.status, error.reason, error.message);
     throw error;
   }
+}
+
+/**
+ * M2: the actions-run folder's saved report data, re-rendered with the read-back PR as the row's patch status.
+ * The deliver job has no checkout, so the reports are drawn from the saved model only (the renderers need nothing
+ * else); the row keeps its tier and verb. Nothing happens when there is no saved model.
+ */
+export function rerenderDelivered(actionsDir: string, exportRunId: string, pr: NonNullable<DeliveryRecord["pr"]>): boolean {
+  const model = readReportModel(join(actionsDir, "report-data.json"));
+  if (!model) return false;
+  const label = pr.merged ? `Adopted (merged): PR #${pr.number}` : pr.state === "closed" ? `Draft PR #${pr.number} closed, not merged` : `Delivered as draft PR #${pr.number} (not merged)`;
+  const state = pr.merged ? "adopted" : pr.state === "closed" ? "closed" : "delivered";
+  const text = pr.merged ? `PR #${pr.number} with the new test was merged (read back from GitHub).` : pr.state === "closed" ? `PR #${pr.number} with the new test was closed without merging (read back from GitHub).` : `A new test catches a fault the existing tests missed. Review draft PR #${pr.number}.`;
+  let changed = false;
+  const update = <T extends { run: string; state: string; label: string; text: string; pr?: { number: number; url: string } }>(p: T): T => {
+    if (p.run !== exportRunId) return p;
+    changed = true;
+    return { ...p, state, label, text, pr: { number: pr.number, url: pr.url } };
+  };
+  for (const row of model.worklist) if (row.patch) row.patch = update(row.patch);
+  if (model.patches) {
+    model.patches.rows = model.patches.rows.map(update);
+    const counts = Object.fromEntries(Object.keys(model.patches.counts).map((k) => [k, 0])) as Record<PatchState, number>;
+    for (const row of model.patches.rows) counts[row.state as PatchState] += 1;
+    model.patches.counts = counts;
+    model.patches.line = patchesLine(counts);
+  }
+  if (!changed) return false;
+  writeReports(model, join(actionsDir, "behavior-coverage.html"), join(actionsDir, "short_behavior-coverage.html"), join(actionsDir, "tests.csv"));
+  writeFileAtomic(join(actionsDir, "report-data.json"), `${JSON.stringify(model)}\n`);
+  return true;
 }
 
 /** The git blob id of some bytes, as GitHub computes it. */

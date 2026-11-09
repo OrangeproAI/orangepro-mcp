@@ -35,7 +35,7 @@ export interface Fixture {
   faultDir: string;
 }
 
-export function proofRunFixture(opts: { fault?: "verified_gap" | "inconclusive" | "blocked"; patch?: string; testFile?: string; neverPaths?: string[] } = {}): Fixture {
+export function proofRunFixture(opts: { fault?: "verified_gap" | "inconclusive" | "blocked"; patch?: string; testFile?: string; neverPaths?: string[]; note?: string } = {}): Fixture {
   const repo = mkdtempSync(join(tmpdir(), "opro-v3-"));
   mkdirSync(join(repo, "lib"), { recursive: true });
   mkdirSync(join(repo, "test"), { recursive: true });
@@ -71,7 +71,7 @@ export function proofRunFixture(opts: { fault?: "verified_gap" | "inconclusive" 
     rows,
     deliverables: { test_patch: { path: "orangepro-tests.patch", sha256: sha256Hex(Buffer.from(patch)), files: ["test/round.js"], added_lines: 4, removed_lines: 0, allowlist: "passed" }, diagnostic_fault_patch: { path: "diagnostic-fault.patch", sha256: sha256Hex(Buffer.from(FAULT_PATCH)), note: "" }, summary: { path: "summary.html" } },
     classification: { fault, reason: fault === "verified_gap" ? null : "row_G_not_met", generation: "generated", adoption: "not_delivered", delivery: "artifact_only" },
-    limitations: ["One fault, one revision."]
+    limitations: ["One fault, one revision.", ...(opts.note ? [opts.note] : [])]
   };
   writeFileSync(join(exportDir, "verification-receipt.json"), recordBytes(receipt));
   writeRunManifest(exportDir, EXPORT_RUN, "0.0.0-test");

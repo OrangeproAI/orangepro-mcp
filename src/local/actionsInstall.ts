@@ -121,6 +121,14 @@ export function workflowYaml(args: { base: string; version: string; totalMinutes
     "        with:",
     "          name: orangepro-delivery-${{ github.run_id }}-${{ github.run_attempt }}",
     "          path: ${{ runner.temp }}/orangepro-delivery",
+    "          if-no-files-found: warn",
+    // The proof artifact with both reports re-rendered to carry the read-back PR (M2): the report to share.
+    "      - name: Upload the report",
+    "        if: always()",
+    `        uses: actions/upload-artifact@${uploadArtifact.sha} # ${uploadArtifact.tag}`,
+    "        with:",
+    "          name: orangepro-report-${{ github.run_id }}-${{ github.run_attempt }}",
+    "          path: ${{ runner.temp }}/orangepro-in",
     "          if-no-files-found: warn"
   ];
   const body = [

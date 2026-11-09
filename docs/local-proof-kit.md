@@ -467,6 +467,12 @@ no repository code: it downloads this run's artifact and runs `opro publish-test
 repository must allow the workflow's token to open pull requests (Settings → Actions → General → Workflow
 permissions). Without `--deliver`, the workflow is the one above, byte for byte.
 
+`actions-run` also writes `behavior-coverage.html`, `short_behavior-coverage.html`, `tests.csv` and
+`report-data.json` into its output folder, beside the run folders they link (`runs/<id>/…`), with the export run's
+patch status. After a delivery, `publish-tests --from-actions` re-renders both reports from that saved data, with the
+read-back PR as the row's patch status. The deliver job uploads three artifacts: the proof (`orangepro-proof-…`), the
+delivery record (`orangepro-delivery-…`) and the report to share (`orangepro-report-…`).
+
 `opro publish-tests (--from-run <export run> | --from-actions <actions-run output>) --repo <owner/name> --base
 <branch> [--merged <sha>] [--yes]` is the publisher, and uses no git. It checks:
 - the export run's manifest, its receipt (`verified_gap`, rows A–H met), the patch's hash and its shape (one file,
@@ -475,10 +481,13 @@ permissions). Without `--deliver`, the workflow is the one above, byte for byte.
 - that no line of the diagnostic fault is in the patch;
 - that the receipt was made by the same build.
 
-Then it checks that `--base` still points at the proven merged commit. A moved base is `stale_base`: nothing is
-written, and the next push proves the new head. With `--yes`, it reads the test file at the merged commit, applies
-the patch in memory, and writes one commit through the GitHub REST API on `orangepro/tests/<merged sha, 12>`. It
-never force-pushes, and a branch holding someone else's commit is `diverged`. It then opens one draft PR, or finds
+Then it checks that `--base` still points at the proven merged commit, or at that commit plus only the files the
+installer owns (the workflow and `.orangepro/actions/`), as GitHub's compare API reports them. The code under the PR is
+then the code that was proven, and the PR says so. Any other move is `stale_base`: nothing is written, and the next
+push proves the new head. With `--yes`, it reads the test file at the merged commit, applies the patch in memory, and
+writes one commit through the GitHub REST API on `orangepro/tests/<merged sha, 12>`, on top of the base head. It
+never force-pushes, and a branch holding someone else's commit is `diverged`. A rerun whose patched file is
+byte-identical reuses the branch and only refreshes the PR's description. It then opens one draft PR, or finds
 the existing one, and reads it back: its address, draft flag, base, head and files. It writes `delivery-record.json`
 in a run folder of its own. The token comes from `GITHUB_TOKEN` or `GH_TOKEN`, and only goes to api.github.com (or
 a loopback address for tests). It is never written or printed. Without `--yes`, it prints the plan and makes no
