@@ -10,10 +10,17 @@ const TOKEN = "ghs_sentinel_token_value_0123456789";
 const REPO = "example/round";
 
 /** A small in-memory GitHub: refs, commits, trees and PRs, enough for publish-tests' calls. */
-function fakeGitHub(opts: { baseSha?: string } = {}) {
+function fakeGitHub(opts: { baseSha?: string; baseFiles?: string[] } = {}) {
   const blobs = new Map<string, Buffer>([[gitBlobSha(Buffer.from(TEST_BEFORE)), Buffer.from(TEST_BEFORE)]]);
   const trees = new Map<string, Record<string, string>>([["tree0", { "test/round.js": gitBlobSha(Buffer.from(TEST_BEFORE)) }]]);
   const commits = new Map<string, { tree: string; parents: string[]; message: string }>([[MERGED, { tree: "tree0", parents: [], message: "merge" }]]);
+  if (opts.baseSha && opts.baseFiles) {
+    // the base head: the merged commit plus the given files
+    const t: Record<string, string> = { ...trees.get("tree0")! };
+    for (const f of opts.baseFiles) t[f] = gitBlobSha(Buffer.from(f));
+    trees.set("treeW", t);
+    commits.set(opts.baseSha, { tree: "treeW", parents: [MERGED], message: "install OrangePro" });
+  }
   const refs = new Map<string, string>([["heads/main", opts.baseSha ?? MERGED]]);
   const pulls: any[] = [];
   const calls: string[] = [];
@@ -31,6 +38,10 @@ function fakeGitHub(opts: { baseSha?: string } = {}) {
     if (method !== "GET") writes += 1;
     let m: RegExpMatchArray | null;
     if (method === "GET" && (m = p.match(/^\/git\/ref\/(.+)$/))) return refs.has(m[1]) ? json(200, { object: { sha: refs.get(m[1]) } }) : json(404, { message: "Not Found" });
+    if (method === "GET" && (m = p.match(/^\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/))) {
+      if (m[1] !== MERGED || m[2] !== opts.baseSha || !opts.baseFiles) return json(404, {});
+      return json(200, { status: "ahead", ahead_by: 1, behind_by: 0, files: opts.baseFiles.map((filename) => ({ filename })) });
+    }
     if (method === "GET" && (m = p.match(/^\/git\/commits\/([0-9a-f]+)$/))) return commits.has(m[1]) ? json(200, { sha: m[1], tree: { sha: commits.get(m[1])!.tree }, message: commits.get(m[1])!.message }) : json(404, {});
     if (method === "GET" && (m = p.match(/^\/contents\/(.+)$/))) {
       const tree = trees.get(commits.get(u.searchParams.get("ref") ?? "")?.tree ?? "") ?? {};
@@ -79,14 +90,15 @@ function fakeGitHub(opts: { baseSha?: string } = {}) {
       const headSha = refs.get(`heads/${pr.head.ref}`)!;
       if (m[2]) {
         const tree = trees.get(commits.get(headSha)!.tree)!;
-        const files = Object.keys(tree).filter((f) => tree[f] !== trees.get("tree0")![f]);
+        const baseTree = trees.get(commits.get(refs.get(`heads/${pr.base.ref}`)!)!.tree)!;
+        const files = Object.keys(tree).filter((f) => tree[f] !== baseTree[f]);
         return json(200, files.map((filename) => ({ filename })));
       }
       return json(200, { ...pr, head: { ...pr.head, sha: headSha } });
     }
     return json(500, { message: `fake GitHub has no ${method} ${p}` });
   }) as typeof fetch;
-  return { fetchImpl, calls, refs, pulls, blobs, get writes() { return writes; } };
+  return { fetchImpl, calls, refs, pulls, blobs, commits, get writes() { return writes; } };
 }
 
 const env = { GITHUB_TOKEN: TOKEN, ORANGEPRO_GITHUB_API_URL: "http://127.0.0.1:9" } as NodeJS.ProcessEnv;
@@ -135,6 +147,38 @@ describe("opro publish-tests: the trusted draft-PR publisher (no repository code
     const res = await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(gh));
     expect(res).toMatchObject({ status: "stale_base", reason: "base_moved" });
     expect(gh.writes).toBe(0);
+  });
+
+  it("the base is the proven commit plus only OrangePro's workflow files: delivered on the base head, and the PR says so", async () => {
+    const f = proofRunFixture();
+    const W = "7".repeat(40);
+    const gh = fakeGitHub({ baseSha: W, baseFiles: [".github/workflows/orangepro-proof.yml", ".orangepro/actions/profile.json"] });
+    const res = await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(gh));
+    expect(res.status).toBe("delivered");
+    expect(gh.commits.get(res.record!.commit!)!.parents).toEqual([W]);
+    expect(res.record?.pr?.files).toEqual(["test/round.js"]);
+    expect(gh.pulls[0].body).toContain("adds only OrangePro's workflow files since");
+  });
+
+  it("the base adds anything else (here, the function's own file): stale_base, and no write", async () => {
+    const f = proofRunFixture();
+    const gh = fakeGitHub({ baseSha: "7".repeat(40), baseFiles: [".github/workflows/orangepro-proof.yml", "lib/round.js"] });
+    const res = await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(gh));
+    expect(res).toMatchObject({ status: "stale_base", reason: "base_moved" });
+    expect(gh.writes).toBe(0);
+  });
+
+  it("a rerun with a new receipt and the same test file reuses the branch: no new commit, the same PR, its description refreshed", async () => {
+    const gh = fakeGitHub();
+    const first = await opPublishTests({ from_run: proofRunFixture({ note: "run 1" }).exportDir, repo: REPO, base: "main", yes: true }, deps(gh));
+    expect(first.status).toBe("delivered");
+    const commits = gh.commits.size;
+    const second = await opPublishTests({ from_run: proofRunFixture({ note: "run 2" }).exportDir, repo: REPO, base: "main", yes: true }, deps(gh, { now: () => 1_800_000_000_002 }));
+    expect(second.status).toBe("unchanged");
+    expect(second.record?.pr?.number).toBe(first.record?.pr?.number);
+    expect(gh.commits.size).toBe(commits);
+    expect(gh.pulls).toHaveLength(1);
+    expect(gh.pulls[0].body).toContain("run 2");
   });
 
   it("the branch holds a commit OrangePro did not write: diverged, and no write", async () => {

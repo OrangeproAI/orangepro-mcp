@@ -480,9 +480,14 @@ function patchSection(view: ProofRunsView | undefined, worklist: WorkItem[], gra
     if (row) row.patch = patch;
     rows.push({ ...patch, id: status.symbol_id, title: row?.title ?? titles.get(status.symbol_id) ?? status.symbol_id.replace(/^sym:[^#]*#/, "") });
   }
+  return { line: patchesLine(counts), counts, rows, ignored: view.ignored };
+}
+
+/** The one patch-status sentence both reports show ("1 verified test patch, not merged."). */
+export function patchesLine(counts: Record<PatchState, number>): string {
   const parts = (Object.keys(PATCH_WORDS) as PatchState[]).filter((k) => counts[k] > 0).map((k) => `${n(counts[k])} ${counts[k] === 1 ? PATCH_WORDS[k][0] : PATCH_WORDS[k][1]}`);
   const line = parts.length ? `${parts.join("; ")}.` : "No proof run can be used.";
-  return { line: line.charAt(0).toUpperCase() + line.slice(1), counts, rows, ignored: view.ignored };
+  return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
 /** "1,022 test files: 69 call a counted function, 953 call none that OrangePro traced." */

@@ -89,3 +89,29 @@ describe("V3 installer: the deliver job is opt-in and the only one that can writ
     expect(withDeliver.slice(0, withDeliver.indexOf("  deliver:"))).not.toContain("write");
   });
 });
+
+describe("M2: the reports in the actions artifact, re-rendered after a delivery", () => {
+  it("writes both reports and their data into the artifact folder, then shows the read-back PR as the row's patch status", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { rerenderDelivered } = await import("../../src/local/publishTests.js");
+    const f = proofRunFixture();
+    writeFileSync(join(f.repo, "package.json"), JSON.stringify({ name: "round", version: "1.0.0", main: "lib/round.js" }));
+    opInit(f.repo, deps);
+    opAnalyze(f.repo, { source: f.repo }, deps);
+    const dir = mkdtempSync(join(tmpdir(), "opro-artifact-"));
+    opBehaviorCoverageHtml(f.repo, join(dir, "behavior-coverage.html"), undefined, { persistBaseline: false, feedbackInvite: false, proofRunsDir: f.runs, csvPath: join(dir, "tests.csv"), dataPath: join(dir, "report-data.json") } as never);
+    const before = JSON.parse(readFileSync(join(dir, "report-data.json"), "utf8")) as ReportModel;
+    expect(before.patches?.line).toBe("1 verified test patch, not merged.");
+    const pr = { number: 12, url: "https://github.com/OrangeproAI/express/pull/12", draft: true, state: "open" as const, merged: false, base_ref: "master", head_sha: "c".repeat(40), files: ["test/round.js"] };
+    expect(rerenderDelivered(dir, EXPORT_RUN, pr)).toBe(true);
+    const after = JSON.parse(readFileSync(join(dir, "report-data.json"), "utf8")) as ReportModel;
+    expect(after.patches?.line).toBe("1 delivered as a draft PR, not merged.");
+    expect(after.patches?.rows[0]).toMatchObject({ label: "Delivered as draft PR #12 (not merged)", pr: { number: 12 } });
+    expect(after.counts).toEqual(before.counts);
+    const summary = readFileSync(join(dir, "short_behavior-coverage.html"), "utf8");
+    expect(summary).toContain('href="https://github.com/OrangeproAI/express/pull/12"');
+    expect(readFileSync(join(dir, "behavior-coverage.html"), "utf8")).toContain("Delivered as draft PR #12 (not merged)");
+    expect(rerenderDelivered(dir, "run_mh0zzzzz_zzzzzz", pr)).toBe(false); // another run: nothing to change
+  });
+});
