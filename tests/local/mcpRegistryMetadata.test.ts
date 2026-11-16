@@ -47,5 +47,7 @@ describe("MCP Registry metadata", () => {
     ]);
     expect(launcherPackage.description).not.toMatch(/code never leaves your machine/i);
     expect(launcherPackage.description).toContain("redacted grounded context");
+    expect(launcherPackage.description).toContain("user's own model provider");
+    expect(launcherPackage.description.length).toBeLessThanOrEqual(255);
   });
 });

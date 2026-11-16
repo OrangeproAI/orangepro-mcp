@@ -19,6 +19,8 @@ const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
 const ALLOWLIST = [
   "LICENSE",
   "README.md",
+  "CHANGELOG.md",
+  "SECURITY.md",
   "dist/local",
   "docs/agent-workflow.md",
   "docs/agents",

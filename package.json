@@ -43,6 +43,8 @@
     "scripts/spikes/python-mutate.py",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md",
     "docs/agents",
     "docs/agent-workflow.md",
     "docs/local-proof-kit.md"
