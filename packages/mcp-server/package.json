@@ -3,7 +3,7 @@
   "version": "0.2.60",
   "mcpName": "ai.orangepro/mcp",
   "private": false,
-  "description": "OrangePro — find behavioral test gaps, generate grounded integration tests, and dynamically prove them via mutation kill. Local-first with no OrangePro-hosted service or repo upload; optional BYOK generation sends redacted grounded context directly to your configured provider.",
+  "description": "OrangePro finds test gaps, generates grounded tests, and proves them with targeted mutation proof. Local-first; no OrangePro-hosted service or repo upload. Optional BYOK generation sends redacted grounded context directly to the user's own model provider.",
   "license": "MIT",
   "author": "OrangePro",
   "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
