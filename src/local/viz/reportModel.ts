@@ -12,15 +12,16 @@ import type { BehaviorReportBuild, DynamicProofReportInput } from "./behaviorRep
 import type { RepoWeb } from "./shortReport.js";
 import { areaOf, buildWorklist, verbCounts, type Evidence, type GenerationContext, type RowPatch, type Verb, type WorkItem } from "./worklist.js";
 import type { PatchState, ProofRunsView } from "../proofRuns.js";
+import { byHandCounts, type ByHandRun, type ReportByHand } from "./byHand.js";
 
 /**
  * Everything both reports and the CSV show, computed once and saved as
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 4;
+export const REPORT_DATA_VERSION = 5;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r15.0";
+export const REPORT_RENDERER_VERSION = "r16.0";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
@@ -104,6 +105,11 @@ export interface ReportModel {
     rows: Array<RowPatch & { id: string; title: string }>;
     ignored: Array<{ run_id: string; reason: string }>;
   };
+  /**
+   * Item 48: what this `opro start` run produced, for the summary's "By hand" line. `run` is null on
+   * reports another command wrote; the "Not counted" numbers are always there.
+   */
+  byHand: ReportByHand;
   links: { detailed: string; summary: string; csv: string };
 }
 
@@ -126,6 +132,8 @@ export interface ReportModelInput {
   timeZoneOffsetMinutes?: number;
   /** V3: patch statuses from finished proof runs (`loadPatchStatuses`). */
   patches?: ProofRunsView;
+  /** Item 48: set only by `opro start`'s last report write, from that run's own outputs. */
+  byHand?: ByHandRun;
   links: ReportModel["links"];
 }
 
@@ -448,6 +456,10 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
         }
       : {}),
     ...(patches ? { patches } : {}),
+    byHand: {
+      run: input.byHand ? byHandCounts(input.byHand) : null,
+      notCounted: { functions: data.summary.total, testFiles: data.scan.tests.total }
+    },
     links: input.links
   };
   return model;

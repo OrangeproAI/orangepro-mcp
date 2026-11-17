@@ -59,6 +59,7 @@ import { findGaps } from "./gaps/gaps.js";
 import { inspectRiskInputHealth, rankPriorityGaps, rankRiskGaps, riskHistoryFingerprint, withRankingCache } from "./score/risk.js";
 import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
+import type { ByHandRun } from "./viz/byHand.js";
 import { assertMayRunRepositoryCode, isStaticOnly, STATIC_ONLY_REFUSAL } from "./staticOnly.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget, isNoKeyMessage } from "./autoProve.js";
 import { AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT, RunHint, runnableRunHintsFor } from "./generate/runHints.js";
@@ -3107,7 +3108,13 @@ export async function opStart(
         .filter((a) => !a.deduped)
         .map((a) => ({ category: a.category, reason: a.reason }))
     };
-    coverageHtml = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, dynForReport, { runReason }).behavior_coverage_path;
+    // Item 48: this run's own outputs, for the summary's "By hand" line (only start passes them).
+    const byHand: ByHandRun = {
+      attempts: autoProveResult.attempts,
+      drafts: generationResult.status === "disabled" ? 0 : generationResult.generated,
+      staticOnly
+    };
+    coverageHtml = opBehaviorCoverageHtml(root, `${WORKSPACE_DIR}/behavior-coverage.html`, dynForReport, { runReason, byHand }).behavior_coverage_path;
     finalReportWritten = true;
   } catch (error) {
     warnings.push(`behavior coverage view not written: ${error instanceof Error ? error.message : String(error)}`);
@@ -3684,6 +3691,8 @@ interface ReportWriteOptions {
   csvPath?: string;
   /** M2: also write the report data here, whatever persistBaseline says (an artifact folder). */
   dataPath?: string;
+  /** Item 48: only `opro start`'s last report write sets this, from that run's own outputs. */
+  byHand?: ByHandRun;
 }
 interface ReportWriteResult { behavior_coverage_path: string; short_report_path?: string; tests_csv_path?: string; report_data_path?: string }
 
@@ -3740,6 +3749,7 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
     generatedAt: new Date().toISOString(),
     // V3: finished proof runs give rows a patch status; the tiers above are untouched by it.
     patches: loadPatchStatuses(options.proofRunsDir ?? join(workspaceDir, "proof-runs"), graph.workspace.root, dirname(htmlPath)),
+    ...(options.byHand ? { byHand: options.byHand } : {}),
     links: { detailed: basename(htmlPath), summary: basename(summaryPath), csv: relative(dirname(htmlPath), csvPath).split(sep).join("/") }
   });
   const written = writeReports(model, htmlPath, summaryPath, csvPath);
