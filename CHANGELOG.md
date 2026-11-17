@@ -2,13 +2,23 @@
 
 Dates below are America/Los_Angeles (Pacific Time), converted from the npm publish timestamp (`npm view <package> time`) or from a cited GitHub release. This file covers `@orangepro/mcp-server` and `@orangepro/orangepro-mcp`. It includes only versions and dates that were verified, and it does not invent release notes. For versions that already have official notes in the repo or on GitHub, those notes are summarized or linked.
 
-## Unreleased
+## 0.2.61 — 2026-11-16
+
+Official notes: [docs/releases/0.2.61.md](https://github.com/OrangeproAI/orangepro-mcp/blob/v0.2.61/docs/releases/0.2.61.md). GitHub release: [v0.2.61](https://github.com/OrangeproAI/orangepro-mcp/releases/tag/v0.2.61).
 
 - Add this changelog and `SECURITY.md`.
 - Shorten the `@orangepro/mcp-server` npm `description` so it stays within npm's 255-character limit and says that optional BYOK generation sends redacted grounded context directly to the user's own model provider. The 0.2.60 description was 277 characters and was published truncated, ending at "directly to you".
 - Ship `CHANGELOG.md` and `SECURITY.md` in the `@orangepro/orangepro-mcp` package (`files`). The `@orangepro/mcp-server` launcher package is unchanged in layout (`bin` and `README.md` only); it still depends on `@orangepro/orangepro-mcp`.
 
-Other unreleased work already on `main` after v0.2.60 is described in [docs/releases/0.2.61.md](https://github.com/OrangeproAI/orangepro-mcp/blob/main/docs/releases/0.2.61.md). That document is the source for those changes; they are not repeated here.
+From the official 0.2.61 notes:
+
+- Patch status in the reports: a function that a finished proof run verified shows "Verified test patch (not merged)" beside its evidence. It is not an evidence tier; counts and verbs are unchanged.
+- `opro publish-tests` (new) delivers a verified test patch as one draft PR through the GitHub API. It runs no repository code, and refuses when the code under the PR is not the code that was proven.
+- `opro install-github-action --deliver draft-pr` (new, opt-in) adds a separate deliver job, the only job with write permissions. The Actions artifact holds both reports, re-rendered with the PR link after a delivery.
+- `summary.html` names and links the repository, the merged commit and the source PR.
+- The one-page summary says what an `opro start` run did ("Done by this run") and roughly how long it would take by hand, with its assumptions and sources. Both reports link to the OrangePro platform.
+- The repository's lockfile moves `hono` to 4.13.19 after five advisories published on 12 Nov. The local server never loads it.
+- The first run after upgrading is a full run: the report data format changed.
 
 ## 0.2.60 — 2026-11-08
 
