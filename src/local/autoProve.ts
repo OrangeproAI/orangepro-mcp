@@ -513,6 +513,12 @@ export interface AutoProveAttempt {
   target_symbol: string;
   /** Workspace-relative path written under orangepro_generated/. */
   test_path: string;
+  /**
+   * Item 48: whether OrangePro wrote this test in this run ("written") or found it in the
+   * repository ("found"). A record without it is read as "found", so a report never credits
+   * work it cannot show.
+   */
+  test_source?: "written" | "found";
   classification: AutoProveClass;
   reason?: string;
   /** Oracle status for the attempted mutant, when available. */
@@ -1290,6 +1296,7 @@ function proveExistingAssociatedTests(
     const attempt: AutoProveAttempt = {
       target_symbol: symId,
       test_path: displayTest,
+      test_source: "found",
       classification,
       reason,
       category,
@@ -1655,6 +1662,7 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
       const attempt: AutoProveAttempt = {
         target_symbol,
         test_path: writeRel,
+        test_source: "written",
         classification,
         reason,
         category,

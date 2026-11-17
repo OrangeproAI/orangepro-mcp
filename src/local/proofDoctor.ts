@@ -37,6 +37,8 @@ const PROVABLE_LANGUAGES = new Set(["typescript", "javascript", "go", "java", "p
 export interface ProofAttemptRecord {
   target_symbol: string;
   test_path?: string;
+  /** Item 48: "written" by OrangePro this run, or "found" in the repository. Absent means "found". */
+  test_source?: "written" | "found";
   classification: "proven" | "non_killing" | "needs_setup" | "gen_failed";
   /** Oracle outcome detail — distinguishes a SURVIVED mutant (test passed) from
    *  a NON-ASSERTION failure (mutant crashed the test before any assertion).
@@ -226,6 +228,7 @@ interface AutoProveLike {
   attempts: Array<{
     target_symbol: string;
     test_path: string;
+    test_source?: "written" | "found";
     classification: "proven" | "non_killing" | "needs_setup" | "gen_failed";
     mutant_status?: string;
     reason?: string;
@@ -279,6 +282,7 @@ export function distillProofAttempts(
     attempts: auto.attempts.filter((a) => !a.deduped).map((a) => ({
       target_symbol: a.target_symbol,
       test_path: a.test_path || undefined,
+      ...(a.test_source ? { test_source: a.test_source } : {}),
       classification: a.classification,
       mutant_status: a.mutant_status,
       category: a.category,

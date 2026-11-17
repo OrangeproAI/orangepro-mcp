@@ -107,6 +107,12 @@ export const ARROW_SVG =
 /** Same command the README and the plugin tell a new user to run. `@orangepro/mcp-server` launches `@orangepro/orangepro-mcp`. */
 export const RUN_COMMAND = "npx -y @orangepro/mcp-server@latest start .";
 
+/** Item 48: the platform's address, in one place. Each report adds which page the reader came from. */
+export const PLATFORM_URL = "https://orangepro.ai/";
+export function platformLink(page: "summary" | "detailed"): string {
+  return `${PLATFORM_URL}?utm_source=mcp_report&utm_medium=${page}`;
+}
+
 /** CSS both pages share: tokens, chips, buttons, code. */
 export function baseCss(): string {
   const chips = [
