@@ -117,26 +117,36 @@ function fixtureRepo(): string {
 describe("item 48: the reports", () => {
   it("bumps both versions", () => {
     expect(REPORT_DATA_VERSION).toBe(5);
-    expect(REPORT_RENDERER_VERSION).toBe("r16.0");
+    expect(REPORT_RENDERER_VERSION).toBe("r16.1");
   });
 
-  it("summary: the platform card sits directly above the footer, with the link from the one constant", () => {
+  it("summary: the platform card comes right after the top functions, with the link from the one constant", () => {
     const { summary } = reportsFor(fixtureRepo());
     const card = `<section class="card cta" aria-labelledby="cta-h">
   <h2 id="cta-h">From functions to workflows</h2>
   <p>This report checks functions one at a time. The OrangePro platform connects them to your requirements and past bugs, so it can show which critical workflows a change puts at risk.</p>
   <p><a class="ctabtn" href="${esc(platformLink("summary"))}" target="_blank" rel="noopener noreferrer">See the platform →</a></p>
 </section>
-</main>
-<footer`;
+<section class="byhand"`;
     expect(summary).toContain(card);
+    // 0.2.62-demo.1: after the top functions (or the opening section when nothing is ranked), before "By hand".
+    const at = summary.indexOf('<section class="card cta"');
+    const top = summary.indexOf('<section aria-labelledby="top-h">');
+    if (top >= 0) expect(top).toBeLessThan(at);
+    expect(at).toBeLessThan(summary.indexOf('<section class="card" aria-labelledby="rep-h">'));
     expect(platformLink("summary")).toBe("https://orangepro.ai/?utm_source=mcp_report&utm_medium=summary");
     expect(summary).toMatch(/\.ctabtn\{display:inline-block;background:#E0561B;color:#fff;font-weight:700;font-size:19px;/);
   });
 
-  it("detailed: one bar fixed to the bottom; Give feedback only when the footer has it", () => {
+  it("summary and detailed: one bar each, fixed to the bottom; Give feedback only when the footer has it", () => {
     const repo = fixtureRepo();
-    const on = reportsFor(repo).detailed;
+    const both = reportsFor(repo);
+    const sbars = both.summary.match(/<nav class="platbar"[\s\S]*?<\/nav>/g) ?? [];
+    expect(sbars).toHaveLength(1);
+    expect(textOf(sbars[0]!).trim()).toBe("OrangePro platform · See the platform → · Give feedback");
+    expect(sbars[0]).toContain(`href="${esc(platformLink("summary"))}"`);
+    expect(both.summary).toMatch(/\.platbar\{position:fixed;left:0;right:0;bottom:0;/);
+    const on = both.detailed;
     const bars = on.match(/<nav class="platbar"[\s\S]*?<\/nav>/g) ?? [];
     expect(bars).toHaveLength(1);
     expect(textOf(bars[0]!).trim()).toBe("OrangePro platform · See the platform → · Give feedback");
@@ -146,9 +156,11 @@ describe("item 48: the reports", () => {
     const previous = process.env.ORANGEPRO_FEEDBACK_URL;
     process.env.ORANGEPRO_FEEDBACK_URL = "off";
     try {
-      const off = reportsFor(repo).detailed;
-      expect(textOf(off.match(/<nav class="platbar"[\s\S]*?<\/nav>/)![0]).trim()).toBe("OrangePro platform · See the platform →");
-      expect(off).not.toContain("Give feedback");
+      const offBoth = reportsFor(repo);
+      for (const off of [offBoth.detailed, offBoth.summary]) {
+        expect(textOf(off.match(/<nav class="platbar"[\s\S]*?<\/nav>/)![0]).trim()).toBe("OrangePro platform · See the platform →");
+        expect(off).not.toContain("Give feedback");
+      }
     } finally {
       if (previous === undefined) delete process.env.ORANGEPRO_FEEDBACK_URL;
       else process.env.ORANGEPRO_FEEDBACK_URL = previous;

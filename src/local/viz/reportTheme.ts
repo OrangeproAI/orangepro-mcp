@@ -113,6 +113,19 @@ export function platformLink(page: "summary" | "detailed"): string {
   return `${PLATFORM_URL}?utm_source=mcp_report&utm_medium=${page}`;
 }
 
+/** The one-line bar both reports keep at the bottom of the screen. "Give feedback" shows when the footer has it. */
+export function platformBarHtml(page: "summary" | "detailed", feedbackUrl: string | undefined): string {
+  return `<nav class="platbar" aria-label="OrangePro platform">OrangePro platform · <a href="${esc(platformLink(page))}" target="_blank" rel="noopener noreferrer">See the platform →</a>${feedbackUrl ? ` · <a href="${esc(feedbackUrl)}" target="_blank" rel="noopener">Give feedback</a>` : ""}</nav>`;
+}
+
+export const PLATFORM_BAR_CSS = `
+.platbar{position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--card);border-top:1px solid var(--line);padding:8px 16px;text-align:center;font-size:13px;line-height:1.5;color:var(--muted)}
+.platbar a{color:#C94A15;font-weight:700}
+.platbar a:hover{color:var(--accent-ink)}
+body{padding-bottom:56px}
+@media print{.platbar{display:none}body{padding-bottom:0}}
+`;
+
 /** CSS both pages share: tokens, chips, buttons, code. */
 export function baseCss(): string {
   const chips = [
