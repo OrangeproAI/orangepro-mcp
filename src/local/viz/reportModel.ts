@@ -21,7 +21,7 @@ import { byHandCounts, type ByHandRun, type ReportByHand } from "./byHand.js";
  */
 export const REPORT_DATA_VERSION = 5;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r16.0";
+export const REPORT_RENDERER_VERSION = "r16.1";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
