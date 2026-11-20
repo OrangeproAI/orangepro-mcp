@@ -314,6 +314,12 @@ export function addonProvenance(only?: readonly AddonInterfaceName[]): AddonProv
   return { name: status.name, version: status.version, api_version: status.api_version, used: list };
 }
 
+/** The loaded add-on's name and version, whether or not an answer of its has been used yet. */
+export function addonIdentity(): { name: string; version: string } {
+  const status = settled?.status;
+  return status?.state === "loaded" ? { name: status.name, version: status.version } : { name: ADDON_PACKAGE, version: "unknown" };
+}
+
 /** Tests only: replace how the add-on is found, and forget everything loaded. */
 export function setPluginHostForTest(overrides: Partial<PluginHost> | null): void {
   host = overrides ? { ...defaultHost(), ...overrides } : defaultHost();

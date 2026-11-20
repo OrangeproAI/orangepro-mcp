@@ -323,7 +323,8 @@ export const PROOF_REFUSAL_CODES = [
   "brace_in_string",
   "name_mismatch",
   "function_hash_mismatch",
-  "name_search_disabled"
+  "name_search_disabled",
+  "edit_no_control"
 ] as const;
 export type ProofRefusalCode = (typeof PROOF_REFUSAL_CODES)[number];
 

@@ -59,6 +59,49 @@ export interface ContainerProfile {
   env_names: string[];
 }
 
+/** One candidate tried before this run's own. */
+export interface CandidateTried {
+  /** Position in the proposed list, from 1. */
+  index: number;
+  /** `refused`: a check failed and nothing ran. Otherwise what its run showed. */
+  outcome: "refused" | "caught" | "ran_but_missed" | "never_ran" | "cant_tell" | "invalid" | "inconclusive";
+  /** The refusal's code, or the run's classification and reason. */
+  detail: string;
+  run_id?: string;
+}
+
+/** Where this run's fault stands among the candidates an add-on proposed. Refusals and runs are counted apart. */
+export interface CandidateTrail {
+  offered: number;
+  cap: number;
+  /** This run's candidate, from 1. */
+  index: number;
+  earlier: CandidateTried[];
+  /** Earlier candidates refused before any run. */
+  refused: number;
+  /** Test runs so far, this one included. */
+  runs: number;
+}
+
+/** Where an expected behavior came from, beside who approved it. */
+export interface OracleDraft {
+  by: string;
+  version: string;
+  draft_sha256: string;
+  /** Whether the content run is still the content that was drafted (approval aside). */
+  unchanged_since_draft: boolean;
+}
+
+/** An approval that came with a candidate. The hashes are of the files as accepted, so a later change shows. */
+export interface SuppliedApproval {
+  via: string;
+  by: string;
+  at: string;
+  where: string;
+  oracle_sha256: string;
+  witness_sha256: string;
+}
+
 export interface RunProfile {
   version: typeof RUN_PROFILE_VERSION;
   run_id: string;
@@ -66,6 +109,12 @@ export interface RunProfile {
   tool: { name: string; version: string; build_sha256?: string | null };
   /** Present only when an add-on's answer was used in this run (it chose the fault). */
   addon?: import("../pluginApi.js").AddonProvenance;
+  /** Present only when the fault was one of several proposed candidates tried in order. */
+  candidates?: CandidateTrail;
+  /** Present only when the expected behavior's approval was supplied through an add-on and the caller accepted it. */
+  supplied_approval?: SuppliedApproval;
+  /** Present only when the expected behavior says an add-on drafted it. */
+  oracle_draft?: OracleDraft;
   fixture_manifest_sha256: string;
   /** `source.pr.number` of the fixture, when it records one. */
   source_pr: number | null;

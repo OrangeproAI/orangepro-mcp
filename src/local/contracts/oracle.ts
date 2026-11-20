@@ -3,9 +3,13 @@
 // did. A proof run reads it as a claim: wrong version, a missing or unknown field, or a
 // target that is not the run's target refuses the run.
 
+import { recordSha256 } from "./io.js";
+
 export const ORACLE_VERSION = "orangepro.oracle.v1" as const;
 
-export const ORACLE_BASIS_KINDS = ["source_doc", "spec", "library", "api_doc", "test_name"] as const;
+// `current_behavior`: the expected result is what the code does today at the commit named in `ref`
+// (observed, not read from a document). Said in its own field so it never has to hide in free text.
+export const ORACLE_BASIS_KINDS = ["source_doc", "spec", "library", "api_doc", "test_name", "current_behavior"] as const;
 export type OracleBasisKind = (typeof ORACLE_BASIS_KINDS)[number];
 
 export interface OracleBasis {
@@ -50,6 +54,18 @@ export interface Oracle {
   witness: OracleWitness;
   assisted: { flag: boolean; visible_before: string[] };
   approval: OracleApproval;
+  /**
+   * Present only when an add-on drafted this expected behavior. Written by OrangePro when it
+   * writes the draft, never by the add-on: the add-on's name and version, and the sha256 of
+   * the draft's content (`draftSha256`). Absent on a hand-written file.
+   */
+  drafted_by?: OracleDraftedBy;
+}
+
+export interface OracleDraftedBy {
+  name: string;
+  version: string;
+  draft_sha256: string;
 }
 
 export type OracleCheck = { ok: true; oracle: Oracle } | { ok: false; message: string };
@@ -89,7 +105,7 @@ const nonEmpty = (value: unknown): value is string => typeof value === "string" 
 export function checkOracle(value: unknown): OracleCheck {
   const fail = (message: string): OracleCheck => ({ ok: false, message: `oracle: ${message}` });
   if (!isPlain(value)) return fail("not a JSON object.");
-  const keys = onlyKeys(value, TOP_KEYS, TOP_KEYS);
+  const keys = onlyKeys(value, [...TOP_KEYS, "drafted_by"], TOP_KEYS);
   if (keys) return fail(`${keys}.`);
   if (value.version !== ORACLE_VERSION) return fail(`version must be ${ORACLE_VERSION}.`);
   if (typeof value.target_record_sha256 !== "string" || !SHA256_RE.test(value.target_record_sha256)) {
@@ -129,5 +145,29 @@ export function checkOracle(value: unknown): OracleCheck {
   for (const key of ["by", "at", "where"] as const) {
     if (approval[key] !== undefined && !nonEmpty(approval[key])) return fail(`approval.${key} must be a non-empty string when given.`);
   }
+  if (value.drafted_by !== undefined) {
+    const drafted = value.drafted_by;
+    if (!isPlain(drafted)) return fail("drafted_by must be an object.");
+    const badDrafted = onlyKeys(drafted, ["name", "version", "draft_sha256"], ["name", "version", "draft_sha256"]);
+    if (badDrafted) return fail(`drafted_by: ${badDrafted}.`);
+    if (!nonEmpty(drafted.name) || !nonEmpty(drafted.version)) return fail("drafted_by.name and drafted_by.version must be non-empty strings.");
+    if (typeof drafted.draft_sha256 !== "string" || !SHA256_RE.test(drafted.draft_sha256)) return fail("drafted_by.draft_sha256 must be a sha256 in lowercase hex.");
+  }
   return { ok: true, oracle: value as unknown as Oracle };
+}
+
+/** Whether the oracle says its expected result is what the code does today. */
+export function matchesCurrentBehavior(oracle: Oracle): OracleBasis | null {
+  return (Array.isArray(oracle.basis) ? oracle.basis : []).find((entry) => entry.kind === "current_behavior") ?? null;
+}
+
+/** The sha256 of an expected behavior's content, leaving out who approved it and who drafted it. The same before and after approval. */
+export function oracleDraftSha256(oracle: unknown): string {
+  const { approval: _approval, drafted_by: _draftedBy, ...content } = oracle as Record<string, unknown>;
+  return recordSha256(content);
+}
+
+/** The draft as OrangePro writes it when an add-on proposed it: marked with the add-on and the draft's own hash, whatever the add-on wrote there. */
+export function withDraftOrigin<T extends Record<string, unknown>>(oracle: T, addon: { name: string; version: string }): T & { drafted_by: OracleDraftedBy } {
+  return { ...oracle, drafted_by: { name: addon.name, version: addon.version, draft_sha256: oracleDraftSha256(oracle) } };
 }

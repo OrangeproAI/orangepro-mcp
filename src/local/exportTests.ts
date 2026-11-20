@@ -18,7 +18,9 @@ import {
   type FaultRun
 } from "./candidateTest.js";
 import { checkAssertionRecord, type AssertionRecord, type CandidateVerdict } from "./contracts/candidate.js";
-import { planFault, unifiedFileDiff } from "./contracts/faultRecord.js";
+import { replanFromRecord, unifiedFileDiff } from "./contracts/faultRecord.js";
+import { matchesCurrentBehavior } from "./contracts/oracle.js";
+import { scopeWords } from "./faultCandidates.js";
 import { newRunId, recordBytes, recordSha256, sha256Hex, verifyRunFolder, writeFileAtomic, writeRunManifest } from "./contracts/io.js";
 import { RUN_PROFILE_VERSION, type Classification, type RunProfile, type StageName, type StageObservation } from "./contracts/receipt.js";
 import { PROOF_ROW_MEANING, VERIFICATION_RECEIPT_VERSION, type ProofRow, type ProofRowResult, type ReceiptStage, type StageRef, type VerificationReceipt } from "./contracts/verificationReceipt.js";
@@ -136,7 +138,7 @@ interface VerifyRun {
   assertion: AssertionRecord;
   candidate: Buffer;
   profile: RunProfile;
-  tag: { fault_run?: { run_id?: string; manifest_sha256?: string }; brief_run?: { run_id?: string | null; manifest_sha256?: string } };
+  tag: { fault_run?: { run_id?: string; manifest_sha256?: string }; brief_run?: { run_id?: string | null; manifest_sha256?: string }; host_test?: { path: string; sha256: string } };
   stages: Partial<Record<StageName, StageObservation>>;
   stageRefs: Classification["stages"];
 }
@@ -297,7 +299,8 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   const targetAbs = join(sourceRoot, run.record.identity.file);
   if (!existsSync(targetAbs) || sha256Hex(readFileSync(targetAbs)) !== run.faultRecord.file_sha256) refuse("stale_checkout", `the checkout's ${run.record.identity.file} changed since the runs; restore it.`);
   const testPath = verify.assertion.test.file;
-  const selected = run.profile.selected_tests.find((t) => t.path === testPath);
+  // A whole-suite-only fault run selected no file; the verify run recorded the one the new test was added to.
+  const selected = run.profile.selected_tests.find((t) => t.path === testPath) ?? (verify.tag.host_test?.path === testPath ? verify.tag.host_test : undefined);
   const testAbs = join(sourceRoot, testPath);
   if (!selected || !existsSync(testAbs) || lstatSync(testAbs).isSymbolicLink() || !realInside(sourceRoot, testAbs) || sha256Hex(readFileSync(testAbs)) !== selected.sha256) {
     refuse("stale_checkout", `the checkout's ${testPath} is not as the fault run selected it; restore it with git checkout -- ${testPath}.`);
@@ -340,7 +343,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   const bound = tsjs?.bound;
   if (!tsjs || !bound) return refuse("stale_checkout", `${run.record.identity.symbol_id} is not changed by its exact position any more.`);
   const fileBytes = readFileSync(tsjs.targetAbs);
-  const replanned = planFault(fileBytes, bound.target, run.record.identity.file, run.faultRecord.operator.id, run.faultRecord.site.bytes.start);
+  const replanned = replanFromRecord(fileBytes, bound.target, run.record.identity.file, run.faultRecord);
   if (!replanned.ok || replanned.plan.mutated_file_sha256 !== run.faultRecord.mutated_file_sha256) refuse("stale_checkout", "the fault planned now is not the fault the run recorded.");
   const plan = replanned.ok ? replanned.plan : (null as never);
   const originalSha = run.faultRecord.file_sha256;
@@ -470,6 +473,9 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     evidence_kind: "runtime_observation",
     tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
     ...(run.profile.addon ? { addon: run.profile.addon } : {}),
+    ...(run.profile.candidates ? { candidates: { ...run.profile.candidates, runs_to_first_hit: run.profile.candidates.runs } } : {}),
+    ...(run.profile.supplied_approval ? { supplied_approval: run.profile.supplied_approval } : {}),
+    ...(run.profile.oracle_draft ? { oracle_draft: { ...run.profile.oracle_draft, approved_by: run.oracle.approval.status === "approved" ? (run.oracle.approval.by ?? null) : null } } : {}),
     run_ids: { fault: run.runId, brief: briefRunId, verify: verify.runId, export: runId },
     run_manifests: [
       { run_id: run.runId, sha256: run.manifestSha },
@@ -562,6 +568,7 @@ const esc = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, 
 
 /** One local page, from the receipt only: no request leaves it, and the same receipt gives the same bytes. */
 export function summaryHtml(r: VerificationReceipt, patch: string, statement: string, run: FaultRun): string {
+  const currentBasis = matchesCurrentBehavior(run.oracle);
   const verdictWord = r.classification.fault === "verified_gap" ? "Verified: the new test catches the fault the old tests missed" : r.classification.fault === "blocked" ? "Blocked: no claim" : "Inconclusive: no claim";
   const who = r.generation.by === "provider" ? `OrangePro drafted the test with the owner's model key (${r.generation.agent}) from its brief; OrangePro verified it.` : `A coding agent (${r.generation.agent}) wrote the test from OrangePro's brief; OrangePro verified it.`;
   const old = run.classification;
@@ -599,9 +606,9 @@ td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertic
 </style></head>
 <body><main>
 <h1>${esc(verdictWord)}</h1>
-<p class="muted">OrangePro ${esc(r.tool.version)}${r.addon ? ` · fault proposed by the add-on ${esc(r.addon.name)} ${esc(r.addon.version)}; OrangePro checked and ran it` : ""} · runtime observations only · receipt <code>verification-receipt.json</code></p>
+<p class="muted">OrangePro ${esc(r.tool.version)}${r.addon ? ` · fault proposed by the add-on ${esc(r.addon.name)} ${esc(r.addon.version)}; OrangePro checked and ran it` : ""}${r.candidates ? ` · candidate ${r.candidates.index} of ${r.candidates.offered} (cap ${r.candidates.cap}): ${r.candidates.refused} refused, ${r.candidates.runs_to_first_hit} test run${r.candidates.runs_to_first_hit === 1 ? "" : "s"} to the first one ${scopeWords(run.classification.scope === "full_suite")}` : ""}${r.supplied_approval ? ` · expected behavior approved by ${esc(r.supplied_approval.by)} (${esc(r.supplied_approval.at)}), supplied through ${esc(r.supplied_approval.via)}` : ""}${r.oracle_draft ? ` · expected behavior drafted by ${esc(r.oracle_draft.by)} ${esc(r.oracle_draft.version)}${r.oracle_draft.unchanged_since_draft ? "" : " and changed since"}, ${r.oracle_draft.approved_by ? `approved by ${esc(r.oracle_draft.approved_by)}` : "not approved"}` : ""} · runtime observations only · receipt <code>verification-receipt.json</code></p>
 <div class="card"><strong>Merged change.</strong> ${repoHtml} at ${commitHtml}${prHtml ? `, ${prHtml}` : ""} (previous base <code>${esc((r.source.previous_base ?? "").slice(0, 12))}</code>).</div>
-<div class="card"><strong>Behavior and why.</strong> <code>${esc(r.selection.symbol_id)}</code>, which the change touched. Expected (approved oracle): ${esc(run.oracle.behavior)}${r.selection.assisted ? " Assisted: the target and the fault were known before the run." : ""}</div>
+<div class="card"><strong>Behavior and why.</strong> <code>${esc(r.selection.symbol_id)}</code>, which the change touched. Expected (approved oracle): ${esc(run.oracle.behavior)}${currentBasis ? ` Basis: what the code does today (${esc(currentBasis.ref)}).` : ""}${r.selection.assisted ? " Assisted: the target and the fault were known before the run." : ""}</div>
 <div class="card"><strong>What the old tests did.</strong> ${esc(old.statement)}</div>
 <div class="card"><strong>The new test and its result on the fault.</strong> ${esc(statement)}<br>What it checks: ${esc(run.oracle.expected)}.<br>${esc(who)}</div>
 <h2>The test-only patch (<code>orangepro-tests.patch</code>)</h2>

@@ -93,7 +93,7 @@ function usage() {
     "Bound mutation (a member written `owner.name = function` or `F.prototype.name = function`): pass --bound-file-sha256 <hex> --bound-statement-start <n> --bound-function-start <n> --bound-body-start <n> --bound-body-end <n> (raw-byte offsets, end exclusive) and one --bound-target <owner.name> per name. The function is then changed by its exact position, never by a name search; any disagreement is a named refusal.",
     "Position mutation (every other function with a block body): the same --bound-file-sha256, --bound-statement-start, --bound-function-start, --bound-body-start and --bound-body-end, plus --bound-route position, --bound-name <declared name, or default>, --bound-function-end <n> and --bound-function-sha256 <hex>. OrangePro's own commands always send one of the two bindings; without one, this script falls back to a search by --method, kept only for calling the script directly.",
     "--preview (bound mutation only) prints the diff the mutation would make and stops: no copy, no test run. --test is not needed.",
-    "Exact edit inside a bound body: add --bound-edit-start <n> --bound-edit-end <n> --bound-edit-expect-sha256 <hex> --bound-edit-replacement <text>. Only a closed set of token changes is allowed (Math.floor <-> Math.ceil, removing a unary !); --replacement is not needed.",
+    "Exact edit inside a bound body: add --bound-edit-start <n> --bound-edit-end <n> --bound-edit-expect-sha256 <hex> --bound-edit-replacement <text>. Without --bound-edit-planned-sha256 only a closed set of token changes is allowed (Math.floor <-> Math.ceil, removing a unary !); --replacement is not needed.",
     "--prepare <empty dir> (bound mutation only) makes the original and the mutated copy under that folder, prints where they are, and runs no test. The caller runs the tests and removes the folder.",
     "Repo test lifecycle hooks and runner binaries are trusted in this spike; use it only for local measurement on trusted checkouts.",
     "This is a spike harness only; it does not write graph edges or product artifacts."
@@ -1031,7 +1031,7 @@ const BOUND_ARG_KEYS = ["boundFileSha256", "boundStatementStart", "boundFunction
 const BOUND_ROUTES = new Set(["bound", "position"]);
 // The name a position-routed function is declared under. `default` stands for an unnamed default export.
 const POSITION_NAME_RE = /^[\p{ID_Start}$_#][\p{ID_Continue}$\u200c\u200d]*$/u;
-const BOUND_EDIT_KEYS = ["boundEditStart", "boundEditEnd", "boundEditExpectSha256", "boundEditReplacement"];
+const BOUND_EDIT_KEYS = ["boundEditStart", "boundEditEnd", "boundEditExpectSha256", "boundEditReplacement", "boundEditReplacementHex", "boundEditPlannedSha256"];
 // The only edits allowed inside a bound body: the bytes found and the bytes written, as a pair. `word` edits
 // must start and end on a name boundary; the caller has already checked with a parser that the span is one
 // node of the right kind, and these checks repeat what can be seen in the bytes alone.
@@ -1098,6 +1098,18 @@ function parseBinding(args) {
       expectSha256: String(args.boundEditExpectSha256 ?? ""),
       replacement: args.boundEditReplacement
     };
+    // A planned edit: any replacement text (given in hex, so it can start with dashes or hold any byte), allowed
+    // only when the file it produces has exactly the hash the caller planned and checked with a parser.
+    if (args.boundEditPlannedSha256 !== undefined || args.boundEditReplacementHex !== undefined) {
+      const hex = String(args.boundEditReplacementHex ?? "");
+      const planned = String(args.boundEditPlannedSha256 ?? "");
+      if (args.boundEditReplacement !== undefined || !/^(?:[0-9a-f]{2})*$/.test(hex === "-" ? "" : hex) || !/^[0-9a-f]{64}$/.test(planned)) {
+        throw new BoundRefusal("invalid_binding", "a planned edit needs --bound-edit-replacement-hex (lowercase hex, or - for nothing) and --bound-edit-planned-sha256 (lowercase hex), and no --bound-edit-replacement");
+      }
+      edit.replacement = Buffer.from(hex === "-" ? "" : hex, "hex").toString("utf8");
+      edit.replacementBytes = Buffer.from(hex === "-" ? "" : hex, "hex");
+      edit.plannedSha256 = planned;
+    }
     if (![edit.start, edit.end].every(Number.isSafeInteger) || !/^[0-9a-f]{64}$/.test(edit.expectSha256) || typeof edit.replacement !== "string") {
       throw new BoundRefusal("invalid_binding", "an exact edit needs --bound-edit-start, --bound-edit-end (non-negative integers), --bound-edit-expect-sha256 (lowercase hex) and --bound-edit-replacement");
     }
@@ -1251,6 +1263,21 @@ function planBoundEdit(original, binding) {
   const found = original.subarray(start, end);
   if (sha256Hex(found) !== expectSha256) {
     throw new BoundRefusal("edit_mismatch", "the bytes at the edit position are not the bytes the edit was planned for");
+  }
+  if (binding.edit.plannedSha256) {
+    const planned = Buffer.concat([original.subarray(0, start), binding.edit.replacementBytes, original.subarray(end)]);
+    if (planned.equals(original)) {
+      throw new BoundRefusal("no_op_mutation", "the edit leaves the file unchanged");
+    }
+    if (sha256Hex(planned) !== binding.edit.plannedSha256) {
+      throw new BoundRefusal("edit_mismatch", "the edit does not produce the file the caller planned");
+    }
+    return {
+      original,
+      mutated: planned,
+      replacementBytes: binding.edit.replacementBytes.length,
+      edit: { start, end, originalSha256: expectSha256, replacement }
+    };
   }
   const token = BOUND_EDIT_TOKENS.find(entry => entry.original === found.toString("utf8") && entry.replacement === replacement);
   if (!token) {

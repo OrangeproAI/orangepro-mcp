@@ -4,11 +4,19 @@
 
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { FAULT_OPERATORS } from "./contracts/faultRecord.js";
+import { checkFaultEditInput, FAULT_OPERATORS, type FaultEditInput } from "./contracts/faultRecord.js";
+import type { SourceLocation } from "./contracts/location.js";
+import type { AddonSourceLocation } from "./pluginApi.js";
+
+// The add-on's copy of the location shape and the engine's own are one shape: each is assignable to the other.
+const _sameShapeA: (x: SourceLocation) => AddonSourceLocation = (x) => x;
+const _sameShapeB: (x: AddonSourceLocation) => SourceLocation = (x) => x;
+void _sameShapeA;
+void _sameShapeB;
 import { recordBytes, recordSha256, sha256Hex, writeFileAtomic } from "./contracts/io.js";
-import { checkOracle } from "./contracts/oracle.js";
+import { checkOracle, withDraftOrigin } from "./contracts/oracle.js";
 import type { AddonProvenance, CheckProposal, PlatformResult } from "./pluginApi.js";
-import { addonProvenance, callAddon, markAddonUsed, pluginsFor } from "./plugins.js";
+import { addonIdentity, addonProvenance, callAddon, markAddonUsed, pluginsFor } from "./plugins.js";
 import { loadGraph, workspacePaths } from "./workspace.js";
 
 export const UPLOAD_ENV = "ORANGEPRO_UPLOAD";
@@ -38,30 +46,84 @@ export function sourceRootFor(root: string, source: string | undefined): string 
 }
 
 export interface ProposedFault {
+  /** `<operator>@<byte>`; empty when the proposal is an edit. */
   fault: string;
+  /** Interface 1.1: the fault as its own edit. */
+  edit?: FaultEditInput;
   reason: string;
+  /** Interface 1.1: the candidate's own expected behavior and witness text, unchecked. */
+  oracle?: unknown;
+  witness_source?: string;
   addon: AddonProvenance | undefined;
 }
 
-/** FaultSelector: asked only when the person gave no fault. The engine's own planner still checks the answer. */
-export async function proposeFault(root: string, sourceRoot: string, targetRecord: unknown): Promise<ProposedFault | null> {
+/** How many candidates the add-on's list is cut to before anything is checked. */
+export const MAX_CANDIDATES = 20;
+
+/**
+ * FaultSelector, whole list: every proposal in the add-on's order, shape-checked only. Each one
+ * tried later gets the planner's checks, as `--fault` and `--fault-edit` do. Empty when there is
+ * no add-on or no usable answer.
+ */
+export async function proposeFaults(root: string, sourceRoot: string, targetRecord: unknown): Promise<ProposedFault[]> {
   const selector = (await pluginsFor(root, sourceRoot)).faultSelector;
-  if (!selector) return null;
+  if (!selector) return [];
   const proposals = await callAddon(
     "FaultSelector",
     () => selector.proposeFaults({ target_record: targetRecord, source_root: sourceRoot, operators: Object.keys(FAULT_OPERATORS) }),
     (value) => {
       if (!Array.isArray(value)) return null;
+      const out: Array<Omit<ProposedFault, "addon">> = [];
       for (const entry of value) {
-        if (!isPlain(entry) || typeof entry.fault !== "string" || typeof entry.reason !== "string") return null;
+        if (!isPlain(entry) || typeof entry.reason !== "string") return null;
+        const hasFault = typeof entry.fault === "string";
+        const hasEdit = entry.edit !== undefined;
+        if (hasFault === hasEdit) return null;
+        if (entry.fault !== undefined && !hasFault) return null;
+        let edit: FaultEditInput | undefined;
+        if (hasEdit) {
+          const checked = checkFaultEditInput(entry.edit);
+          if (!checked.ok) return null;
+          edit = checked.input;
+        }
+        if ((entry.oracle === undefined) !== (entry.witness_source === undefined)) return null;
+        if (entry.witness_source !== undefined && typeof entry.witness_source !== "string") return null;
+        out.push({
+          fault: hasFault ? (entry.fault as string) : "",
+          ...(edit ? { edit } : {}),
+          reason: entry.reason,
+          ...(entry.oracle !== undefined ? { oracle: entry.oracle, witness_source: entry.witness_source as string } : {})
+        });
       }
-      return value as Array<{ fault: string; reason: string }>;
+      return out;
     }
   );
-  const first = proposals?.[0];
-  if (!first) return null;
+  if (!proposals || proposals.length === 0) return [];
   markAddonUsed("FaultSelector");
-  return { fault: first.fault, reason: first.reason, addon: addonProvenance(["FaultSelector"]) };
+  const addon = addonProvenance(["FaultSelector"]);
+  return proposals.slice(0, MAX_CANDIDATES).map((proposal) => ({ ...proposal, addon }));
+}
+
+/**
+ * Writes a candidate's own expected behavior as "proposed", whatever it said, for a person to
+ * approve. Null when it is not a usable draft for this target.
+ */
+export function writeProposedOracle(root: string, workspaceDir: string, targetRecord: unknown, candidate: ProposedFault): ProposedOracleFiles | null {
+  if (!isPlain(candidate.oracle) || typeof candidate.witness_source !== "string") return null;
+  const recordSha = recordSha256(targetRecord);
+  const checked = checkOracle(withDraftOrigin({ ...candidate.oracle, approval: { status: "proposed" } }, { name: candidate.addon?.name ?? "add-on", version: candidate.addon?.version ?? "unknown" }));
+  if (!checked.ok || checked.oracle.target_record_sha256 !== recordSha) return null;
+  if (checked.oracle.witness.sha256 !== sha256Hex(Buffer.from(candidate.witness_source, "utf8"))) return null;
+  const dir = join(workspaceDir, PROPOSED_ORACLES_DIR, recordSha.slice(0, 12));
+  mkdirSync(dir, { recursive: true });
+  writeFileAtomic(join(dir, "oracle.json"), recordBytes(checked.oracle));
+  writeFileAtomic(join(dir, "witness.cjs"), candidate.witness_source);
+  return { oracle_path: relative(root, join(dir, "oracle.json")), witness_path: relative(root, join(dir, "witness.cjs")), addon: candidate.addon };
+}
+
+/** FaultSelector, first proposal only: asked when the person gave no fault. The engine's own planner still checks the answer. */
+export async function proposeFault(root: string, sourceRoot: string, targetRecord: unknown): Promise<ProposedFault | null> {
+  return (await proposeFaults(root, sourceRoot, targetRecord))[0] ?? null;
 }
 
 export interface ProposedOracleFiles {
@@ -86,7 +148,8 @@ export async function proposeOracle(root: string, sourceRoot: string, workspaceD
     (value) => {
       if (value === null || value === undefined) return { none: true as const };
       if (!isPlain(value) || !isPlain(value.oracle) || typeof value.witness_source !== "string") return null;
-      const oracle = { ...value.oracle, approval: { status: "proposed" } };
+      const origin = addonIdentity();
+      const oracle = withDraftOrigin({ ...value.oracle, approval: { status: "proposed" } }, origin);
       const checked = checkOracle(oracle);
       if (!checked.ok) return null;
       if (checked.oracle.target_record_sha256 !== recordSha) return null;

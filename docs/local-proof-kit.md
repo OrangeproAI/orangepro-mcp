@@ -67,7 +67,7 @@ opro explain <generated_test_id># which evidence anchors grounded a test
 opro update                     # incremental, non-destructive refresh
 opro changed --base main        # changed files + affected behaviors/tests
 opro changed-targets --base <sha> --merged <sha>   # read-only: map a merged change's lines to exact functions (JS/TS)
-opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <file> --tests <files> --witness <file>
+opro probe-fault --target-record <file> (--fault <operator>@<byte> | --fault-edit <file.json>) --oracle <file> --fixture <file> --tests <files> --witness <file>
                                 # one exact fault, the named existing tests on an original and a faulty copy, inside a container
 opro test-brief --from-run <run>  # for a fault the existing tests missed: what a coding agent needs to write one new test
 opro verify-test --from-run <run> --brief <run> --candidate <patch> --assertion <file>
@@ -593,4 +593,35 @@ The kit works on its own. If the separate package `@orangepro/mcp-pro` is instal
 - **`ORANGEPRO_PRO=off`** turns an installed add-on off.
 - When an add-on's answer was used, the run profile, the receipt and the reports name it with its version.
 
-The types are in `dist/local/pluginApi.d.ts` (`PLUGIN_API_VERSION` 1.0.0). An add-on built for another major version is not used.
+The types are in `dist/local/pluginApi.d.ts` (`PLUGIN_API_VERSION` 1.1.0). An add-on built for another major version is not used; one built for 1.0 works unchanged.
+
+### A fault given as its own edit
+
+Besides the two named operators, `probe-fault` takes a fault as one edit: `--fault-edit <file.json>` with `{ "location": { … }, "original_text": "..." }`. `location` is the target's place in the one exact-position format (`orangepro.location.v1`: the file, its sha256, the route, the name, the statement, function and body byte spans, the function's sha256), with its `edit` (`start`, `end`, `original_sha256`, `replacement`); every value comes from the target record. A person can pass it, and an add-on can propose the same object (`edit`) in place of an operator. The kit checks it before anything runs:
+
+- the location is the target's own, as the kit reads it from the file;
+
+- the text at that place is the original text named, and the place lies strictly inside the target function's body;
+- the result is a different program, not only different comments or spacing;
+- outside the smallest statement or expression that holds the whole edit, the file parses exactly as before;
+- a text control can be written for it, so a new test for it can be verified later.
+
+The fault record holds the whole edit. `verify-test` and `export-tests` plan it again from that record alone, with no add-on installed.
+
+### Several proposed faults
+
+An add-on may propose a list of faults, best first, each with its own expected behavior and witness. `probe-fault --max-candidates <n>` (1 to 20) tries them in that order, each as an ordinary run with every check, and stops at the first one that ran and that the tests missed. Without the flag only the first is used.
+
+- **Refused candidates and test runs are counted apart**, and both count toward the cap. The run profile and the receipt record the offered count, the cap, each earlier candidate's outcome, and the runs to the first hit.
+- **The scope is always named:** "missed by the selected tests", or "missed by the whole suite" with `--full-suite`. Only a whole-suite result says the suite missed a fault.
+- **Approvals.** An expected behavior that comes with a candidate is used only with `--accept-supplied-approvals`, and only when it says who approved it, when and where. The run profile and the receipt then record that approval with the sha256 of the expected behavior and of the witness as accepted; a later change to either stops `test-brief`, `verify-test` and `export-tests`. Without the flag nothing runs: the draft is written as "proposed" for a person to approve. With `--oracle`, the person's own expected behavior is used for every candidate.
+- **Outcomes** use four words that are never merged: caught, ran but missed, not exercised, reach unknown. Only "ran but missed" is a fault the tests miss.
+
+### A fault against the whole suite alone
+
+`probe-fault --full-suite` may be run with no `--tests`, so a function no test file is linked to can still be faulted. The whole suite is run once on each copy; it must be the suite the fixture recorded; the result's scope is the whole suite. To add a test for such a fault, name the existing test file it goes into: `test-brief --from-run <run> --add-to <test file>`. Without `--full-suite`, `--tests` is required as before.
+
+### Where an expected behavior came from
+
+- **"Matches current behavior."** An expected behavior can say its expected result is what the code does today with a basis entry of kind `current_behavior` (`ref`: the commit and the input observed; `note`: what was observed). The export summary then says so.
+- **Drafted by an add-on.** When the kit writes a draft that an add-on proposed, it adds `drafted_by` (the add-on's name and version, and the sha256 of the draft's content). A person approves it as before. The run profile and the receipt then record `oracle_draft` beside the approval: who drafted it, the draft's hash, and whether the content that ran is still the content that was drafted. A hand-written file has no such field, and nothing changes for it. A person who deletes the field removes the link: the kit cannot tell a hand-written file from a draft with its origin removed.

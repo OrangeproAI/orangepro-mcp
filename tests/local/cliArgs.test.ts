@@ -127,3 +127,18 @@ describe("parseArgs: --flag=value", () => {
     ]);
   });
 });
+
+describe("probe-fault and test-brief flags added with add-on interface 1.1", () => {
+  it("--fault-edit, --max-candidates and --add-to take the next token as their value; the two switches take none", () => {
+    const { positionals, flags } = parseArgs(["probe-fault", "--fault-edit", "edit.json", "--max-candidates", "6", "--accept-supplied-approvals", "--full-suite", "--oracle", "o.json"]);
+    expect(flags["fault-edit"]).toBe("edit.json");
+    expect(flags["max-candidates"]).toBe("6");
+    expect(flags["accept-supplied-approvals"]).toBe(true);
+    expect(flags["full-suite"]).toBe(true);
+    expect(flags.oracle).toBe("o.json");
+    expect(positionals).toEqual(["probe-fault"]);
+    expect(parseArgs(["test-brief", "--from-run", "r", "--add-to", "test/a.js"]).flags["add-to"]).toBe("test/a.js");
+    expect(parseArgs(["probe-fault", "--max-candidates=3"]).flags["max-candidates"]).toBe("3");
+    for (const flag of ["fault-edit", "max-candidates", "add-to"]) expect(VALUE_FLAGS.has(flag)).toBe(true);
+  });
+});

@@ -20,9 +20,11 @@ import {
   type ContainerShape
 } from "./boundary.js";
 import { canonicalJson, newRunId, recordBytes, recordSha256, sha256Hex, writeFileAtomic, writeRunManifest } from "./contracts/io.js";
-import { checkOracle, type Oracle } from "./contracts/oracle.js";
+import { checkOracle, oracleDraftSha256, type Oracle } from "./contracts/oracle.js";
 import type { AddonProvenance } from "./pluginApi.js";
-import { FAULT_OPERATORS, faultRecordOf, parseFaultSpec, planFault, type FaultPlan, type FaultRecord } from "./contracts/faultRecord.js";
+import { EDIT_OPERATOR, editForTarget, FAULT_OPERATORS, faultRecordOf, parseFaultSpec, planEdit, planFault, type FaultEditInput, type FaultPlan, type FaultRecord } from "./contracts/faultRecord.js";
+import { locationEditArgs } from "./contracts/location.js";
+import { textControls } from "./candidateTest.js";
 import {
   CLASSIFICATION_VERSION,
   FAULT_CLASSIFIER_VERSION,
@@ -82,8 +84,10 @@ export class ProbeFaultRefusal extends Error {
 export interface ProbeFaultOptions {
   /** A record from `opro changed-targets --json`. */
   target_record: unknown;
-  /** `<operator>@<byte offset>` in the target file. */
+  /** `<operator>@<byte offset>` in the target file. Not read when `fault_edit` is given. */
   fault: string;
+  /** The fault as its own edit, in place of an operator: the target's location with its edit, and the original text. */
+  fault_edit?: FaultEditInput;
   oracle: unknown;
   /** The fixture manifest's bytes, exactly as on disk (its hash is recorded). */
   fixture_bytes: Buffer;
@@ -98,6 +102,10 @@ export interface ProbeFaultOptions {
   addon?: AddonProvenance;
   /** Run an expected behavior whose approval is only "proposed". Off by default; the run profile records it. */
   allow_proposed_oracle?: boolean;
+  /** Set only when this fault is one of several proposed candidates; written into the run profile. */
+  candidates?: import("./contracts/receipt.js").CandidateTrail;
+  /** Set only when the approval came with the candidate and the caller accepted it; the hashes are computed here. */
+  supplied_approval?: { via: string };
 }
 
 export interface ProbeFaultDeps {
@@ -469,6 +477,8 @@ export interface ClassifyInput {
   checkout_unchanged: boolean;
   /** Repository paths of the selected test files. */
   selected_files: string[];
+  /** No test file was selected: the one run on each copy is the whole suite, and the claim is about the whole suite. */
+  whole_suite_only?: boolean;
   /** The fixture's recorded passing count for the whole suite. */
   baseline_passing: number | null;
 }
@@ -541,10 +551,16 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   if (o.executed === 0) return result("inconclusive", "no_tests_executed");
   if (o.pending > 0) return result("inconclusive", "selected_test_pending");
   const originalIds = idCounts(o.observed);
-  if ([...originalIds.values()].some((n) => n > 1)) return result("inconclusive", "duplicate_test_titles");
-  // Every selected file ran at least one test, and nothing ran that was not selected.
-  if (input.selected_files.some((file) => !o.observed.some((test) => test.file === file))) return result("inconclusive", "selected_file_not_run");
-  if (o.observed.some((test) => !input.selected_files.includes(test.file))) return result("inconclusive", "unselected_test_ran");
+  const wholeOnly = input.whole_suite_only === true;
+  if (wholeOnly) {
+    // The whole suite is what ran: it must be the suite the fixture recorded, as for any whole-suite claim.
+    if (input.baseline_passing === null || o.passed !== input.baseline_passing) return result("inconclusive", "full_suite_count_differs");
+  } else {
+    if ([...originalIds.values()].some((n) => n > 1)) return result("inconclusive", "duplicate_test_titles");
+    // Every selected file ran at least one test, and nothing ran that was not selected.
+    if (input.selected_files.some((file) => !o.observed.some((test) => test.file === file))) return result("inconclusive", "selected_file_not_run");
+    if (o.observed.some((test) => !input.selected_files.includes(test.file))) return result("inconclusive", "unselected_test_ran");
+  }
   // 2. invalid mutation
   if (!input.parses) return result("invalid_mutation", "does_not_parse");
   if (!stages.fault_syntax || stages.fault_syntax.exit_code !== 0) return result("invalid_mutation", "syntax_check_failed");
@@ -571,10 +587,12 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
     .map((test) => ({ file: test.file, full_title: test.full_title, at_assertion: test.failure?.at_assertion === true }));
   // One failure off an assertion makes every other failure on the same run suspect.
   if (caught.some((test) => !test.at_assertion)) return result("inconclusive", "failed_off_assertion", { caught_by: caught, behavioral_difference: difference });
-  if (caught.length > 0) return result("caught_by_existing", null, { scope: "selected", caught_by: caught, behavioral_difference: difference });
+  if (caught.length > 0) return result("caught_by_existing", null, { scope: wholeOnly ? "full_suite" : "selected", caught_by: caught, behavioral_difference: difference });
   if (f.failed > 0 || f.passed !== o.executed || fault!.exit_code !== 0) return result("inconclusive", "fault_runner_error", { behavioral_difference: difference });
   // Every selected test passed on the fault. The whole suite widens the claim only when it ran cleanly on both
   // copies, matched the fixture's recorded count, and contained the selected tests.
+  // With no selected file, the run that just passed on the fault was the whole suite.
+  if (wholeOnly) return result("survived_unverified", null, { scope: "full_suite", behavioral_difference: difference });
   const survived = (reason: string | null): ClassifyOutput => result("survived_unverified", reason, { scope: "selected", behavioral_difference: difference });
   if (!input.full_suite_requested) return survived(null);
   const fullOriginal = stages.original_full_suite;
@@ -709,8 +727,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   if (typeof record !== "object" || record === null || record.version !== TARGET_RECORD_VERSION || typeof record.identity?.symbol_id !== "string") {
     throw new ProofRefusalError("stale_record", `not a target record of version ${TARGET_RECORD_VERSION}.`);
   }
-  const spec = parseFaultSpec(opts.fault);
-  if (!spec) throw new ProbeFaultRefusal("invalid_fault_spec", `--fault must be <operator>@<byte>, operator one of ${Object.keys(FAULT_OPERATORS).join(", ")}.`);
+  const spec = opts.fault_edit ? null : parseFaultSpec(opts.fault);
+  if (!opts.fault_edit && !spec) throw new ProbeFaultRefusal("invalid_fault_spec", `--fault must be <operator>@<byte>, operator one of ${Object.keys(FAULT_OPERATORS).join(", ")}.`);
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
   const target = resolveTargetSymbol(graph, record.identity.symbol_id);
@@ -720,12 +738,19 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   const bound = tsjs?.bound;
   if (!tsjs || !bound) throw new ProbeFaultRefusal("unsupported_route", `${target} has no exact position the proof script can change (it was refused before this point); an exact fault needs one.`);
   const fileBytes = readFileSync(tsjs.targetAbs);
-  const planned = planFault(fileBytes, bound.target, record.identity.file, spec.operator, spec.offset);
+  const ownEdit = opts.fault_edit ? editForTarget(opts.fault_edit, bound.location) : null;
+  if (ownEdit && !ownEdit.ok) throw new ProofRefusalError("edit_mismatch", ownEdit.message);
+  const planned = ownEdit?.ok ? planEdit(fileBytes, bound.target, record.identity.file, ownEdit.edit) : planFault(fileBytes, bound.target, record.identity.file, spec!.operator, spec!.offset);
   if (!planned.ok) {
     if (planned.refused === "not_parsable") throw new ProbeFaultRefusal("unsupported_route", planned.message);
     throw new ProofRefusalError(planned.refused, planned.message);
   }
   const plan: FaultPlan = planned.plan;
+  // An edit that no text control can be made for could never finish the chain, so it does not start it.
+  if (plan.operator === EDIT_OPERATOR.id && plan.parses && !textControls(record.identity.file, fileBytes, plan.mutated, plan)) {
+    throw new ProofRefusalError("edit_no_control", "no expression holds this edit that a text control can be written for, so a new test for it could never be verified.");
+  }
+  const operatorDescription = plan.operator === EDIT_OPERATOR.id ? EDIT_OPERATOR.description : FAULT_OPERATORS[plan.operator].description;
 
   const oracleCheck = checkOracle(opts.oracle);
   if (!oracleCheck.ok) throw new ProbeFaultRefusal("oracle_invalid", oracleCheck.message);
@@ -769,7 +794,9 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     if (rel === symbolTarget.file) invalid(`${test} is the target file, not a test.`);
     return { path: rel, sha256: sha256Hex(readFileSync(abs)) };
   });
-  if (tests.length === 0) throw new ProbeFaultRefusal("tests_invalid", "name at least one selected test file.");
+  // With --full-suite, no selected file is needed: the whole suite is run on each copy, and the claim is about the whole suite.
+  const wholeSuiteOnly = tests.length === 0 && opts.full_suite === true;
+  if (tests.length === 0 && !wholeSuiteOnly) throw new ProbeFaultRefusal("tests_invalid", "name at least one selected test file, or pass --full-suite to run the whole suite alone.");
 
   // The installed dependencies: a real folder of the checkout, never a link to somewhere else on this machine.
   const nodeModules = join(sourceRoot, "node_modules");
@@ -799,15 +826,16 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     file: record.identity.file,
     file_sha256: bound.target.file_sha256,
     function_sha256: bound.target.function_sha256,
-    rationale: opts.rationale?.trim() || `${FAULT_OPERATORS[spec.operator].description}, inside ${record.identity.name}, in the computation the oracle's expected result depends on.`
+    rationale: opts.rationale?.trim() || `${operatorDescription}, inside ${record.identity.name}, in the computation the oracle's expected result depends on.`
   });
   writeFileAtomic(join(runDir, "diagnostic-fault.patch"), plan.diff);
   writeFileAtomic(join(runDir, "fault-record.json"), recordBytes(faultRecord));
   const faultRecordSha = recordSha256(faultRecord);
 
   const mochaHead = ["node", MOCHA_ENTRY, ...MOCHA_NO_REPO_CONFIG, ...fixture.mocha.options, "--reporter", REPORTER_TARGET];
-  const selectedArgv = [...mochaHead, ...tests.map((test) => test.path)];
-  const fullArgv = opts.full_suite ? [...mochaHead, ...fixture.mocha.operands] : null;
+  const selectedArgv = wholeSuiteOnly ? [...mochaHead, ...fixture.mocha.operands] : [...mochaHead, ...tests.map((test) => test.path)];
+  // With no selected file the run above is the whole suite already; it is not run a second time.
+  const fullArgv = opts.full_suite && !wholeSuiteOnly ? [...mochaHead, ...fixture.mocha.operands] : null;
   const deadlineMs = Math.min(deps.stageDeadlineMs ?? DEFAULT_STAGE_DEADLINE_MS, fixture.shape.deadlineSeconds * 1000);
   const changedBy = fixture.prNumber !== null ? `PR #${fixture.prNumber}` : `the change ${record.selection.base_commit.slice(0, 12)}..${record.identity.merged_commit.slice(0, 12)}`;
   const statementCtx = {
@@ -833,10 +861,11 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       full_suite_requested: Boolean(opts.full_suite),
       checkout_unchanged: checkoutUnchanged(),
       selected_files: tests.map((test) => test.path),
+      ...(wholeSuiteOnly ? { whole_suite_only: true } : {}),
       baseline_passing: fixture.baselinePassing
     });
     statementCtx.selectedCount = stages.original_selected?.tests?.executed ?? 0;
-    statementCtx.fullCount = stages.fault_full_suite?.tests?.executed ?? null;
+    statementCtx.fullCount = (wholeSuiteOnly ? stages.fault_selected : stages.fault_full_suite)?.tests?.executed ?? null;
     const classification: Classification = {
       version: CLASSIFICATION_VERSION,
       classifier_version: FAULT_CLASSIFIER_VERSION,
@@ -882,6 +911,22 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       run_id: runId,
       tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
       ...(opts.addon ? { addon: opts.addon } : {}),
+      ...(opts.candidates ? { candidates: opts.candidates } : {}),
+      ...(opts.supplied_approval
+        ? {
+            supplied_approval: {
+              via: opts.supplied_approval.via,
+              by: oracle.approval.by ?? "",
+              at: oracle.approval.at ?? "",
+              where: oracle.approval.where ?? "",
+              oracle_sha256: sha256Hex(recordBytes(oracle)),
+              witness_sha256: sha256Hex(opts.witness_bytes)
+            }
+          }
+        : {}),
+      ...(oracle.drafted_by
+        ? { oracle_draft: { by: oracle.drafted_by.name, version: oracle.drafted_by.version, draft_sha256: oracle.drafted_by.draft_sha256, unchanged_since_draft: oracleDraftSha256(oracle) === oracle.drafted_by.draft_sha256 } }
+        : {}),
       fixture_manifest_sha256: sha256Hex(opts.fixture_bytes),
       source_pr: fixture.prNumber,
       merged_commit: record.identity.merged_commit,
@@ -971,14 +1016,14 @@ export function prepareFaultCopies(args: {
     copiesDir,
     "--json",
     ...bound.args,
-    "--bound-edit-start",
-    String(plan.site.bytes.start),
-    "--bound-edit-end",
-    String(plan.site.bytes.end),
-    "--bound-edit-expect-sha256",
-    plan.original_site_sha256,
-    "--bound-edit-replacement",
-    plan.replacement_text
+    // An operator's edit is one of the proof script's own token changes; an edit given as text is allowed by the hash of the file it produces.
+    ...locationEditArgs({
+      start: plan.site.bytes.start,
+      end: plan.site.bytes.end,
+      original_sha256: plan.original_site_sha256,
+      replacement: plan.replacement_text,
+      ...(plan.operator === EDIT_OPERATOR.id ? { planned_sha256: plan.mutated_file_sha256 } : {})
+    })
   ];
   const prepared = runBoundSpike(args.runner, spikeArgs, args.sourceRoot, args.targetAbs, args.targetRel, bound.target.file_sha256, plan.site.bytes)
     .oracle as unknown as { status?: string; bound?: { mutatedSha256?: string }; copies?: { original?: { root?: string }; mutant?: { root?: string } } };

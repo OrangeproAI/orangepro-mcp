@@ -7,7 +7,7 @@ import { withProposedChecks, type AssocTest } from "../../src/local/autoProve.js
 import { recordSha256 } from "../../src/local/contracts/io.js";
 import { ORACLE_VERSION } from "../../src/local/contracts/oracle.js";
 import { PLUGIN_API_VERSION, type PluginApi } from "../../src/local/pluginApi.js";
-import { proposeChecks, proposeFault, proposeOracle, publishRun, suppliedCoverage } from "../../src/local/pluginCalls.js";
+import { proposeChecks, proposeFault, proposeFaults, proposeOracle, publishRun, suppliedCoverage } from "../../src/local/pluginCalls.js";
 import { addonInsideScannedRepo, addonProvenance, addonStatusFor, addonStatusLine, pluginsFor, setPluginHostForTest, type AddonLocation } from "../../src/local/plugins.js";
 
 const tmp = (): string => realpathSync(mkdtempSync(join(tmpdir(), "opro-addon-")));
@@ -209,6 +209,53 @@ describe("add-on call sites", () => {
     expect(h.warnings).toHaveLength(5);
     for (const warning of h.warnings) expect(warning).toMatch(line);
     expect(addonProvenance()).toBeUndefined();
+  });
+
+  it("interface 1.1: a list of candidates keeps its order; each gives a fault or an edit, never both, and may carry its own expected behavior", async () => {
+    const edit = {
+      location: {
+        version: "orangepro.location.v1" as const,
+        file: "lib/a.js",
+        file_sha256: "a".repeat(64),
+        route: "position" as const,
+        name: "f",
+        statement: { start: 0, end: 40 },
+        function: { start: 0, end: 40 },
+        function_sha256: "b".repeat(64),
+        body: { start: 5, end: 40 },
+        edit: { start: 10, end: 14, original_sha256: createHash("sha256").update("a, b").digest("hex"), replacement: "a" }
+      },
+      original_text: "a, b"
+    };
+    const good = [
+      { fault: "rounding_floor_ceil@120", reason: "first" },
+      { edit, reason: "second", oracle: { any: "draft" }, witness_source: "module.exports = 1;\n" }
+    ];
+    host(fakeAddon({ faults: () => good }).mod);
+    const list = await proposeFaults("/repo", "/repo", record);
+    expect(list.map((c) => [c.fault, c.edit ?? null, c.reason, c.oracle !== undefined])).toEqual([["rounding_floor_ceil@120", null, "first", false], ["", edit, "second", true]]);
+    expect(list[0]!.addon?.used).toEqual(["FaultSelector"]);
+    // The first-only call the 1.0 path uses still answers the first proposal.
+    expect((await proposeFault("/repo", "/repo", record))?.fault).toBe("rounding_floor_ceil@120");
+    for (const bad of [
+      [{ fault: "x@1", edit, reason: "both" }],
+      [{ reason: "neither" }],
+      [{ edit: { ...edit, original_text: "a, c" }, reason: "not the text the location names" }],
+      [{ edit: { start: 10, end: 14, original_text: "a, b", replacement_text: "a" }, reason: "not the location format" }],
+      [{ fault: "x@1", reason: "half a draft", oracle: {} }],
+      [{ fault: 7, reason: "not text" }]
+    ]) {
+      const { warnings } = host(fakeAddon({ faults: () => bad }).mod);
+      expect(await proposeFaults("/repo", "/repo", record)).toEqual([]);
+      expect(warnings).toEqual(["pro add-on: FaultSelector gave an answer in the wrong shape; ignored."]);
+    }
+  });
+
+  it("an add-on built for interface 1.0.0 loads on this engine and its fault proposal is used as before", async () => {
+    const { mod } = fakeAddon();
+    host({ ...mod, pluginApiVersion: "1.0.0" });
+    expect(await addonStatusFor("/repo")).toMatchObject({ state: "loaded", api_version: "1.0.0" });
+    expect((await proposeFault("/repo", "/repo", record))?.fault).toBe("floor_to_ceil@120");
   });
 
   it("a proposed expected behavior for another target, or with a witness that does not match, is not written", async () => {
