@@ -77,6 +77,7 @@ function extractionBackend(language: string): string {
 }
 import { ResolverCache } from "../resolve/resolverCache.js";
 import { repoRootOf, resolveSpecifier, workspacePackages, runConfirmer, type ConfirmCandidate } from "./confirm.js";
+import { computeRouteLinks, type RouteLinkCounts } from "./routeLinks.js";
 
 const DETECTOR = "repo_analyzer";
 // Global ceiling on extracted code symbols. A SINGLE counter shared across the walk,
@@ -3191,6 +3192,53 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       );
     }
   }
+  // ---- Static route links (J4): a supertest request to a traced app's route links the test to what the
+  // route runs: a named handler, or the counted functions an inline handler calls directly (one hop).
+  // Linked evidence, never proof. Read from source files only; anything computed is counted, never guessed.
+  let routeLinkCounts: RouteLinkCounts | undefined;
+  if (readContent && eligibleSymbolsByFile.size > 0 && resolveFiles.some((f) => f.role === "test")) {
+    try {
+      const routeRoot = repoRootOf(root);
+      const counted = new Set<string>();
+      for (const [rel, names] of eligibleSymbolsByFile) for (const name of names) counted.add(`sym:${rel}#${name}`);
+      const result = computeRouteLinks({
+        files: resolveFiles,
+        symbols: counted,
+        repoRoot: routeRoot,
+        wsPkgs: workspacePackages(routeRoot),
+        read: (abs) => {
+          try {
+            return readFileSync(abs, "utf8");
+          } catch {
+            return null;
+          }
+        }
+      });
+      const hardPairs = new Set(
+        edges.filter((e) => e.evidence_strength === "hard" && e.relationship_type === "TESTED_BY").map((e) => `${e.to_external_id}|${e.from_external_id}`)
+      );
+      let added = 0;
+      for (const link of result.links) {
+        const testId = `test:${link.testRel}`;
+        if (hardPairs.has(`${testId}|${link.symId}`)) continue;
+        hardPairs.add(`${testId}|${link.symId}`);
+        added++;
+        edges.push(
+          ...makeProofEdges({
+            testRel: link.testRel,
+            symId: link.symId,
+            provenance: prov(link.testRel, hashString(`${link.symId}:route:${link.method} ${link.path}`)),
+            lastVerified: scanStartMs,
+            properties: { route_link: { method: link.method, path: link.path, via: link.via, site: link.site } }
+          })
+        );
+      }
+      routeLinkCounts = { ...result.counts, links: added };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warnings.push(`Route linking skipped: ${msg.slice(0, 160)}.`);
+    }
+  }
   const nonTsHardProofAttempted = goProofAttempted + javaProofAttempted + pythonProofAttempted;
   if (nonTsHardProofAttempted > 0) {
     confirmedCoverage = {
@@ -3467,6 +3515,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       ? { tree_sitter: { loaded: tsStatus.loaded, failed: tsStatus.failed, downgraded: treeSitterDowngraded } }
       : {}),
     ...(confirmedCoverage ? { confirmed_coverage: confirmedCoverage } : {}),
+    ...(routeLinkCounts && (routeLinkCounts.routes > 0 || routeLinkCounts.requests > 0) ? { route_links: routeLinkCounts } : {}),
     ...(runtimeCoverage ? { runtime_coverage: runtimeCoverage } : {}),
     ...(resolverMetrics
       ? {

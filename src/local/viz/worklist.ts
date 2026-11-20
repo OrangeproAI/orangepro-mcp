@@ -60,6 +60,8 @@ export interface VerbInput {
   readFirst?: string;
   /** A test file a hard edge names (Linked). */
   linkedTest?: string;
+  /** How that test reaches it when it does not call it itself (a route link). */
+  linkedVia?: string;
   /** The test that proved it (Done). */
   provenTest?: string;
 }
@@ -96,7 +98,8 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
     return { verb: "prove", reason: `A coverage run executes it; no test is proven to catch a break.${couldNotRun}` };
   }
   if (evidence === "linked") {
-    return { verb: "prove", reason: `${input.linkedTest ?? "A test"} calls it; not yet proven to catch a break.${couldNotRun}` };
+    const how = input.linkedVia ? `reaches it ${input.linkedVia}` : "calls it";
+    return { verb: "prove", reason: `${input.linkedTest ?? "A test"} ${how}; not yet proven to catch a break.${couldNotRun}` };
   }
   if (evidence === "unconfirmed") {
     return {
@@ -211,6 +214,8 @@ export interface WorkItem {
   reason: string;
   readFirst?: string;
   linkedTest?: string;
+  /** How the linked test reaches it, when through a route rather than a call (J4). */
+  linkedVia?: string;
   /** The last proof's mutated run hit the time limit: the row's reason says so, and nothing replaces it. */
   proofTimedOut?: true;
   /** JS/TS "No test found" rows only: a test file linked to the function's file, not to the function. */
@@ -280,24 +285,40 @@ export function looksLikeTestFile(file: string): boolean {
 }
 
 /** A test file a function points to, with how strongly (candidate confidence; 1 for hard edges). */
-export interface TestPointer { file: string; confidence: number }
+export interface TestPointer {
+  file: string;
+  confidence: number;
+  /** How a Linked test reaches the function when it does not call it itself: a route link (J4). */
+  via?: string;
+}
+
+/** The sentence part that says how a route link was made. */
+export function routeLinkVia(props: unknown): string | undefined {
+  const r = (props as { route_link?: { method?: unknown; path?: unknown; via?: unknown; site?: unknown } } | undefined)?.route_link;
+  if (!r || typeof r.method !== "string" || typeof r.path !== "string" || typeof r.site !== "string") return undefined;
+  return r.via === "inline" ? `via inline handler at ${r.site} (route ${r.method} ${r.path})` : `via route ${r.method} ${r.path} (${r.site})`;
+}
 
 /** Test files linked to each function: hard edges (Linked) and candidate edges (Check), plus every test file. */
 export function testPointers(graph: LocalGraph): { linked: Map<string, TestPointer[]>; candidate: Map<string, TestPointer[]>; files: Set<string> } {
   const kinds = new Map(graph.nodes.map((n) => [n.external_id, n.kind]));
-  const add = (m: Map<string, TestPointer[]>, sym: string, file: string | undefined, confidence: number): void => {
+  const add = (m: Map<string, TestPointer[]>, sym: string, file: string | undefined, confidence: number, via?: string): void => {
     if (!file) return;
     const list = m.get(sym) ?? [];
     const seen = list.find((p) => p.file === file);
-    if (seen) seen.confidence = Math.max(seen.confidence, confidence);
-    else list.push({ file, confidence });
+    if (seen) {
+      seen.confidence = Math.max(seen.confidence, confidence);
+      // A direct call outranks a route link: the sentence then says the test calls it.
+      if (seen.via !== undefined && via === undefined) delete seen.via;
+    } else list.push(via === undefined ? { file, confidence } : { file, confidence, via });
     m.set(sym, list);
   };
   const linked = new Map<string, TestPointer[]>();
   for (const e of graph.edges) {
     if (e.evidence_strength !== "hard" || (e.relationship_type !== "TESTED_BY" && e.relationship_type !== "COVERS")) continue;
-    if (kinds.get(e.from_external_id) === "CodeSymbol") add(linked, e.from_external_id, testFileOf(e.to_external_id), 1);
-    if (kinds.get(e.to_external_id) === "CodeSymbol") add(linked, e.to_external_id, testFileOf(e.from_external_id), 1);
+    const via = routeLinkVia(e.properties);
+    if (kinds.get(e.from_external_id) === "CodeSymbol") add(linked, e.from_external_id, testFileOf(e.to_external_id), 1, via);
+    if (kinds.get(e.to_external_id) === "CodeSymbol") add(linked, e.to_external_id, testFileOf(e.from_external_id), 1, via);
   }
   const candidate = new Map<string, TestPointer[]>();
   for (const e of graph.candidate_edges ?? []) {
@@ -470,6 +491,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       ? (own && pointers.files.has(own) ? own : pickTestFile(gap.file, pointers.candidate.get(gap.id)))
       : undefined;
     const linkedTest = pickTestFile(gap.file, pointers.linked.get(gap.id));
+    const linkedVia = linkedTest ? pointers.linked.get(gap.id)?.find((p) => p.file === linkedTest)?.via : undefined;
     // A new test goes in the function's own test file when it exists, else next to the
     // test that already reaches it, else where the language's convention puts it.
     const addTo = own && pointers.files.has(own) ? own : linkedTest ?? readFirst ?? own;
@@ -479,6 +501,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       ...(proof ? { proof } : {}),
       ...(readFirst ? { readFirst } : {}),
       ...(linkedTest ? { linkedTest } : {}),
+      ...(linkedVia ? { linkedVia } : {}),
       ...(opts.provenTests?.get(gap.id) ? { provenTest: opts.provenTests.get(gap.id) } : {})
     });
     const { verb } = verdict;
@@ -507,6 +530,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       reason,
       ...(readFirst ? { readFirst } : {}),
       ...(linkedTest ? { linkedTest } : {}),
+      ...(linkedVia ? { linkedVia } : {}),
       ...(fileLink ? { fileLink } : {}),
       ...(proof?.current && proof.status === "timed_out" ? { proofTimedOut: true as const } : {}),
       ...(gap.sink_callee ? { deletes: { via: gap.sink_callee, store: store || "Stored data" } } : {}),
