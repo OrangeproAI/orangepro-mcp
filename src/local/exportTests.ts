@@ -469,6 +469,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     version: VERIFICATION_RECEIPT_VERSION,
     evidence_kind: "runtime_observation",
     tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
+    ...(run.profile.addon ? { addon: run.profile.addon } : {}),
     run_ids: { fault: run.runId, brief: briefRunId, verify: verify.runId, export: runId },
     run_manifests: [
       { run_id: run.runId, sha256: run.manifestSha },
@@ -598,7 +599,7 @@ td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertic
 </style></head>
 <body><main>
 <h1>${esc(verdictWord)}</h1>
-<p class="muted">OrangePro ${esc(r.tool.version)} · runtime observations only · receipt <code>verification-receipt.json</code></p>
+<p class="muted">OrangePro ${esc(r.tool.version)}${r.addon ? ` · fault proposed by the add-on ${esc(r.addon.name)} ${esc(r.addon.version)}; OrangePro checked and ran it` : ""} · runtime observations only · receipt <code>verification-receipt.json</code></p>
 <div class="card"><strong>Merged change.</strong> ${repoHtml} at ${commitHtml}${prHtml ? `, ${prHtml}` : ""} (previous base <code>${esc((r.source.previous_base ?? "").slice(0, 12))}</code>).</div>
 <div class="card"><strong>Behavior and why.</strong> <code>${esc(r.selection.symbol_id)}</code>, which the change touched. Expected (approved oracle): ${esc(run.oracle.behavior)}${r.selection.assisted ? " Assisted: the target and the fault were known before the run." : ""}</div>
 <div class="card"><strong>What the old tests did.</strong> ${esc(old.statement)}</div>

@@ -1,4 +1,5 @@
 import type { LocalGraph } from "../graph/ontology.js";
+import type { AddonProvenance } from "../pluginApi.js";
 import { denominatorComposition } from "../graph/factories.js";
 import type { Ledger } from "../ledger.js";
 import { ANALYZER_VERSION } from "../provenance.js";
@@ -53,6 +54,8 @@ export interface ReportModel {
   version: typeof REPORT_DATA_VERSION;
   repo: { name: string; web: RepoWeb | null; commit: string | null };
   tool: string;
+  /** Present only when an add-on's answer was used in the run. */
+  addon?: AddonProvenance;
   analyzer: string;
   generatedAt: string;
   /** The zone the run happened in: dates render in it, never in the viewer's zone. */
@@ -136,6 +139,8 @@ export interface ReportModelInput {
   patches?: ProofRunsView;
   /** Item 48: set only by `opro start`'s last report write, from that run's own outputs. */
   byHand?: ByHandRun;
+  /** Set only when an add-on's answer was used in this run. */
+  addon?: AddonProvenance;
   links: ReportModel["links"];
 }
 
@@ -384,6 +389,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
     // The host path names the repository better than a local folder name does.
     repo: { name: input.repoWeb ? input.repoWeb.base.replace(/^https:\/\/[^/]+\//, "") : data.repo, web: input.repoWeb, commit: prov.commit },
     tool: current.tool,
+    ...(input.addon ? { addon: input.addon } : {}),
     analyzer: current.analyzer,
     generatedAt: input.generatedAt,
     timeZone: current.timeZone,
@@ -402,7 +408,8 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
         { k: "Repository", v: `${input.repoWeb ? input.repoWeb.base.replace(/^https:\/\/[^/]+\//, "") : data.repo}${prov.commit ? ` at ${prov.commit.slice(0, 7)}` : ""}${identity?.git_dirty ? ", with uncommitted changes" : ""}` },
         { k: "Git history", v: prov.churnState === "complete" ? `Full: ${plural(prov.commitsScanned ?? 0, "commit", "commits")} over the last ${days} days` : `Incomplete (${prov.history}); change counts may be low` },
         { k: "Coverage", v: coverageFiles.length ? `${coverageFiles.join(", ")}: ${n(evidence.runtime)} functions executed` : "None found. Run your tests with coverage to add this evidence." },
-        { k: "Tests", v: testsInput(data.scan.tests.total, links) }
+        { k: "Tests", v: testsInput(data.scan.tests.total, links) },
+        ...(input.addon ? [{ k: "Add-on", v: `${input.addon.name} ${input.addon.version} proposed: ${input.addon.used.join(", ")}. Its answers are proposals; OrangePro's own runs decide every result.` }] : [])
       ],
       counted: [
         { k: "Found", v: `${n(comp.code_symbols_total)} functions, types and constants` },

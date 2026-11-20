@@ -1,6 +1,6 @@
 import { loadRiskConfig } from "./score/riskConfig.js";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -61,6 +61,9 @@ import { generateTests } from "./generate/generator.js";
 import { classifyGeneratedDraftBlocker, type GeneratedDraftBlocker } from "./generate/draftGuidance.js";
 import type { ByHandRun } from "./viz/byHand.js";
 import { assertMayRunRepositoryCode, isStaticOnly, STATIC_ONLY_REFUSAL } from "./staticOnly.js";
+import type { AddonProvenance, PlatformResult } from "./pluginApi.js";
+import { publishRun, suppliedCoverage } from "./pluginCalls.js";
+import { addonProvenance, addonStatusFor } from "./plugins.js";
 import { autoProve, AutoProveResult, NO_KEY_MESSAGE, isEligibleProvableTarget, isNoKeyMessage } from "./autoProve.js";
 import { AGENT_RUN_WORKFLOW, GROUNDING_CONTRACT, RunHint, runnableRunHintsFor } from "./generate/runHints.js";
 import { buildProvider, DeterministicProvider } from "./generate/providers.js";
@@ -478,6 +481,8 @@ export interface StartAiFlowsResult {
 }
 
 export interface StartResult {
+  /** Present only when an add-on's answer was used in this run. */
+  addon?: AddonProvenance & { supplied_coverage_files?: string[]; upload?: PlatformResult };
   scope: CorpusScopeSummary;
   analyze: AnalyzeSummary;
   ai_links: StartAiResult;
@@ -2815,7 +2820,12 @@ async function opStartRun(
   const providerEnv = deps.env ?? process.env;
   // R14 §5: when nothing that decides the result changed since the last full run,
   // re-render its reports from the saved data instead of analysing again.
-  const reuseInput = startRunKeyInput(root, scanRoot, opts, providerOpts, providerEnv, deps);
+  // An add-on in use is part of what decides the result, so a run made with one is not reused without it.
+  const addonStatus = await addonStatusFor(root, scanRoot);
+  const baseReuseInput = startRunKeyInput(root, scanRoot, opts, providerOpts, providerEnv, deps);
+  const reuseInput: RunKeyInput = addonStatus.state === "loaded"
+    ? { ...baseReuseInput, analysisVersions: [...baseReuseInput.analysisVersions, `addon:${addonStatus.name}@${addonStatus.version}`] }
+    : baseReuseInput;
   const reuseCheck = startReuseDecision(root, opts, reuseInput);
   if (reuseCheck.decision.kind === "reuse") {
     const reused = reuseStart(root, reuseCheck.decision, deps);
@@ -2842,6 +2852,9 @@ async function opStartRun(
     deps
   );
   const warnings = [...analyze.warnings];
+  // Add-on: coverage files it supplies are recorded with their source. They are not counted as evidence.
+  const addonCoverage = staticOnly ? null : await suppliedCoverage(root, scanRoot, workspacePaths(root).dir);
+  for (const refused of addonCoverage?.refused ?? []) warnings.push(`pro add-on: a coverage file outside the workspace folder was refused (${refused}).`);
   if (staticOnly && opts.generateCoverage) warnings.push("static-only: --generate-coverage ignored; the repository's tests are not run.");
   reportProgress("start: deterministic graph is ready", { current: 4, total: 8 });
   // A per-repo/user risk config that fails to parse must announce itself here, not
@@ -3309,7 +3322,16 @@ async function opStartRun(
     warnings,
     reuse: { status: "full", reason: runReason }
   };
+  const addonUsed = addonProvenance();
+  if (addonUsed) result.addon = { ...addonUsed, ...(addonCoverage?.files.length ? { supplied_coverage_files: addonCoverage.files } : {}) };
   if (finalReportWritten) saveStartForReuse(root, reuseInput, result, deps);
+  // Add-on: sent only when the user asked for an upload. A failure is a warning, never an error.
+  const upload = await publishRun(root, scanRoot, workspacePaths(root).dir, readdirSync(workspacePaths(root).dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).sort(), providerEnv);
+  if (upload) {
+    const named = addonProvenance();
+    if (named) result.addon = { ...result.addon, ...named, upload };
+    if (!upload.ok) warnings.push("pro add-on: the upload did not succeed.");
+  }
   return result;
 }
 
@@ -3872,6 +3894,7 @@ function writeBehaviorReports(root: string, outputPath: string, dynamicProof: Dy
     // V3: finished proof runs give rows a patch status; the tiers above are untouched by it.
     patches: loadPatchStatuses(options.proofRunsDir ?? join(workspaceDir, "proof-runs"), graph.workspace.root, dirname(htmlPath)),
     ...(options.byHand ? { byHand: options.byHand } : {}),
+    ...(addonProvenance() ? { addon: addonProvenance() } : {}),
     links: { detailed: basename(htmlPath), summary: basename(summaryPath), csv: relative(dirname(htmlPath), csvPath).split(sep).join("/") }
   });
   const written = writeReports(model, htmlPath, summaryPath, csvPath);

@@ -56,7 +56,7 @@
   },
   "scripts": {
     "prebuild": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsc src/local/pluginApi.ts --declaration --emitDeclarationOnly --module NodeNext --moduleResolution NodeNext --target ES2022 --outDir dist/local",
     "postbuild": "node -e \"require('fs').chmodSync('dist/local/cli.js', 0o755)\" && node scripts/build-info.mjs",
     "dev": "tsx src/index.ts",
     "local": "tsx src/local/cli.ts",

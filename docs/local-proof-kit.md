@@ -575,3 +575,17 @@ Hosted upload/promotion, Docker, watch mode, PDF/DOCX, Jira/Confluence/TestRail/
 enrichers, repo file writing (safe patch workflow), continuous coverage intelligence, and
 third-party graph import. The hosted KG remains the system of record; this kit is the local
 adoption surface.
+
+## Add-on interface
+
+The kit works on its own. If the separate package `@orangepro/mcp-pro` is installed next to it, the kit can ask it for proposals at five points: which fault to try (`FaultSelector`), a draft of the expected behavior (`OracleProposer`), which existing test to try for a function (`CheckResolver`), coverage files it produced (`RuntimeLinker`), and an upload of the run's files (`PlatformClient`).
+
+- **An add-on only proposes.** The kit checks every answer the way it checks a person's input, and only the kit's own runs set an evidence tier or a result. A proposed expected behavior is written as "proposed" and nothing runs until a person approves it. Coverage files from an add-on are recorded with their source and are not counted.
+- **Nothing is sent anywhere unless you ask.** The upload point is called only when `ORANGEPRO_UPLOAD=1` is set.
+- **With no add-on installed, nothing changes**: the same output, the same files, the same exit codes. `opro doctor` prints `pro add-on: not installed`.
+- **An add-on that cannot be used is skipped** with one line that says why. A missing or broken add-on never stops a command.
+- **An add-on inside the repository being scanned is never loaded.**
+- **`ORANGEPRO_PRO=off`** turns an installed add-on off.
+- When an add-on's answer was used, the run profile, the receipt and the reports name it with its version.
+
+The types are in `dist/local/pluginApi.d.ts` (`PLUGIN_API_VERSION` 1.0.0). An add-on built for another major version is not used.

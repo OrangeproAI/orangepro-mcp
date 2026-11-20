@@ -141,7 +141,7 @@ export function renderSummaryReport(model: ReportModel): string {
 </div></header>
 <main class="wrap main">
 <section class="hero" aria-labelledby="h">
-  <p class="meta">${repoLabel}${short ? ` · commit ${web ? `<a class="mono" href="${esc(`${web.base}/${web.host === "gitlab" ? "-/" : ""}commit/${commit}`)}" target="_blank" rel="noopener noreferrer">${esc(short)}</a>` : `<span class="mono">${esc(short)}</span>`}` : ""} · analysed ${esc(dateTimeText(model.generatedAt, model.timeZone))} · OrangePro ${esc(model.tool)} · no AI model used for scoring</p>
+  <p class="meta">${repoLabel}${short ? ` · commit ${web ? `<a class="mono" href="${esc(`${web.base}/${web.host === "gitlab" ? "-/" : ""}commit/${commit}`)}" target="_blank" rel="noopener noreferrer">${esc(short)}</a>` : `<span class="mono">${esc(short)}</span>`}` : ""} · analysed ${esc(dateTimeText(model.generatedAt, model.timeZone))} · OrangePro ${esc(model.tool)}${model.addon ? ` · add-on ${esc(model.addon.name)} ${esc(model.addon.version)}` : ""} · no AI model used for scoring</p>
   <h1 id="h">${esc(headline(model))}</h1>
   <p class="lede">${esc(doneLine)}</p>
   ${sinceHtml(model)}

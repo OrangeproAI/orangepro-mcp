@@ -43,6 +43,8 @@ import type { FileReader } from "./types.js";
 import type { GraphNode, LocalGraph } from "./graph/ontology.js";
 import type { OperationDeps, ProveLoopOptions, ProveLoopResult, DynamicProofResult } from "./operations.js";
 import { isStaticOnly } from "./staticOnly.js";
+import type { CheckProposal } from "./pluginApi.js";
+import { proposeChecks } from "./pluginCalls.js";
 
 /** Real dynamic proof is profile-gated; only wired runner targets are attemptable. */
 function isTsJsFile(file: string): boolean {
@@ -520,6 +522,8 @@ export interface AutoProveAttempt {
    * work it cannot show.
    */
   test_source?: "written" | "found";
+  /** Set only when an add-on proposed trying this test for this function. The proof run still decided the result. */
+  proposed_by?: string;
   classification: AutoProveClass;
   reason?: string;
   /** Oracle status for the attempted mutant, when available. */
@@ -966,6 +970,22 @@ export function existingAssociatedTests(graph: LocalGraph, nodeById: Map<string,
   return out;
 }
 
+/**
+ * Add-on proposals join the queue as weak pairs: tried after the engine's own links, under the
+ * same per-function cap and the same limits. Python is left out, as for every weak pair there.
+ */
+export function withProposedChecks(assoc: Map<string, AssocTest[]>, proposals: readonly CheckProposal[], nodeById: Map<string, GraphNode>): Map<string, AssocTest[]> {
+  for (const proposal of proposals) {
+    const node = nodeById.get(proposal.symbol_id);
+    if (!isEligibleProvableTarget(node) || isPythonFile(proposal.symbol_id.split("#")[0]!.slice(4))) continue;
+    const list = assoc.get(proposal.symbol_id) ?? [];
+    if (list.some((t) => t.test === proposal.test_file)) continue;
+    list.push({ test: proposal.test_file, hard: false });
+    assoc.set(proposal.symbol_id, list);
+  }
+  return assoc;
+}
+
 /** One associated test file for a symbol, tagged by edge strength (hard TESTED_BY/COVERS vs weak MAY_*). */
 export interface AssocTest {
   test: string;
@@ -1144,7 +1164,8 @@ function proveExistingAssociatedTests(
   projectBlocked: Map<string, ProjectBlock>,
   pythonAttemptLimit: number,
   pythonGreenTarget: number,
-  nonPythonAttemptLimit: number
+  nonPythonAttemptLimit: number,
+  proposedChecks: readonly CheckProposal[] = []
 ): ExistingLaneResult {
   const attempts: AutoProveAttempt[] = [];
   const needsSetup: AutoProveAttempt[] = [];
@@ -1169,7 +1190,7 @@ function proveExistingAssociatedTests(
   const changed = opts.changedFiles && opts.changedFiles.length > 0 ? new Set(opts.changedFiles) : null;
   const reader = fileReaderFor(sourceRoot); // R-2: source scan for the node:sqlite env profile
   // Fix 3: hard TESTED_BY/COVERS pairs first, weak MAY_* pairs after and capped per symbol.
-  const queue = orderExistingAttempts(existingAssociatedTests(graph, nodeById), EXISTING_LANE_MAX_WEAK_PER_SYMBOL, {
+  const queue = orderExistingAttempts(withProposedChecks(existingAssociatedTests(graph, nodeById), proposedChecks, nodeById), EXISTING_LANE_MAX_WEAK_PER_SYMBOL, {
     graph,
     nodeById,
     sourceRoot
@@ -1454,6 +1475,11 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
   const existingLimit = Math.max(1, Math.min(MAX_AUTO_LIMIT, Math.floor(opts.proof_existing_limit ?? DEFAULT_PROOF_EXISTING_LIMIT)));
   const genLimit = Math.max(1, Math.min(MAX_AUTO_LIMIT, Math.floor(opts.proof_gen_limit ?? DEFAULT_PROOF_GEN_LIMIT)));
 
+  // Add-on: extra (function, existing test) pairs to try. The proof run below decides each result.
+  const engineLinks = existingAssociatedTests(graph, nodeById);
+  const proposedChecks = await proposeChecks(root, sourceRoot, workspacePaths(root).graphPath);
+  const fromAddon = new Set((proposedChecks?.proposals ?? []).filter((p) => !(engineLinks.get(p.symbol_id) ?? []).some((t) => t.test === p.test_file)).map((p) => `${p.symbol_id}\n${p.test_file}`));
+
   // ── Lane 1: existing associated tests — NO key required, runs FIRST (PR 1.5). ──
   const ex = proveExistingAssociatedTests(
     root,
@@ -1467,8 +1493,14 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
     projectBlocked,
     existingLimit,
     genLimit,
-    autoLimit
+    autoLimit,
+    proposedChecks?.proposals
   );
+  if (proposedChecks) {
+    for (const attempt of [...ex.attempts, ...ex.needsSetup]) {
+      if (fromAddon.has(`${attempt.target_symbol}\n${attempt.test_path}`)) attempt.proposed_by = proposedChecks.name;
+    }
+  }
 
   if (opts.existingOnly || ex.diskFull) {
     const status: AutoProveResult["status"] = ex.proven > 0 ? "proven-run" : ex.attempted > 0 ? "ran-no-proof" : "no-targets";
