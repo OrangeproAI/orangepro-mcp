@@ -90,6 +90,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token.startsWith("--")) {
+      // `--flag=value` is `--flag value`. Everything after the first `=` is the value, so a
+      // value may hold `=`, spaces, or a leading `--`. A flag that takes no value reads
+      // `=false` / `=0` as off and anything else as its text (on).
+      const eq = token.indexOf("=");
+      if (eq > 2) {
+        const name = token.slice(2, eq);
+        const value = token.slice(eq + 1);
+        flags[name] = VALUE_FLAGS.has(name) ? value : value === "false" || value === "0" ? false : value === "" || value === "true" ? true : value;
+        continue;
+      }
       const key = token.slice(2);
       const next = argv[i + 1];
       if (VALUE_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) {
@@ -130,6 +140,11 @@ export function tokenizeSetup(value: string): string[] {
 export function collectSetupCommands(rest: string[]): Array<{ command: string; args: string[] }> {
   const commands: Array<{ command: string; args: string[] }> = [];
   for (let i = 0; i < rest.length; i++) {
+    if (rest[i].startsWith("--setup=")) {
+      const [command, ...args] = tokenizeSetup(rest[i].slice("--setup=".length));
+      if (command) commands.push({ command, args });
+      continue;
+    }
     if (rest[i] !== "--setup") continue;
     const value = rest[i + 1];
     if (typeof value !== "string" || value.startsWith("--")) continue;

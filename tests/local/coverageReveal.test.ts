@@ -6,7 +6,7 @@ describe("coverageRevealLine (G6)", () => {
   it("renders same-denominator percentages for runtime-covered vs in-denominator proven", () => {
     const line = coverageRevealLine({ total: 100, coverage_confirmed: 12, runtime_covered: 75 });
     expect(line).toBe(
-      "Coverage vs proof: 75/100 behaviors are runtime-covered but not Proven (75%) vs 12/100 Proven (12%) — " +
+      "Coverage vs proof: 75/100 behaviors run under tests but are not Proven (75%) vs 12/100 Proven (12%) — " +
         "coverage only proves execution; the unproven side may be unattempted, blocked, or covered by tests that never assert these behaviors."
     );
   });

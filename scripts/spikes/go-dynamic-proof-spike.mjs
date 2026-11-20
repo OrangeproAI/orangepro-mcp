@@ -30,7 +30,7 @@
 // artifacts — it emits a JSON verdict; the orchestrator is the sole interpreter and
 // the only place proof is minted.
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -226,7 +226,46 @@ function goBin() {
   return process.env.OPRO_GO_BIN || "go";
 }
 
-function runGoTest({ repoRoot, testRun, timeoutMs, cacheRoot, pkgPath }) {
+// ── Reach marker (see go-mutate.go) ────────────────────────────────────────────────
+// A fresh, empty file for the mutated run, outside the copied module. null when it cannot be
+// made: reach is then unknown.
+const REACH_ENV = "ORANGEPRO_REACH_FILE";
+
+function createReachFile(parentDir) {
+  try {
+    const file = path.join(mkdtempSync(path.join(parentDir, "opro-reach-")), "reach.log");
+    writeFileSync(file, "");
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+// A package whose tests empty the environment can hide the marker; then an empty file proves nothing.
+function testsCanHideReach(pkgDirAbs) {
+  try {
+    return readdirSync(pkgDirAbs)
+      .filter(name => name.endsWith("_test.go"))
+      .some(name => /\bClearenv\(/.test(readFileSync(path.join(pkgDirAbs, name), "utf8")));
+  } catch {
+    return true;
+  }
+}
+
+// "ran" | "never_ran" | "unknown"
+function readReach(reachFile, pkgDirAbs) {
+  if (!reachFile) return "unknown";
+  try {
+    const text = readFileSync(reachFile, "utf8");
+    if (text.split("\n").includes("ran")) return "ran";
+    if (text !== "") return "unknown";
+    return testsCanHideReach(pkgDirAbs) ? "unknown" : "never_ran";
+  } catch {
+    return "unknown";
+  }
+}
+
+function runGoTest({ repoRoot, testRun, timeoutMs, cacheRoot, pkgPath, reachFile = null }) {
   const started = performance.now();
   // TRUST (cross-package): scope BOTH runs to the TARGET's package ONLY, never
   // `./...`. Go's `-run '^TestName$'` matches by name, so a same-named test in
@@ -237,7 +276,7 @@ function runGoTest({ repoRoot, testRun, timeoutMs, cacheRoot, pkgPath }) {
     cwd: repoRoot,
     encoding: "utf8",
     timeout: timeoutMs,
-    env: hermeticEnv(cacheRoot),
+    env: { ...hermeticEnv(cacheRoot), ...(reachFile ? { [REACH_ENV]: reachFile } : {}) },
     maxBuffer: 32 * 1024 * 1024
   });
   const elapsedMs = Math.round(performance.now() - started);
@@ -550,8 +589,20 @@ function classify({ baseline, mutant, name, pkgDirAbs, assertionLine }) {
   return { status: "proven", proven: true, reason: "baseline passed and the mutant failed the same target test at a trusted assertion" };
 }
 
+// A wrong command line is the only error that prints the usage text. Anything that goes wrong
+// later (a function that cannot be found, a missing runner) prints its own cause, on one line.
+class UsageError extends Error {}
+
+function parseArgsOrUsage(argv) {
+  try {
+    return parseArgs(argv);
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  }
+}
+
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgsOrUsage(process.argv.slice(2));
   const root = path.resolve(args.root);
   const targetAbs = resolveInside(root, args.target);
   const targetRel = path.relative(root, targetAbs);
@@ -600,8 +651,17 @@ function main() {
         reason: mutateErrorReason(mutation.code)
       };
     } else {
-      mutant = runGoTest({ repoRoot: mutantCopy.repoRoot, testRun: args.testRun, timeoutMs, cacheRoot: mutantCopy.tmpRoot, pkgPath });
+      const reachFile = createReachFile(mutantCopy.tmpRoot);
+      mutant = runGoTest({ repoRoot: mutantCopy.repoRoot, testRun: args.testRun, timeoutMs, cacheRoot: mutantCopy.tmpRoot, pkgPath, reachFile });
       verdict = classify({ baseline, mutant, name, pkgDirAbs, assertionLine });
+      if (verdict.status === "associated_survived") {
+        const reach = readReach(reachFile, pkgDirAbs);
+        verdict = reach === "ran"
+          ? { ...verdict, reach }
+          : reach === "never_ran"
+            ? { status: "not_exercised", proven: false, reach, reason: `not exercised: this test never runs ${args.func}` }
+            : { status: "reach_unknown", proven: false, reach, reason: `reach unknown: could not check whether this test runs ${args.func}` };
+      }
     }
 
     const output = {
@@ -652,6 +712,7 @@ function main() {
 try {
   main();
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${usage()}\n`);
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(error instanceof UsageError ? `${message}\n\n${usage()}\n` : `${message}\n`);
   process.exitCode = 1;
 }

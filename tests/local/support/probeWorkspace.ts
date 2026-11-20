@@ -198,6 +198,13 @@ export function hostExecutor(probe: (request: ContainerRequest) => unknown = pas
   const executor = ((request: ContainerRequest) => {
     calls.push(request);
     const started = Date.now();
+    // Item 50: the target-hash check is a real `node -e` on the stage's own mounts, not the boundary probe.
+    if (request.command[1] === "-e" && request.command[2]?.includes("createHash('sha256')")) {
+      const repoMount = request.mounts.find((mount) => mount.target === WORK_REPO)!;
+      const hostPath = repoMount.source + request.command[3]!.slice(WORK_REPO.length);
+      const child = spawnSync(process.execPath, ["-e", request.command[2]!, hostPath], { encoding: "utf8" });
+      return { exitCode: child.status ?? 1, signal: null, timedOut: false, stdout: child.stdout ?? "", stderr: child.stderr ?? "", durationMs: 1, dockerArgv: ["docker", "run", "<host test double>"], stopped: true };
+    }
     if (request.command[1] === "-e") {
       return { exitCode: 0, signal: null, timedOut: false, stdout: `${JSON.stringify(probe(request))}\n`, stderr: "", durationMs: 1, dockerArgv: ["docker", "run", "<host test double>"], stopped: true };
     }

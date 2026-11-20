@@ -1,5 +1,6 @@
 import { ProviderConfig } from "../localConfig.js";
 import { ModelCompletionRequest, ModelProvider } from "../types.js";
+import { recordModelCall } from "../modelUsage.js";
 
 export type FetchLike = typeof fetch;
 
@@ -34,7 +35,10 @@ async function postJson(
       err.bodyText = text;
       throw err;
     }
-    return text ? JSON.parse(text) : {};
+    const parsed: unknown = text ? JSON.parse(text) : {};
+    // F3a: every model call's use is recorded for the operation that is running.
+    recordModelCall(body, parsed);
+    return parsed;
   } catch (e) {
     // Map the cryptic AbortError ("This operation was aborted") to an actionable
     // timeout message — the #1 cause is a reasoning model thinking past the cap.

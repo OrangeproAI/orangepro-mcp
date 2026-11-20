@@ -29,6 +29,8 @@ const script = path.join(repoRoot, "scripts/spikes/dynamic-proof-spike.mjs");
 const mochaBin = require.resolve("mocha/bin/mocha.js");
 const deps = { clock: () => "2026-10-12T00:00:00Z", env: {} as NodeJS.ProcessEnv };
 const KILL = "return -1;";
+// F4: every whole-body replacement first records that it ran. A preview shows the same bytes a proof runs.
+const REACH_MARKER = '// @ts-ignore\n  try { process.getBuiltinModule("node:fs").appendFileSync(process.env.ORANGEPRO_REACH_FILE, "ran\\n"); } catch (oproReachError) {}';
 
 const tempDirs: string[] = [];
 afterAll(() => {
@@ -298,7 +300,7 @@ describe("bound mutation — the script changes exactly the recorded bytes", { t
       expect(preview.json.proven).toBe(false);
       expect(preview.json.bound?.changedBytes).toEqual({ start: binding.bodyStart, end: binding.bodyEnd });
       // prefix + replacement + suffix: every byte outside the body is the original byte.
-      const expected = Buffer.concat([original.subarray(0, binding.bodyStart), Buffer.from(`{\n  ${KILL}\n}`), original.subarray(binding.bodyEnd)]);
+      const expected = Buffer.concat([original.subarray(0, binding.bodyStart), Buffer.from(`{\n  ${REACH_MARKER}\n  ${KILL}\n}`), original.subarray(binding.bodyEnd)]);
       expect(preview.json.bound?.mutatedSha256).toBe(sha256(expected));
       const changed = changedOldLines(preview.json.diff ?? "");
       expect(changed.first).toBeGreaterThanOrEqual(target.body!.lines.start);
@@ -1028,7 +1030,7 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     const before = snapshot(W);
     const result = opDynamicProof(W, { target_symbol: "sym:lib/basket.js#basket.total", source: W, test_path: "test/basket.test.js", replacement: KILL, runner: "mocha" }, deps);
     expect(result.oracle).toMatchObject({ status: "proven", proven: true, mutation_route: "bound" });
-    expect(result.record).toMatchObject({ closed: true, status: "reproven", dynamic_proof: { oracle_version: "orangepro.targeted_mutation_oracle.v4" } });
+    expect(result.record).toMatchObject({ closed: true, status: "reproven", dynamic_proof: { oracle_version: "orangepro.targeted_mutation_oracle.v5" } });
     expect(snapshot(W)).toEqual(before);
   });
 

@@ -12,6 +12,77 @@ const MAX_REPLACEMENT_CHARS = 8192;
 const MAX_REPLACEMENT_JSON_DEPTH = 24;
 const REPLACEMENT_MODES = new Set(["return-json", "promise-json"]);
 
+// ── Reach marker ───────────────────────────────────────────────────────────────────
+// A mutant that survives says "the test misses a break" only when the test RAN the changed
+// function. The whole-body replacement therefore first appends one line to the file named by
+// this environment variable, which is set for the mutated run alone. No global is used, so the
+// record survives runner workers (they inherit the environment). `process.getBuiltinModule`
+// reaches `fs` in CommonJS and ESM alike, past any module mock. The line never throws: a
+// failure leaves the file as it was, which is read as "reach unknown", never as "missed".
+const REACH_ENV = "ORANGEPRO_REACH_FILE";
+const REACH_RECORD = "ran";
+// Every whole-body replacement carries the marker, so a preview shows exactly what a proof runs.
+// The switch exists so a test can show that a marker which is not written reads "reach unknown".
+const REACH_MARKER_ON = process.env.OPRO_REACH_MARKER !== "off";
+const REACH_MARKER_LINES = [
+  "// @ts-ignore",
+  `try { process.getBuiltinModule("node:fs").appendFileSync(process.env.${REACH_ENV}, "${REACH_RECORD}\\n"); } catch (oproReachError) {}`
+];
+
+// The replacement body with the marker ahead of it, one statement per line at `bodyIndent`.
+function bodyLines(replacementBody, bodyIndent, marker) {
+  const lines = marker ? [...REACH_MARKER_LINES] : [];
+  if (replacementBody.trim() !== "" || lines.length === 0) {
+    lines.push(replacementBody.trim());
+  }
+  return lines.map(line => `${bodyIndent}${line}`).join("\n");
+}
+
+// A fresh, empty file for one mutated run. null when it cannot be made: reach is then unknown.
+function createReachFile(parentDir) {
+  try {
+    if (typeof process.getBuiltinModule !== "function") {
+      return null;
+    }
+    const dir = mkdtempSync(path.join(parentDir, "opro-reach-"));
+    const file = path.join(dir, "reach.log");
+    writeFileSync(file, "");
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+// A test that swaps the whole environment object or the file system out from under the code it
+// runs can hide the marker. Then an empty file proves nothing.
+function testCanHideReach(testAbs) {
+  try {
+    const text = readFileSync(testAbs, "utf8");
+    return /\bprocess\.env\s*=(?!=)/.test(text) || /["']mock-fs["']/.test(text) || /stubGlobal\(\s*["']process["']/.test(text);
+  } catch {
+    return true;
+  }
+}
+
+// "ran" | "never_ran" | "unknown". Only a file this script made, still present, counts.
+function readReach(reachFile, testAbs) {
+  if (!reachFile) {
+    return "unknown";
+  }
+  try {
+    const text = readFileSync(reachFile, "utf8");
+    if (text.split("\n").includes(REACH_RECORD)) {
+      return "ran";
+    }
+    if (text !== "") {
+      return "unknown";
+    }
+    return testCanHideReach(testAbs) ? "unknown" : "never_ran";
+  } catch {
+    return "unknown";
+  }
+}
+
 function usage() {
   return [
     "Usage: node scripts/spikes/dynamic-proof-spike.mjs --root <repo> --test <rel> --target <rel> --method <name> --replacement <sentinel> [--replacement-mode return-json|promise-json] [--test-env KEY=value] [--runner auto|vitest|jest|mocha] [--vitest-config <rel>] [--jest-config <rel>] [--mocha-bin <path>] [--json] [--link-node-modules]",
@@ -893,7 +964,8 @@ function findMatchingBrace(source, openBraceIndex) {
   throw new Error("Could not find closing brace for target method");
 }
 
-function mutateMethod(targetAbs, method, replacementBody) {
+// `shownPath` is the path a message names: the caller's own, never this run's temp copy.
+function mutateMethod(targetAbs, method, replacementBody, marker = REACH_MARKER_ON, shownPath = targetAbs) {
   const source = readFileSync(targetAbs, "utf8");
   const escaped = method.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // Class methods + function declarations: `<name>(params)[: ret] {`.
@@ -917,18 +989,18 @@ function mutateMethod(targetAbs, method, replacementBody) {
     ...[...source.matchAll(freeFnRe)].map(m => ({ index: m.index + m[1].length, text: m[2] }))
   ];
   if (candidates.length > 1) {
-    throw new Error(`Ambiguous method ${method} in ${targetAbs}: ${candidates.length} matches`);
+    throw new Error(`Ambiguous method ${method} in ${shownPath}: ${candidates.length} matches`);
   }
   const candidate = candidates[0];
   if (!candidate || candidate.index === undefined) {
-    throw new Error(`Could not find method ${method} in ${targetAbs}`);
+    throw new Error(`Could not find method ${method} in ${shownPath}`);
   }
   const openBraceIndex = candidate.index + candidate.text.length - 1;
   const closeBraceIndex = findMatchingBrace(source, openBraceIndex);
   const indentMatch = source.slice(0, candidate.index).match(/(^|\n)([ \t]*)[^\n]*$/);
   const indent = indentMatch?.[2] ?? "";
   const bodyIndent = `${indent}  `;
-  const replacement = `{\n${bodyIndent}${replacementBody.trim()}\n${indent}}`;
+  const replacement = `{\n${bodyLines(replacementBody, bodyIndent, marker)}\n${indent}}`;
   const mutated = `${source.slice(0, openBraceIndex)}${replacement}${source.slice(closeBraceIndex + 1)}`;
   writeFileSync(targetAbs, mutated);
 }
@@ -1026,7 +1098,7 @@ function rawBraceClose(bytes, openIndex) {
 }
 
 // Every check that can be made before a byte is written. Returns the mutated bytes; writes nothing.
-function planBoundMutation(original, binding, replacementBody) {
+function planBoundMutation(original, binding, replacementBody, marker = REACH_MARKER_ON) {
   const { statementStart, functionStart, bodyStart, bodyEnd, targets } = binding;
   if (sha256Hex(original) !== binding.fileSha256) {
     throw new BoundRefusal("stale_hash", "the target file is not the file the binding was made from");
@@ -1097,7 +1169,7 @@ function planBoundMutation(original, binding, replacementBody) {
     indentEnd += 1;
   }
   const indent = original.subarray(lineStart, indentEnd).toString("latin1");
-  const replacement = Buffer.from(`{\n${indent}  ${replacementBody.trim()}\n${indent}}`, "utf8");
+  const replacement = Buffer.from(`{\n${bodyLines(replacementBody, `${indent}  `, marker)}\n${indent}}`, "utf8");
   const mutated = Buffer.concat([original.subarray(0, bodyStart), replacement, original.subarray(bodyEnd)]);
   return { original, mutated, replacementBytes: replacement.length };
 }
@@ -1136,7 +1208,7 @@ function planBoundEdit(original, binding) {
   };
 }
 
-function mutateBound(writeAbs, copy, binding, replacementBody) {
+function mutateBound(writeAbs, copy, binding, replacementBody, marker = REACH_MARKER_ON) {
   // Only this script's own copy may be written: a real file under the temp folder made for this run,
   // never the checkout file and never a link that leads back to it.
   const realWrite = realpathSync(writeAbs);
@@ -1147,7 +1219,7 @@ function mutateBound(writeAbs, copy, binding, replacementBody) {
   ) {
     throw new BoundRefusal("write_outside_copy", "the file to be changed is not inside this run's own temp folder");
   }
-  const plan = planBoundMutation(readFileSync(writeAbs), binding, replacementBody);
+  const plan = planBoundMutation(readFileSync(writeAbs), binding, replacementBody, marker);
   writeFileSync(writeAbs, plan.mutated);
   return plan;
 }
@@ -2063,6 +2135,11 @@ function assertRunnerBin(runner, binPath) {
   }
 }
 
+// Set for the mutated run only, and last, so a --test-env entry cannot point it elsewhere.
+function reachEnv(reachFile) {
+  return reachFile ? { [REACH_ENV]: reachFile } : {};
+}
+
 function sanitizedEnv(extra = {}) {
   const env = {
     PATH: process.env.PATH ?? "",
@@ -2216,7 +2293,7 @@ function writeMochaAliasTsconfig(repoRoot, monoRoot, aliases) {
   return out;
 }
 
-function runVitest({ repoRoot, monoRoot, testRel, vitestBin, vitestConfigRel, timeoutMs, testEnv, aliases }) {
+function runVitest({ repoRoot, monoRoot, testRel, vitestBin, vitestConfigRel, timeoutMs, testEnv, aliases, reachFile }) {
   assertRunnerBin("vitest", vitestBin);
   const started = performance.now();
   const reportPath = path.join(repoRoot, `.opro-dynamic-proof-report-${process.pid}-${Date.now()}.json`);
@@ -2231,7 +2308,7 @@ function runVitest({ repoRoot, monoRoot, testRel, vitestBin, vitestConfigRel, ti
     cwd: repoRoot,
     encoding: "utf8",
     timeout: timeoutMs,
-    env: sanitizedEnv({ ...testEnv, OPRO_DYNAMIC_PROOF_REPORT: reportPath })
+    env: sanitizedEnv({ ...testEnv, OPRO_DYNAMIC_PROOF_REPORT: reportPath, ...reachEnv(reachFile) })
   });
   const elapsedMs = Math.round(performance.now() - started);
   const report = existsSync(reportPath) ? parseVitestJsonReport(readFileSync(reportPath, "utf8")) : null;
@@ -2248,7 +2325,7 @@ function runVitest({ repoRoot, monoRoot, testRel, vitestBin, vitestConfigRel, ti
   };
 }
 
-function runJest({ repoRoot, testRel, jestBin, jestConfigRel, timeoutMs, testEnv, aliases }) {
+function runJest({ repoRoot, testRel, jestBin, jestConfigRel, timeoutMs, testEnv, aliases, reachFile }) {
   assertRunnerBin("jest", jestBin);
   const started = performance.now();
   const reportPath = path.join(repoRoot, `.opro-dynamic-proof-report-${process.pid}-${Date.now()}.json`);
@@ -2274,7 +2351,7 @@ function runJest({ repoRoot, testRel, jestBin, jestConfigRel, timeoutMs, testEnv
     cwd: repoRoot,
     encoding: "utf8",
     timeout: timeoutMs,
-    env: sanitizedEnv({ ...testEnv, OPRO_DYNAMIC_PROOF_REPORT: reportPath })
+    env: sanitizedEnv({ ...testEnv, OPRO_DYNAMIC_PROOF_REPORT: reportPath, ...reachEnv(reachFile) })
   });
   const elapsedMs = Math.round(performance.now() - started);
   const report = existsSync(reportPath) ? parseVitestJsonReport(readFileSync(reportPath, "utf8")) : null;
@@ -2291,7 +2368,7 @@ function runJest({ repoRoot, testRel, jestBin, jestConfigRel, timeoutMs, testEnv
   };
 }
 
-function runMocha({ repoRoot, monoRoot, testRel, mochaBin, timeoutMs, testEnv, aliases }) {
+function runMocha({ repoRoot, monoRoot, testRel, mochaBin, timeoutMs, testEnv, aliases, reachFile }) {
   assertRunnerBin("mocha", mochaBin);
   const started = performance.now();
   const cwd = monoRoot ?? repoRoot;
@@ -2320,7 +2397,8 @@ function runMocha({ repoRoot, monoRoot, testRel, mochaBin, timeoutMs, testEnv, a
       ...testEnv,
       OPRO_DYNAMIC_PROOF_REPORT: reportPath,
       ...(preferTsExts ? { TS_NODE_PREFER_TS_EXTS: "true" } : {}),
-      ...(generatedTsconfig ? { TS_NODE_PROJECT: generatedTsconfig, TS_CONFIG_PATHS_PROJECT: generatedTsconfig } : {})
+      ...(generatedTsconfig ? { TS_NODE_PROJECT: generatedTsconfig, TS_CONFIG_PATHS_PROJECT: generatedTsconfig } : {}),
+      ...reachEnv(reachFile)
     })
   });
   const elapsedMs = Math.round(performance.now() - started);
@@ -2338,15 +2416,15 @@ function runMocha({ repoRoot, monoRoot, testRel, mochaBin, timeoutMs, testEnv, a
   };
 }
 
-function runTest({ runner, repoRoot, monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases }) {
+function runTest({ runner, repoRoot, monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases, reachFile = null }) {
   if (runner === "vitest") {
-    return runVitest({ repoRoot, monoRoot, testRel, vitestBin, vitestConfigRel, timeoutMs, testEnv, aliases });
+    return runVitest({ repoRoot, monoRoot, testRel, vitestBin, vitestConfigRel, timeoutMs, testEnv, aliases, reachFile });
   }
   if (runner === "jest") {
-    return runJest({ repoRoot, testRel, jestBin, jestConfigRel, timeoutMs, testEnv, aliases });
+    return runJest({ repoRoot, testRel, jestBin, jestConfigRel, timeoutMs, testEnv, aliases, reachFile });
   }
   if (runner === "mocha") {
-    return runMocha({ repoRoot, monoRoot, testRel, mochaBin, timeoutMs, testEnv, aliases });
+    return runMocha({ repoRoot, monoRoot, testRel, mochaBin, timeoutMs, testEnv, aliases, reachFile });
   }
   return {
     exitCode: 1,
@@ -2615,7 +2693,7 @@ function executedTestCount(run) {
   return executed;
 }
 
-function classify({ baseline, mutant, testRel, repoRoot }) {
+function classify({ baseline, mutant, testRel, repoRoot, reach = null, method = "the function" }) {
   if (baseline.exitCode !== 0 || baseline.timedOut) {
     return {
       status: "unrunnable",
@@ -2642,10 +2720,28 @@ function classify({ baseline, mutant, testRel, repoRoot }) {
     };
   }
   if (mutant.exitCode === 0 && !mutant.timedOut) {
+    // The test passed on the mutated copy. What that says depends on whether it ran the function.
+    if (reach === "ran") {
+      return {
+        status: "associated_survived",
+        proven: false,
+        reach,
+        reason: "mutated target did not change the test outcome"
+      };
+    }
+    if (reach === "never_ran") {
+      return {
+        status: "not_exercised",
+        proven: false,
+        reach,
+        reason: `not exercised: this test never runs ${method}`
+      };
+    }
     return {
-      status: "associated_survived",
+      status: "reach_unknown",
       proven: false,
-      reason: "mutated target did not change the test outcome"
+      reach: "unknown",
+      reason: `reach unknown: could not check whether this test runs ${method}`
     };
   }
   // A mutant killed by the time limit never counts as caught, even if a report was written first.
@@ -2695,13 +2791,18 @@ function runProof(args, root, binding) {
   try {
     const baseline = runTest({ runner, repoRoot: baselineCopy.repoRoot, monoRoot: baselineCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: baselineCopy.aliases });
     let boundPlan = null;
+    // An exact edit keeps a function's own code, so a marker has no body to open; it carries none.
+    const marked = !binding?.edit && REACH_MARKER_ON;
     if (binding) {
-      boundPlan = mutateBound(path.join(mutantCopy.repoRoot, targetRel), { tmpRoot: mutantCopy.tmpRoot, checkoutAbs: targetAbs }, binding, replacementBody);
+      boundPlan = mutateBound(path.join(mutantCopy.repoRoot, targetRel), { tmpRoot: mutantCopy.tmpRoot, checkoutAbs: targetAbs }, binding, replacementBody, marked);
     } else {
-      mutateMethod(path.join(mutantCopy.repoRoot, targetRel), args.method, replacementBody);
+      mutateMethod(path.join(mutantCopy.repoRoot, targetRel), args.method, replacementBody, marked, targetRel);
     }
-    const mutant = runTest({ runner, repoRoot: mutantCopy.repoRoot, monoRoot: mutantCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: mutantCopy.aliases });
-    const verdict = classify({ baseline, mutant, testRel, repoRoot: mutantCopy.repoRoot });
+    // The reach file lives beside the copy, never inside the repository the test sees.
+    const reachFile = marked ? createReachFile(mutantCopy.tmpRoot) : null;
+    const mutant = runTest({ runner, repoRoot: mutantCopy.repoRoot, monoRoot: mutantCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: mutantCopy.aliases, reachFile });
+    const reach = marked ? readReach(reachFile, testAbs) : null;
+    const verdict = classify({ baseline, mutant, testRel, repoRoot: mutantCopy.repoRoot, reach, method: args.method });
     return {
       ...verdict,
       runner,
@@ -2909,8 +3010,20 @@ function nameSearchRoot(givenRoot) {
   return linked ? realpathSync(givenRoot) : givenRoot;
 }
 
+// A wrong command line is the only error that prints the usage text. Anything that goes wrong
+// later (a function that cannot be found, a missing runner) prints its own cause, on one line.
+class UsageError extends Error {}
+
+function parseArgsOrUsage(argv) {
+  try {
+    return parseArgs(argv);
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  }
+}
+
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgsOrUsage(process.argv.slice(2));
   const binding = parseBinding(args);
   if (args.preview && !binding) {
     throw new BoundRefusal("preview_requires_bound", "--preview needs the --bound-* arguments; the name search has no preview");
@@ -2942,7 +3055,8 @@ try {
     }
     process.exitCode = 2;
   } else {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${usage()}\n`);
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(error instanceof UsageError ? `${message}\n\n${usage()}\n` : `${message}\n`);
     process.exitCode = 1;
   }
 }

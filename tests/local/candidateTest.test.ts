@@ -11,7 +11,7 @@ import { unifiedFileDiff } from "../../src/local/contracts/faultRecord.js";
 import { recordBytes, verifyRunFolder, writeRunManifest } from "../../src/local/contracts/io.js";
 
 import type { StageName, StageObservation } from "../../src/local/contracts/receipt.js";
-import type { ContainerExecutor } from "../../src/local/boundary.js";
+import type { ContainerExecutor, ContainerRequest } from "../../src/local/boundary.js";
 import { failedAtAssertion, frameColumn, frameLocation, ProbeFaultRefusal } from "../../src/local/faultProbe.js";
 import type { DynamicProofRunner } from "../../src/local/operations.js";
 import { deps, hostExecutor, OFFSETS, PASSING_TESTS, passingProbe, probe, script, sha256, trackedChanges, workspace, type Workspace } from "./support/probeWorkspace.js";
@@ -167,6 +167,43 @@ describe("opro test-brief", { timeout: 120_000 }, () => {
 });
 
 describe("opro verify-test — the new test on the same fault", { timeout: 180_000 }, () => {
+  // Item 50: a file rewritten in a folder an earlier container mounted can reach the next container
+  // half written. Every stage gets a folder no container has seen, and a rewritten file is hashed
+  // inside the container before its stage runs.
+  it("item 50: every stage mounts its own fresh copy, and the rewritten file is checked inside the container", () => {
+    const run = survivedRun();
+    const after = withTest(PASSING_TESTS, NEW_TEST);
+    const patch = candidate(PASSING_TESTS, after);
+    const executor = hostExecutor();
+    const result = verify(run, patch, recordFor(run, patch, after, ASSERT_ONE), executor);
+    expect(result.verdict.result).toBe("verified_gap");
+    const repoOf = (request: ContainerRequest): string => request.mounts.find((mount) => mount.target === "/work/repo")!.source;
+    const isHash = (request: ContainerRequest): boolean => request.command[1] === "-e" && Boolean(request.command[2]?.includes("createHash"));
+    const stageRuns = executor.calls.filter((request) => request.command[1] !== "-e");
+    expect(stageRuns).toHaveLength(9);
+    expect(new Set(stageRuns.map(repoOf)).size).toBe(9);
+    // One check for each rewrite: the fault-text control, the restore, the original-text control.
+    const hashRuns = executor.calls.filter(isHash);
+    expect(hashRuns).toHaveLength(3);
+    for (const check of hashRuns) expect(stageRuns.map(repoOf)).toContain(repoOf(check));
+  });
+
+  it("item 50: a rewritten file the container does not see as written gives no claim", () => {
+    const run = survivedRun();
+    const after = withTest(PASSING_TESTS, NEW_TEST);
+    const patch = candidate(PASSING_TESTS, after);
+    const real = hostExecutor();
+    // The container reads a cut-off file: its hash is not the hash of what was written.
+    const cutOff = ((request: ContainerRequest) => {
+      const answer = real(request);
+      return request.command[1] === "-e" && request.command[2]?.includes("createHash") ? { ...answer, stdout: "0".repeat(64) } : answer;
+    }) as ContainerExecutor;
+    const result = verify(run, patch, recordFor(run, patch, after, ASSERT_ONE), cutOff);
+    expect(result.verdict).toMatchObject({ result: "inconclusive", reason: "text_control_not_written" });
+    // The stage after the unconfirmed rewrite never ran.
+    expect(result.verdict.stages.map((ref) => ref.stage)).not.toContain("candidate_fault_text_control");
+  });
+
   it("verified_gap: passes on the original (twice), fails at its declared line on the fault (twice), alone in the whole suite, holds both text controls, passes restored", () => {
     const run = survivedRun();
     const after = withTest(PASSING_TESTS, NEW_TEST);

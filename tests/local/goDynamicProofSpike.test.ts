@@ -50,7 +50,8 @@ const spike = path.join(root, "scripts/spikes/go-dynamic-proof-spike.mjs");
 const fixtures = path.join(root, "tests/local/__fixtures__/go-proof");
 
 type Verdict = {
-  status: "proven" | "associated_survived" | "unrunnable";
+  status: "proven" | "associated_survived" | "not_exercised" | "reach_unknown" | "unrunnable";
+  reach?: "ran" | "never_ran" | "unknown";
   proven: boolean;
   reason: string;
   mode: string;
@@ -119,9 +120,13 @@ describe.skipIf(!HAS_GO)("go method collision — receiver-exact --recv selectio
     expect(status).toBe(0);
   }, TEST_TIMEOUT);
 
-  it("never credits the WRONG receiver: --recv B mutates B.M and TestAM survives (no false Proven)", async () => {
+  // F4: TestAM calls A.M only. With B.M mutated it still passes because it never runs B.M:
+  // "not exercised", not a survivor, and never Proven.
+  it("never credits the WRONG receiver: --recv B mutates B.M and TestAM never runs it (no false Proven)", async () => {
     const { verdict } = await runSpike(dir(), { testRun: "^TestAM$", target: "pair.go", func: "M", recv: "B" });
-    expect(verdict.status).toBe("associated_survived");
+    expect(verdict.status).toBe("not_exercised");
+    expect(verdict.reach).toBe("never_ran");
+    expect(verdict.reason).toBe("not exercised: this test never runs M");
     expect(verdict.proven).toBe(false);
   }, TEST_TIMEOUT);
 
@@ -251,6 +256,8 @@ describe.skipIf(!HAS_GO)("go dynamic proof spike (G-1)", () => {
     const { verdict } = await runSpike(path.join(fixtures, "broad-run"), { testRun: "^TestCompute$" });
 
     expect(verdict.status).toBe("associated_survived");
+    // F4: "survived" is said only because the marker shows the test ran the function.
+    expect(verdict.reach).toBe("ran");
     expect(verdict.proven).toBe(false);
   }, TEST_TIMEOUT);
 

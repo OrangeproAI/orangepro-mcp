@@ -255,7 +255,11 @@ describe.skipIf(!JAVA)("Java dynamic-proof mint path (real toolchain)", () => {
       deps
     );
 
-    expect(res.oracle.status).toBe("associated_survived");
+    // F4: the Java proof script has no reach marker yet, so a mutant that passes reads
+    // "reach unknown", never "survived" (a claim that the test ran the method and missed).
+    expect(res.oracle.status).toBe("reach_unknown");
+    expect(res.oracle.reach).toBe("unknown");
+    expect(res.record.dynamic_proof?.mutant_status).toBe("reach_unknown");
     expect(res.record.status).toBe("unproven");
     expect(res.record.closed).toBe(false);
     expect(res.record.dynamic_proof?.target_not_mocked).toBe(false);

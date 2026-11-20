@@ -19,7 +19,7 @@ import { byHandCounts, type ByHandRun, type ReportByHand } from "./byHand.js";
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 5;
+export const REPORT_DATA_VERSION = 6;
 /** Bump when either renderer changes what it draws from the same data. */
 export const REPORT_RENDERER_VERSION = "r16.1";
 export const REPORT_DATA_FILE = "report-data.json";
@@ -72,6 +72,8 @@ export interface ReportModel {
     testFilesLinked: number;
     /** Test files with no traced call to any counted function. */
     testFilesUnlinked: number;
+    /** Test files that send HTTP requests: calls the map does not trace (item 46). */
+    testFilesHttp: number;
     evidence: Record<Evidence, number>;
     withEvidence: number;
     deletePaths: number;
@@ -365,6 +367,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
       testFiles: data.scan.tests.total,
       testFilesLinked: links.linked,
       testFilesUnlinked: links.unlinked,
+      testFilesHttp: graph.nodes.filter((node) => node.kind === "TestCase" && node.stale !== true && (node.properties as { sends_http?: unknown }).sends_http === true).length,
       evidence,
       withEvidence,
       deletePaths: build.deleteTotal + build.provenDeleteGaps.length,

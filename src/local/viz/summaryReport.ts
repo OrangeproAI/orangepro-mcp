@@ -152,7 +152,7 @@ export function renderSummaryReport(model: ReportModel): string {
     <div><dt>Proven</dt><dd>${fmt(c.proven)}</dd><p>a test fails when the code breaks</p></div>
   </dl>
   ${patchesHtml(model)}
-  <p class="tiny faint">Counts are a floor. Tests that only check mocks, and calls over HTTP from end-to-end tests, are not linked.</p>
+  <p class="tiny faint">Counts are a floor. Tests that only check mocks, and calls over HTTP from end-to-end tests, are not linked.</p>${httpTestsLine(model)}
 </section>
 ${bar}
 ${n > 0 ? `<section aria-labelledby="top-h">
@@ -198,6 +198,14 @@ export function patchLinks(p: RowPatch): string {
 }
 
 /** V3: the patch-status line beside the Proven count. A patch status is never counted as Proven. */
+/** Item 46: how many test files reach the code over HTTP, where the map cannot follow. Hidden at zero. */
+function httpTestsLine(model: ReportModel): string {
+  const c = model.counts;
+  const http = c.testFilesHttp ?? 0;
+  if (http <= 0) return "";
+  return `\n  <p class="tiny faint">${fmt(http)} of ${fmt(c.testFiles)} test files send HTTP requests; the map doesn&rsquo;t trace those calls.</p>`;
+}
+
 function patchesHtml(model: ReportModel): string {
   const pt = model.patches;
   if (!pt) return "";

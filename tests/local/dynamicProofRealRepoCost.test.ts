@@ -36,7 +36,8 @@ describe("dynamic proof real-repo cost runner", () => {
           target: "src/order.service.ts",
           method: "createOrder",
           replacement: sentinelReturn,
-          expected: "associated_survived"
+          // F4: the test replaces the real method, so the mutated body never runs.
+          expected: "not_exercised"
         },
         {
           repo: "fixture",
@@ -100,7 +101,9 @@ describe("dynamic proof real-repo cost runner", () => {
         runnablePct: 80,
         proven: 2,
         falseProofCount: 0,
-        associatedSurvived: 1,
+        associatedSurvived: 0,
+        notExercised: 1,
+        reachUnknown: 0,
         associatedNonAssertionFailure: 1,
         unrunnable: 1,
         runners: { vitest: 5 },

@@ -167,10 +167,12 @@ describe("dynamic proof spike", () => {
     "order.map-stash.test.ts"
   ];
 
-  it.each(substitutedBindingCases)("keeps %s associated when mutating the real body does not affect the test", testFile => {
+  // F4: these tests replace the real method, so the mutated body never runs. That is "not
+  // exercised", not a survivor: the test says nothing about a break it never reaches.
+  it.each(substitutedBindingCases)("keeps %s unproven when mutating the real body does not affect the test", testFile => {
     const result = runSpike(testFile);
 
-    expect(result.status).toBe("associated_survived");
+    expect(result.status).toBe("not_exercised");
     expect(result.proven).toBe(false);
     expect(result.baseline.exitCode).toBe(0);
     expect(result.mutant.exitCode).toBe(0);

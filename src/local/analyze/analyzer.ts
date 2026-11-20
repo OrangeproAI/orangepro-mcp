@@ -3,6 +3,7 @@ import path from "node:path";
 import ts from "typescript";
 import { CandidateEdge, GraphEdge, GraphNode, LocalGraph, LOCAL_GRAPH_SCHEMA_VERSION, ManifestFileEntry, Provenance, SourceScope } from "../graph/ontology.js";
 import { makeCandidateEdge, makeEdge, makeNode, makeProofEdges, makeTestCaseNode } from "../graph/factories.js";
+import { sendsHttpRequests } from "./httpTests.js";
 import { hashString } from "../util/hash.js";
 import { slugify } from "../util/ids.js";
 import { loadIgnore, walkFilesWithMeta } from "../util/walk.js";
@@ -904,6 +905,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           layerConfidence,
           layerSignals,
           testNames,
+          sendsHttp: sendsHttpRequests(file.relPath, content),
           provenance: prov(file.relPath, content ? hashString(testNames.join("\n")) : undefined),
           contentHash: file.hash
         })
@@ -2981,16 +2983,16 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
                 detector: proof.associationRule === "unique_method_name_import" ? "unique_method_name_import" : "python_static_association",
                 rule: proof.associationRule,
                 reason: proof.associationRule === "unique_method_name_import"
-                  ? "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never dynamic Proven."
+                  ? "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never Proven."
                   : proof.associationRule === "stored_result_assert"
-                    ? "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never dynamic Proven."
+                    ? "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never Proven."
                     : proof.associationRule === "raises_block"
-                      ? "Exact imported call that is the only statement inside pytest.raises; this is Association only, never dynamic Proven."
+                      ? "Exact imported call that is the only statement inside pytest.raises; this is Association only, never Proven."
                       : proof.associationRule === "nested_assert_call"
-                        ? "Exact imported call nested inside a pytest assert condition; this is Association only, never dynamic Proven."
+                        ? "Exact imported call nested inside a pytest assert condition; this is Association only, never Proven."
                         : proof.associationRule === "raised_call_in_raises"
-                          ? "Exact imported call raised as the only statement inside pytest.raises; this is Association only, never dynamic Proven."
-                      : "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
+                          ? "Exact imported call raised as the only statement inside pytest.raises; this is Association only, never Proven."
+                      : "Exact static receiver origin and direct invocation; this is Association only, never Proven."
               }
             }
           : undefined;

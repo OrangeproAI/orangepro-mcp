@@ -124,6 +124,8 @@ import {
   type ProofDoctorResult
 } from "./proofDoctor.js";
 import { buildArtifactIdentity, PROOF_ORACLE_VERSION } from "./provenance.js";
+import { collectModelUsage, type ModelUsage, modelUsageSoFar } from "./modelUsage.js";
+import { isReach, notExercisedReason, NOT_EXERCISED_STATUS, type Reach, REACH_UNKNOWN_STATUS, reachUnknownReason, SURVIVED_STATUS, survivorKind } from "./proofReach.js";
 import { tryScopedReprove } from "./reprove/scoped.js";
 import { resolveContained, toWorkspaceRel } from "./reprove/paths.js";
 import { hashBuffer } from "./util/hash.js";
@@ -348,6 +350,8 @@ export interface DynamicProofOracleSummary {
   status: string;
   proven: boolean;
   reason?: string;
+  /** Whether the mutated function ran under the test; set by the proof scripts that carry a marker. */
+  reach?: Reach;
   /** Present only when the function was changed by its exact position; absent for the name search. */
   mutation_route?: "bound";
   /** Optional language-runner refusal class; absent for legacy TS/Go/Java spikes. */
@@ -545,6 +549,8 @@ export interface StartGenerationFlowDiagnostic {
 }
 
 export interface StartGenerationDiagnostics {
+  /** F3a: every model call of the run up to the point this file is written. */
+  model_usage?: ModelUsage;
   schema_version: 1;
   started_at: string;
   completed_at: string;
@@ -691,12 +697,65 @@ function runnerProcessDiagnostics(
   };
 }
 
+/**
+ * Whether `start` keeps auto-prove to the repository's own tests, with no drafted test.
+ * --no-ai with a real provider configured, or --generate-limit 0: that flag means no drafted
+ * test anywhere in the run, auto-prove's own drafting lane included.
+ */
+export function startProvesExistingTestsOnly(
+  opts: { ai?: boolean; generateLimit?: number },
+  providerConfigured: boolean,
+  deterministicGeneration: boolean
+): boolean {
+  if (opts.generateLimit !== undefined && Math.floor(opts.generateLimit) <= 0) return true;
+  return opts.ai === false && providerConfigured && !deterministicGeneration;
+}
+
+/** F3a: every operation that can call a model says what its calls used. */
+export interface WithModelUsage {
+  model_usage: ModelUsage;
+}
+
+export const MODEL_USAGE_FILE = "model-usage.json";
+
+/**
+ * Runs an operation, adds its model use to the result, and (for the outermost operation only)
+ * writes `.orangepro/model-usage.json`. The file is the last command's use; it is removed
+ * from nothing and never read back as evidence.
+ */
+async function withModelUsage<T extends object>(root: string, command: string, fn: () => Promise<T>): Promise<T & WithModelUsage> {
+  const { result, usage, outermost } = await collectModelUsage(fn);
+  if (outermost) {
+    try {
+      const dir = join(root, WORKSPACE_DIR);
+      if (existsSync(dir)) writeFileAtomic(join(dir, MODEL_USAGE_FILE), JSON.stringify({ command, ...usage }, null, 2) + "\n");
+    } catch {
+      // The total is in the result either way; a file that cannot be written fails nothing.
+    }
+  }
+  return { ...result, model_usage: usage };
+}
+
+/** Starts every message about a proof script that ended without a result. */
+export const PROOF_NOT_STARTED = "The proof could not start";
+
+/**
+ * One line: the proof script's own first error line. The script prints its usage text only
+ * for a wrong command line, and that is never shown here.
+ */
+export function proofNotStartedMessage(stderr: string, stdout: string): string {
+  const lines = (stderr || stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const usageAt = lines.findIndex((line) => /^usage:/i.test(line));
+  const first = (usageAt === -1 ? lines : lines.slice(0, usageAt))[0];
+  const cause = first ? redactSecrets(first).slice(0, 300) : "the proof script ended without a result";
+  return `${PROOF_NOT_STARTED}: ${cause.replace(/\.$/, "")}.`;
+}
+
 function parseDynamicProofJson(stdout: string, stderr: string): DynamicProofOracleSummary {
   try {
     return JSON.parse(stdout) as DynamicProofOracleSummary;
   } catch (err) {
-    const detail = redactSecrets((stderr || stdout).slice(0, 2000));
-    throw new Error(`Dynamic proof runner did not return JSON.${detail ? ` stderr/stdout: ${detail}` : ""}`);
+    throw new Error(proofNotStartedMessage(stderr, stdout));
   }
 }
 
@@ -705,6 +764,7 @@ export interface GoDynamicProofJson {
   status: string;
   proven: boolean;
   reason?: string;
+  reach?: Reach;
   timeoutMs?: number;
   testRun?: string;
   target?: string;
@@ -735,6 +795,7 @@ function mapGoOracle(go: GoDynamicProofJson): DynamicProofOracleSummary {
     status: go.status,
     proven: go.proven === true,
     reason: go.reason,
+    ...(isReach(go.reach) ? { reach: go.reach } : {}),
     runner: "go",
     replacementMode: GO_SENTINEL_LABEL,
     test: go.testRun,
@@ -2269,7 +2330,7 @@ export function opDynamicProof(
       oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
     }
   }
-  oracle = withTimeoutOutcome(oracle);
+  oracle = withReachOutcome(withTimeoutOutcome(oracle));
   const closed = dynamicProofSucceeded(oracle);
   const baselineGreen = oracle.baseline?.exitCode === 0 && oracle.baseline?.timedOut !== true;
   const mutantFailedAssertion = oracle.mutant?.assertionFailure === true && oracle.mutant?.timedOut !== true;
@@ -2287,6 +2348,7 @@ export function opDynamicProof(
     runner: oracle.runner ?? runner,
     test_path: oracle.test ?? testRel,
     mutant_status: oracle.status,
+    ...(oracle.reach ? { reach: oracle.reach } : {}),
     oracle_version: PROOF_ORACLE_VERSION,
     run_fingerprint: artifactIdentity.run_fingerprint,
     ...(proofDiagnostics ? proofDiagnostics : {})
@@ -2314,6 +2376,7 @@ export function opDynamicProof(
       status: oracle.status,
       proven: oracle.proven,
       reason: oracle.reason,
+      ...(oracle.reach ? { reach: oracle.reach } : {}),
       ...(mutationRoute ? { mutation_route: mutationRoute } : {}),
       runner: oracle.runner,
       replacementMode: oracle.replacementMode,
@@ -2377,6 +2440,23 @@ export function withTimeoutOutcome(oracle: DynamicProofOracleSummary): DynamicPr
     };
   }
   return oracle;
+}
+
+/**
+ * One reading of a passed-on-the-mutant run for every language. "The test does not catch a
+ * break" needs the marker to show the function ran. An empty marker file means the test never
+ * ran it. Anything else (no marker in this language, a marker that could not be set up or
+ * read) is "reach unknown". It never falls back to a miss.
+ */
+export function withReachOutcome(oracle: DynamicProofOracleSummary): DynamicProofOracleSummary {
+  const reach = isReach(oracle.reach) ? oracle.reach : undefined;
+  const kind = survivorKind(oracle.status, reach);
+  if (!kind) return oracle;
+  if (kind === "ran_but_missed") return { ...oracle, status: SURVIVED_STATUS, reach: "ran" };
+  if (kind === "never_ran") {
+    return { ...oracle, status: NOT_EXERCISED_STATUS, proven: false, reach: "never_ran", reason: notExercisedReason(oracle.method) };
+  }
+  return { ...oracle, status: REACH_UNKNOWN_STATUS, proven: false, reach: "unknown", reason: reachUnknownReason(oracle.method) };
 }
 
 const SETUP_DEFAULT_TIMEOUT_MS = 30_000;
@@ -2563,6 +2643,14 @@ export async function opAiLinks(
   root: string,
   opts: AiLinksOptions = {},
   deps: OperationDeps = defaultDeps()
+): Promise<AiLinksResult & WithModelUsage> {
+  return withModelUsage(root, "ai-links", () => opAiLinksRun(root, opts, deps));
+}
+
+async function opAiLinksRun(
+  root: string,
+  opts: AiLinksOptions = {},
+  deps: OperationDeps
 ): Promise<AiLinksResult> {
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
@@ -2603,6 +2691,14 @@ export async function opAiFlows(
   root: string,
   opts: AiFlowsOptions = {},
   deps: OperationDeps = defaultDeps()
+): Promise<AiFlowsResult & WithModelUsage> {
+  return withModelUsage(root, "ai-flows", () => opAiFlowsRun(root, opts, deps));
+}
+
+async function opAiFlowsRun(
+  root: string,
+  opts: AiFlowsOptions = {},
+  deps: OperationDeps
 ): Promise<AiFlowsResult> {
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
@@ -2705,6 +2801,14 @@ export async function opStart(
   root: string,
   opts: StartOptions = {},
   deps: OperationDeps = defaultDeps()
+): Promise<StartResult & WithModelUsage> {
+  return withModelUsage(root, "start", () => opStartRun(root, opts, deps));
+}
+
+async function opStartRun(
+  root: string,
+  opts: StartOptions = {},
+  deps: OperationDeps
 ): Promise<StartResult> {
   const providerOpts = startProviderOverride(root, opts);
   const scanRoot = opts.source ? resolve(opts.source) : resolve(root);
@@ -2834,7 +2938,7 @@ export async function opStart(
         // only by a key in the environment, so with a real provider configured it must
         // honor the flag explicitly. Without a key (or with the offline deterministic
         // provider) no model is called anyway and the released no-key path is unchanged.
-        existingOnly: opts.ai === false && generationProviderConfigured && !deterministicGeneration
+        existingOnly: startProvesExistingTestsOnly(opts, generationProviderConfigured, deterministicGeneration)
       },
       { ...providerDeps, proveLoop: opProveLoop }
     );
@@ -3032,7 +3136,9 @@ export async function opStart(
           manual_fallbacks_this_run: generatedDrafts.filter((test) =>
             test.unresolved_reason?.includes("Manual fallback retained")
           ).length,
-          flows: flowDiagnostics
+          flows: flowDiagnostics,
+          // F3a: every model call of this run so far (AI links and flows, proof drafting, test drafting).
+          model_usage: modelUsageSoFar()
         };
         generationDiagnosticsPath = join(root, WORKSPACE_DIR, "generation-diagnostics.json");
         try {
@@ -3370,6 +3476,14 @@ export async function opGenerate(
   root: string,
   opts: GenerateOptions & ProviderOverride = {},
   deps: OperationDeps = defaultDeps()
+): Promise<GenerateSummary & WithModelUsage> {
+  return withModelUsage(root, "generate", () => opGenerateRun(root, opts, deps));
+}
+
+async function opGenerateRun(
+  root: string,
+  opts: GenerateOptions & ProviderOverride = {},
+  deps: OperationDeps
 ): Promise<GenerateSummary> {
   const paths = workspacePaths(root);
   const graph = loadGraph(paths.graphPath);
@@ -3472,6 +3586,14 @@ export async function opCompare(
   root: string,
   opts: GenerateOptions & ProviderOverride = {},
   deps: OperationDeps = defaultDeps()
+): Promise<GenerateComparison & WithModelUsage> {
+  return withModelUsage(root, "compare", () => opCompareRun(root, opts, deps));
+}
+
+async function opCompareRun(
+  root: string,
+  opts: GenerateOptions & ProviderOverride = {},
+  deps: OperationDeps
 ): Promise<GenerateComparison> {
   const graph = loadGraph(workspacePaths(root).graphPath);
   const provider = resolveGenerationProvider(deps.env, opts);

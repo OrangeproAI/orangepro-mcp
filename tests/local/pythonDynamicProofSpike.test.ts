@@ -72,6 +72,53 @@ describe.skipIf(!HAS_UV)("python dynamic proof spike (R7.1)", () => {
     }
   }, TEST_TIMEOUT);
 
+  // F4: a test that passes on the mutated copy "misses a break" only when it ran the function.
+  it("tells ran-but-missed from never-ran, and never calls an unreached function a survivor", () => {
+    const fixture = tempPythonProject({
+      "pyproject.toml": UV_PROJECT,
+      "app.py": "def answer() -> int:\n    return 42\n\ndef other() -> int:\n    return 7\n\ndef inline() -> int: return 9\n",
+      "tests/test_app.py": [
+        "from unittest import mock",
+        "import os",
+        "from app import answer, inline, other",
+        "",
+        "def test_weak():",
+        "    answer()",
+        "    assert True",
+        "",
+        "def test_weak_inline():",
+        "    inline()",
+        "    assert True",
+        "",
+        "def test_other():",
+        "    assert other() == 7",
+        ""
+      ].join("\n"),
+      "tests/test_hides.py": [
+        "from unittest import mock",
+        "import os",
+        "from app import answer",
+        "",
+        "def test_cleared_environment():",
+        "    with mock.patch.dict(os.environ, {}, clear=True):",
+        "        answer()",
+        "    assert True",
+        ""
+      ].join("\n")
+    });
+    try {
+      const weak = runSpike(fixture, { test: "tests/test_app.py::test_weak", target: "app.py", func: "answer" });
+      expect(weak).toMatchObject({ status: "associated_survived", reach: "ran", proven: false });
+      const weakInline = runSpike(fixture, { test: "tests/test_app.py::test_weak_inline", target: "app.py", func: "inline" });
+      expect(weakInline).toMatchObject({ status: "associated_survived", reach: "ran", proven: false });
+      const never = runSpike(fixture, { test: "tests/test_app.py::test_other", target: "app.py", func: "answer" });
+      expect(never).toMatchObject({ status: "not_exercised", reach: "never_ran", proven: false, reason: "not exercised: this test never runs answer" });
+      // A test that empties the environment hides the marker: an empty file then proves nothing.
+      const hidden = runSpike(fixture, { test: "tests/test_hides.py::test_cleared_environment", target: "app.py", func: "answer" });
+      expect(hidden).toMatchObject({ status: "reach_unknown", reach: "unknown", proven: false });
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  }, TEST_TIMEOUT * 4);
+
   it("proves a typed scalar function and discloses identical runner diagnostics", () => {
     const fixture = tempPythonProject({
       "pyproject.toml": UV_PROJECT,

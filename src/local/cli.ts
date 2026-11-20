@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { modelUsageLine } from "./modelUsage.js";
 import { parseArgs, collectSetupCommands } from "./cliArgs.js";
 import {
   opAnalyze,
@@ -37,7 +38,7 @@ import type { TargetRecord } from "./contracts/targetRecord.js";
 import { dominantBlockReason } from "./viz/behaviorReportData.js";
 import { coverageRevealLine } from "./viz/coverageReveal.js";
 import { shortReportPath } from "./viz/shortReport.js";
-import { autoProve, isRoastSurvivor } from "./autoProve.js";
+import { autoProve, isNotExercised, isReachUnknown, isRoastSurvivor } from "./autoProve.js";
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
@@ -214,12 +215,12 @@ Usage:
     # opt-in AI lane: stage weak candidate behavior↔code links in .orangepro/ai/links.json; --apply merges them into candidate_edges only
   opro ai-flows [--apply] [--provider openai|anthropic|ollama] [--model <name>] [--json]
     # opt-in AI lane: stage candidate behavior flows (closed anchor set) in .orangepro/flows.json; --apply stores them under analysis.candidate_flows only — a verify-these worklist, never evidence
-  opro generate [--target REQ-001] [--base <ref>] [--pr <n> [--yes]] [--changed] [--framework playwright] [--limit 3] [--prompt-version v2|v5] [--provider openai|anthropic|ollama|deterministic] [--model <name>] [--single [--raw]] [--background] [--json]
-    # default: A/B both arms (prompt-only vs Local KG, same model) scored side by side + writes a fresh report; --single generates one arm only
+  opro generate [--target REQ-001] [--base <ref>] [--pr <n> [--yes]] [--changed] [--framework playwright] [--limit 3] [--prompt-version v2|v5] [--provider openai|anthropic|ollama|deterministic] [--model <name>] [--compare] [--raw] [--background] [--json]
+    # default: one graph-grounded suite, saved to the local graph (--raw: prompt-only instead). --compare: also makes a prompt-only suite and has a judge score both (about three times the model use), and writes a fresh report
     # --base <ref>: NON-MUTATING default for PR/branch review — generate only for the behaviors the diff vs <ref> touches (e.g. --base main); read-only \`git diff\`, no checkout
     # --pr <n>:     MUTATING escape hatch — checks out PR #n (switches your working tree) via the GitHub CLI \`gh\`, re-analyzes, targets its diff; needs confirmation (--yes/--force or a y/N prompt) and refuses on a dirty tree
     # --changed:    target the current branch's diff vs its base (main/master), code changes only (docs ignored)
-    # --background: run the job detached (A/B, or agent-mode with --single → result file of run hints), return a job id immediately; poll with \`opro jobs <id>\`
+    # --background: run the job detached (one suite → result file of run hints; with --compare, the comparison), return a job id immediately; poll with \`opro jobs <id>\`
   opro jobs [<job-id>] [--json]                # list background jobs, or show one (status + outputs + log tail)
   opro explain <generated_test_id> [--json]
   opro agent [--client generic|claude-code|cursor|codex|opencode|windsurf] [--json]
@@ -378,6 +379,7 @@ async function main(): Promise<number> {
         }
         if (res.coverage_report_path) out(`  coverage report: ${res.coverage_report_path}`);
         if (res.generation_diagnostics_path) out(`  generation diagnostics: ${res.generation_diagnostics_path}`);
+        if (modelUsageLine(res.model_usage)) out(`  ${modelUsageLine(res.model_usage)}`);
         out(`  RTM:            ${res.rtm.rtm_path}${res.rtm.rows.length < res.rtm.summary.total ? ` (capped ${res.rtm.rows.length}/${res.rtm.summary.total} rows)` : ""}`);
         out(`  Proven:                ${res.rtm.summary.proven}/${res.rtm.summary.total} (static map covers all ${res.rtm.summary.total}; dynamic proof verifies the top ${res.auto_prove.attempted || "few"})`);
         if (res.rtm.summary.total > 0 && res.rtm.summary.proven === 0) {
@@ -461,7 +463,17 @@ async function main(): Promise<number> {
       } finally {
         clearProgress();
       }
+      // A survivor is a test that RAN the function and still passed. A test that never ran it, or
+      // one where that could not be checked, is listed apart and is never called a survivor.
       const survived = res.attempts.filter(isRoastSurvivor);
+      const notExercised = res.attempts.filter(isNotExercised);
+      const reachUnknown = res.attempts.filter(isReachUnknown);
+      const brief = (a: (typeof res.attempts)[number]) => ({
+        target_symbol: a.target_symbol,
+        test_path: a.test_path,
+        mutant_status: a.mutant_status,
+        reason: a.reason
+      });
       const payload = {
         status: "roast",
         source,
@@ -469,12 +481,9 @@ async function main(): Promise<number> {
         dynamically_proven: res.proven,
         survived_mutants: survived.length,
         needs_setup: res.needs_setup,
-        survivors: survived.map((a) => ({
-          target_symbol: a.target_symbol,
-          test_path: a.test_path,
-          mutant_status: a.mutant_status,
-          reason: a.reason
-        }))
+        survivors: survived.map(brief),
+        not_exercised: notExercised.map(brief),
+        reach_unknown: reachUnknown.map(brief)
       };
       if (json) {
         printJson(payload);
@@ -483,9 +492,11 @@ async function main(): Promise<number> {
         out(`  attempted:            ${payload.attempted}`);
         out(`  Newly proven this run: ${payload.dynamically_proven}`);
         out(`  Survived mutants:     ${payload.survived_mutants}`);
+        if (notExercised.length > 0) out(`  Not exercised:        ${notExercised.length}`);
+        if (reachUnknown.length > 0) out(`  Reach unknown:        ${reachUnknown.length}`);
         if (survived.length > 0) {
           out("");
-          out(`${survived.length} passing test(s) still passed when OrangePro replaced the target with a sentinel mutant:`);
+          out(`${survived.length} passing test(s) ran the target and still passed when OrangePro replaced it with a sentinel mutant:`);
           for (const attempt of survived.slice(0, limit)) {
             out(`  - ${attempt.test_path} survived mutant on ${attempt.target_symbol}`);
             if (attempt.reason) out(`    reason: ${attempt.reason}`);
@@ -500,6 +511,22 @@ async function main(): Promise<number> {
           out(`  verdict:              proof could not run for ${res.needs_setup.length} target(s)${dom ? `; dominant blocker: ${dom.label}` : ""}.`);
         } else {
           out("  verdict:              no survived targeted mutants found in this pass.");
+        }
+        if (notExercised.length > 0) {
+          out("");
+          out(`${notExercised.length} linked test(s) never run the target, so they could not catch a break in it:`);
+          for (const attempt of notExercised.slice(0, limit)) {
+            out(`  - ${attempt.test_path} never runs ${attempt.target_symbol}`);
+          }
+          out("These are not survivors: link or write a test that calls the function.");
+        }
+        if (reachUnknown.length > 0) {
+          out("");
+          out(`${reachUnknown.length} test(s) passed on the mutant, but whether they run the target could not be checked:`);
+          for (const attempt of reachUnknown.slice(0, limit)) {
+            out(`  - ${attempt.test_path} on ${attempt.target_symbol}`);
+          }
+          out("Reach unknown is not a finding about the test.");
         }
       }
       return 0;
@@ -737,8 +764,7 @@ async function main(): Promise<number> {
             out(`     next: ${b.next_step}`);
           }
           for (const nk of res.non_killing) {
-            const nkLabel = nk.mutant_status === "associated_non_assertion_failure" ? "mutant failed (non-assertion)" : "mutant survived";
-            out(`  ${nkLabel}: ${nk.target_symbol}${nk.test_path ? ` (test: ${nk.test_path})` : ""}`);
+            out(`  ${nk.label}: ${nk.target_symbol}${nk.test_path ? ` (test: ${nk.test_path})` : ""}`);
             out(`     ${nk.note}`);
           }
         }
@@ -1333,6 +1359,7 @@ async function main(): Promise<number> {
         out(`  cache hit: ${res.cache_hit}`);
         if (res.dropped_links) out(`  dropped: ${res.dropped_links}`);
         for (const w of res.warnings) out(`  warning: ${w}`);
+        if (modelUsageLine(res.model_usage)) out(`  ${modelUsageLine(res.model_usage)}`);
         out("Next: run `opro ai-links --apply` to merge weak candidate links into the local graph.");
       }
       return 0;
@@ -1366,6 +1393,7 @@ async function main(): Promise<number> {
         out(`  proposed ${res.rejections.proposed} -> accepted ${res.rejections.accepted}`);
         out(`  cache hit: ${res.cache_hit}`);
         for (const w of res.warnings) out(`  warning: ${w}`);
+        if (modelUsageLine(res.model_usage)) out(`  ${modelUsageLine(res.model_usage)}`);
         out("Next: run `opro ai-flows --apply` to store candidate flows under analysis.candidate_flows (ai_suggested, never counted as flows/evidence).");
       }
       return 0;
@@ -1517,7 +1545,7 @@ async function main(): Promise<number> {
           // Run in the foreground instead of lying about a launch.
           err("--background needs the built CLI (run `npm run build`, or use the installed `opro`); running in the foreground.");
         } else {
-          const bgSingle = asBool(flags.single, false);
+          const bgSingle = !asBool(flags.compare, false);
           const launched = launchBackgroundGenerate(cwd, genOpts, { single: bgSingle, raw: asBool(flags.raw, false) });
           if (json) printJson({ status: "started", mode: bgSingle ? "single" : "compare", ...launched });
           else {
@@ -1535,9 +1563,13 @@ async function main(): Promise<number> {
       if (!json) {
         err("Generating… model calls run one after another; this can take a bit with reasoning models (gpt-5/o-series).");
       }
-      if (!asBool(flags.single, false)) {
-        // Default: A/B both arms (prompt-only vs Local KG) + a fresh report each run.
-        let cmp: GenerateComparison;
+      if (asBool(flags.compare, false)) {
+        // --compare: both arms (prompt-only vs graph-grounded) plus a judge, and a fresh report.
+        // Said before the run, because it multiplies the model calls --limit stands for.
+        if (!json) {
+          err(`--compare: makes two suites of up to ${genOpts.limit === 1 ? "1 test" : `${genOpts.limit ?? "the default number of"} tests`} (--limit), one graph-grounded and one prompt-only, then a judge scores them: about three times the model use of a plain run. The total used is printed at the end.`);
+        }
+        let cmp: Awaited<ReturnType<typeof opCompare>>;
         try {
           cmp = await opCompare(cwd, genOpts);
         } finally {
@@ -1559,10 +1591,11 @@ async function main(): Promise<number> {
             out(`Report:          ${report.report_path}`);
             out(`Report (JSON):   ${report.report_json_path}`);
           }
+          if (modelUsageLine(cmp.model_usage)) out(`\n${modelUsageLine(cmp.model_usage)}`);
         }
         return 0;
       }
-      // --single: generate just one arm (and persist the tests to the local graph).
+      // Default: one suite, graph-grounded (and the tests are saved to the local graph).
       let res;
       try {
         res = await opGenerate(cwd, {
@@ -1617,6 +1650,8 @@ async function main(): Promise<number> {
           for (const m of res.missing_evidence) out(`  - ${m.title}: needs ${m.needed.join("; ")}`);
         }
         for (const w of res.warnings) out(`  warning: ${w}`);
+        if (modelUsageLine(res.model_usage)) out(`\n${modelUsageLine(res.model_usage)}`);
+        if (res.model_provider !== "none") out("One suite was made. Add --compare to see graph-grounded vs. prompt-only.");
       }
       return 0;
     }
@@ -1922,7 +1957,7 @@ function printComparison(cmp: GenerateComparison): void {
     out("In Cursor/Claude Code/Codex the agent writes each file, runs it, and reports pass/fail — OrangePro only generates the code.");
   } else if (cmp.grounded.generated_tests.length) {
     out("\nThese Local KG test cases are specs (an eval artifact), not runnable code.");
-    out("Convert them, or run `opro generate --single` for runnable framework code with per-test write/run hints.");
+    out("Convert them, or run `opro generate` for runnable framework code with per-test write/run hints.");
   }
   for (const w of cmp.warnings) out(`  warning: ${w}`);
 }

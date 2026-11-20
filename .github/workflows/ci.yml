@@ -75,6 +75,25 @@ jobs:
       - run: npm ci
       - run: npm run test:spike:core
 
+  report-channel:
+    # Item 51: the signed report channel depends on how the runtime behaves when a test replaces
+    # built-ins, and that differs between Node lines. Every line `engines` allows runs its tests.
+    name: report channel (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24", "26"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: "npm"
+      - run: npm ci
+      - run: npx vitest run tests/local/reportChannel.test.ts
+
   tsjs-monorepo:
     name: TS/JS monorepo proof isolation
     runs-on: ubuntu-latest

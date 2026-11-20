@@ -996,6 +996,19 @@ describe("report fixes: every count names what it counts and the numbers reconci
     expect(at("2026-11-04T05:00:00.000Z")).toBe(`Since the report of 3 Nov 2026${tail}`);
   });
 
+  it("item 46: the summary says how many test files send HTTP requests, and says nothing at zero", async () => {
+    const { renderSummaryReport } = await import("../../src/local/viz/summaryReport.js");
+    const none = await reportModelOf(graph());
+    expect(none.counts.testFilesHttp).toBe(0);
+    expect(renderSummaryReport(none)).not.toContain("send HTTP requests");
+    const g = graph();
+    const first = g.nodes.find((node) => node.kind === "TestCase")!;
+    first.properties = { ...first.properties, sends_http: true };
+    const model = await reportModelOf(g);
+    expect(model.counts.testFilesHttp).toBe(1);
+    expect(renderSummaryReport(model)).toContain(`1 of ${model.counts.testFiles} test files send HTTP requests; the map doesn&rsquo;t trace those calls.`);
+  });
+
   it("item 12: test files that call a counted function, and those that call none, add up and agree everywhere", async () => {
     const { testFileLinks, testsInput } = await import("../../src/local/viz/reportModel.js");
     const g = graph();

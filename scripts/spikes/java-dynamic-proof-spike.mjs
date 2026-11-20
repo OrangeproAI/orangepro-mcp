@@ -507,8 +507,20 @@ function summarizeRun(run) {
   };
 }
 
+// A wrong command line is the only error that prints the usage text. Anything that goes wrong
+// later (a function that cannot be found, a missing runner) prints its own cause, on one line.
+class UsageError extends Error {}
+
+function parseArgsOrUsage(argv) {
+  try {
+    return parseArgs(argv);
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  }
+}
+
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgsOrUsage(process.argv.slice(2));
   const root = path.resolve(args.root);
   const targetAbs = resolveInside(root, args.target);
   const targetRel = path.relative(root, targetAbs);
@@ -584,6 +596,7 @@ function main() {
 try {
   main();
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${usage()}\n`);
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(error instanceof UsageError ? `${message}\n\n${usage()}\n` : `${message}\n`);
   process.exitCode = 1;
 }

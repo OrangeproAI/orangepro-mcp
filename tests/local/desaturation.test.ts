@@ -264,9 +264,11 @@ describe("proof doctor — non-close diagnosis", () => {
     expect(nonKillingNoteFor("associated_non_assertion_failure")).toBe(NON_ASSERTION_NOTE);
     expect(NON_ASSERTION_NOTE).toContain("made the test FAIL");
   });
-  it("keeps the survived-mutant wording for true survivors and legacy records", () => {
-    expect(nonKillingNoteFor("associated_survived")).toBe(NON_KILLING_NOTE);
+  it("keeps the survived-mutant wording for true survivors only", () => {
+    expect(nonKillingNoteFor("associated_survived", "ran")).toBe(NON_KILLING_NOTE);
     expect(nonKillingNoteFor(undefined)).toBe(NON_KILLING_NOTE);
+    // F4: a survivor recorded before the reach marker shows nothing about the test.
+    expect(nonKillingNoteFor("associated_survived")).not.toBe(NON_KILLING_NOTE);
   });
 });
 

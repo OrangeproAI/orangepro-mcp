@@ -103,6 +103,7 @@ const survivedRunner = () => ({
   stderr: "",
   stdout: fakeOracleStdout({
     status: "associated_survived",
+    reach: "ran",
     proven: false,
     reason: "mutated target did not change the test outcome",
     mutant: { exitCode: 0, timedOut: false, assertionFailure: false }

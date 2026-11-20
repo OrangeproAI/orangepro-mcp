@@ -144,9 +144,10 @@ describe('s', function () {
 });
 `);
       const now = signed(dir);
-      // Never the forged account. Replacing call and apply breaks Mocha itself, so no report verifies; every other
-      // replacement leaves the true account, signed.
-      if (name === "call") expect([name, now.tests, now.problem]).toEqual([name, null, expect.stringContaining("no signed report")]);
+      // Never the forged account. Replacing how functions are invoked (call, apply, Reflect.apply) can make the
+      // runner itself record a failing test as passed, so the reporter signs nothing; every other replacement
+      // leaves the true account, signed.
+      if (name === "call" || name === "reflect") expect([name, now.tests, now.problem]).toEqual([name, null, expect.stringContaining("no signed report")]);
       else expect([name, now.problem, summary(now.tests)]).toEqual([name, null, TRUE_ACCOUNT]);
     }
   });
