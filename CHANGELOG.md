@@ -2,6 +2,21 @@
 
 Dates below are America/Los_Angeles (Pacific Time), converted from the npm publish timestamp (`npm view <package> time`) or from a cited GitHub release. This file covers `@orangepro/mcp-server` and `@orangepro/orangepro-mcp`. It includes only versions and dates that were verified, and it does not invent release notes. For versions that already have official notes in the repo or on GitHub, those notes are summarized or linked.
 
+## 0.2.62 — 2026-11-20
+
+Official notes: [docs/releases/0.2.62.md](https://github.com/OrangeproAI/orangepro-mcp/blob/v0.2.62/docs/releases/0.2.62.md). GitHub release: [v0.2.62](https://github.com/OrangeproAI/orangepro-mcp/releases/tag/v0.2.62).
+
+From the official 0.2.62 notes:
+
+- A proof says whether the test ran the function: caught, ran but missed, never ran ("not exercised"), or can't tell ("reach unknown"). A test that never calls the function is no longer reported as "doesn't catch a break".
+- Every JavaScript and TypeScript proof changes the function at its exact position (file hash, function bytes, declared name), never by a search for its name. `name: function` properties, quoted-key methods and the unnamed default export are now proved; what raw bytes cannot confirm is refused with the reason.
+- `opro probe-fault` refuses an expected behavior that is only proposed unless `--allow-proposed-oracle` is given, and the run records it.
+- A proof that cannot start says why in one line. "No linked test" replaces "No test points here", and the summary counts test files that send HTTP requests.
+- Model use is recorded per command (`.orangepro/model-usage.json`). `opro generate` makes one suite; `--compare` is opt-in.
+- Every command accepts `--flag=value`. `--generate-limit 0` stops every drafted test.
+- An optional add-on interface for `@orangepro/mcp-pro`; without an add-on nothing changes apart from one `opro doctor` line.
+- The first run after upgrading is a full run: the report data format and the proof oracle version changed.
+
 ## 0.2.61 — 2026-11-16
 
 Official notes: [docs/releases/0.2.61.md](https://github.com/OrangeproAI/orangepro-mcp/blob/v0.2.61/docs/releases/0.2.61.md). GitHub release: [v0.2.61](https://github.com/OrangeproAI/orangepro-mcp/releases/tag/v0.2.61).
