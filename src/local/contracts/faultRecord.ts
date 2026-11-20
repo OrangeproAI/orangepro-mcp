@@ -1,5 +1,6 @@
 import ts from "typescript";
 import { parseErrorCount } from "../analyze/exportShapes.js";
+import { validateLocation, type SourceLocation } from "./location.js";
 import { sha256Hex, type ByteSpan, type LineSpan, type TargetDescription } from "./targetRecord.js";
 
 // A fault: a few bytes changed at one recorded position inside a bound function body
@@ -26,7 +27,63 @@ export const FAULT_OPERATORS = {
 } as const;
 export type FaultOperatorId = keyof typeof FAULT_OPERATORS;
 
-export const FAULT_PLAN_REFUSALS = ["operator_not_allowed", "edit_outside_body", "edit_mismatch", "no_op_mutation", "not_parsable", "not_single_site"] as const;
+/**
+ * A fault given as its own edit: the place, the text there and the text written. Not in the
+ * operator table and never named in `--fault`; planned by `planEdit`, with the same record.
+ */
+export const EDIT_OPERATOR = { id: "edit", version: 1, description: "replace the text at one place" } as const;
+export type RecordedOperatorId = FaultOperatorId | typeof EDIT_OPERATOR.id;
+
+/** The edit `planEdit` works on: byte offsets in the target file, the text there and the text written. */
+export interface FaultEdit {
+  start: number;
+  end: number;
+  original_text: string;
+  replacement_text: string;
+}
+
+/**
+ * What `--fault-edit` reads, and what an add-on may propose in place of an operator: the
+ * target's location in the one exact-position format, with its `edit`, and the original
+ * text beside it (the location holds only that text's hash).
+ */
+export interface FaultEditInput {
+  location: SourceLocation;
+  original_text: string;
+}
+
+/** Shape check only; says what is wrong and never repairs. */
+export function checkFaultEditInput(value: unknown): { ok: true; input: FaultEditInput } | { ok: false; message: string } {
+  const fail = (message: string): { ok: false; message: string } => ({ ok: false, message: `fault edit: ${message}` });
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return fail("not a JSON object.");
+  const v = value as Record<string, unknown>;
+  const unknown = Object.keys(v).filter((key) => !["location", "original_text"].includes(key));
+  if (unknown.length > 0) return fail(`unknown field(s): ${unknown.join(", ")}.`);
+  const located = validateLocation(v.location);
+  if (!located.ok) return fail(`location: ${located.reason}`);
+  const edit = located.location.edit;
+  if (!edit) return fail("the location has no edit.");
+  if (typeof v.original_text !== "string" || v.original_text === "") return fail("original_text must be the non-empty text at that place.");
+  if (sha256Hex(Buffer.from(v.original_text, "utf8")) !== edit.original_sha256) return fail("original_text is not the text the location's edit names (sha256 differs).");
+  if (Buffer.byteLength(v.original_text, "utf8") !== edit.end - edit.start) return fail("original_text is not as long as the edit's span.");
+  return { ok: true, input: { location: located.location, original_text: v.original_text } };
+}
+
+/**
+ * The edit of a checked input, once its location is seen to be this target's own: the same
+ * file, route, name, spans and hashes the engine reads from the file itself.
+ */
+export function editForTarget(input: FaultEditInput, own: SourceLocation): { ok: true; edit: FaultEdit } | { ok: false; message: string } {
+  const bare = (loc: SourceLocation): string => {
+    const { edit: _edit, ...rest } = loc;
+    return JSON.stringify(Object.keys(rest).sort().map((key) => [key, (rest as Record<string, unknown>)[key]]));
+  };
+  if (bare(input.location) !== bare(own)) return { ok: false, message: "the edit's location is not this target's location (file, route, name, spans or hashes differ)." };
+  const edit = input.location.edit!;
+  return { ok: true, edit: { start: edit.start, end: edit.end, original_text: input.original_text, replacement_text: edit.replacement } };
+}
+
+export const FAULT_PLAN_REFUSALS = ["operator_not_allowed", "edit_outside_body", "edit_mismatch", "no_op_mutation", "not_parsable", "not_single_site", "edit_no_control"] as const;
 export type FaultPlanRefusal = (typeof FAULT_PLAN_REFUSALS)[number];
 
 export interface FaultRecord {
@@ -38,7 +95,7 @@ export interface FaultRecord {
   file: string;
   file_sha256: string;
   function_sha256: string;
-  operator: { id: FaultOperatorId; version: number };
+  operator: { id: RecordedOperatorId; version: number };
   rationale: string;
   site: { bytes: ByteSpan; lines: LineSpan };
   original_text: string;
@@ -51,7 +108,7 @@ export interface FaultRecord {
 }
 
 export interface FaultPlan {
-  operator: FaultOperatorId;
+  operator: RecordedOperatorId;
   site: { bytes: ByteSpan; lines: LineSpan };
   original_text: string;
   replacement_text: string;
@@ -255,6 +312,119 @@ export function planFault(fileBytes: Buffer, target: TargetDescription, repoPath
   };
 }
 
+/** Node kinds that hold a list of statements: an edit whose smallest enclosing node is one of these spans more than one place. */
+function holdsStatements(node: ts.Node): boolean {
+  return ts.isSourceFile(node) || ts.isBlock(node) || ts.isModuleBlock(node) || ts.isCaseBlock(node) || ts.isCaseClause(node) || ts.isDefaultClause(node);
+}
+
+/** The tree as `treeShape` lists it, with the outermost node spanning exactly [start, end) written as one marker. Null when no node has that span. */
+function shapeAround(sf: ts.SourceFile, start: number, end: number): string[] | null {
+  const out: string[] = [];
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (!found && !ts.isSourceFile(node) && node.getStart(sf) === start && node.end === end) {
+      out.push("site");
+      found = true;
+      return;
+    }
+    const raw = ts.isSourceFile(node) ? undefined : (node as { text?: unknown }).text;
+    out.push(`${node.kind}:${typeof raw === "string" ? raw : ""}`);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found ? out : null;
+}
+
+/**
+ * Plan a fault given as its own edit. The same promises as `planFault`, without an operator
+ * to lean on: the bytes at the place are the bytes named, the place lies strictly inside the
+ * function's body, the result is a different program (not only different comments or spacing),
+ * and outside the smallest syntax node that holds the whole edit the two files parse the same,
+ * node for node and name for name. Writes nothing.
+ */
+export function planEdit(fileBytes: Buffer, target: TargetDescription, repoPath: string, edit: FaultEdit): FaultPlanResult {
+  const refuse = (refused: FaultPlanRefusal, message: string): FaultPlanResult => ({ ok: false, refused, message });
+  if (sha256Hex(fileBytes) !== target.file_sha256) return refuse("edit_mismatch", "the file is not the file the target was described from.");
+  const body = target.body?.bytes;
+  if (!body) return refuse("edit_outside_body", `${target.name} has no block body.`);
+  const { start, end } = edit;
+  if (!(Number.isSafeInteger(start) && Number.isSafeInteger(end) && 0 <= start && start < end && end <= fileBytes.length)) {
+    return refuse("edit_mismatch", `[${start}, ${end}) is not a span of the file.`);
+  }
+  const text = fileBytes.toString("utf8");
+  const charStart = fileBytes.subarray(0, start).toString("utf8").length;
+  const charEnd = fileBytes.subarray(0, end).toString("utf8").length;
+  if (Buffer.byteLength(text.slice(0, charStart), "utf8") !== start || Buffer.byteLength(text.slice(0, charEnd), "utf8") !== end) {
+    return refuse("edit_mismatch", `[${start}, ${end}) does not start and end on characters.`);
+  }
+  if (!fileBytes.subarray(start, end).equals(Buffer.from(edit.original_text, "utf8"))) {
+    return refuse("edit_mismatch", `the text at [${start}, ${end}) is not the original text the edit names.`);
+  }
+  if (!(body.start < start && end < body.end - 1)) return refuse("edit_outside_body", `the edit [${start}, ${end}) does not lie strictly inside ${target.name}'s body [${body.start}, ${body.end}).`);
+  const mutated = Buffer.concat([fileBytes.subarray(0, start), Buffer.from(edit.replacement_text, "utf8"), fileBytes.subarray(end)]);
+  if (mutated.equals(fileBytes)) return refuse("no_op_mutation", "the edit leaves the file unchanged.");
+  const sf = cleanParse(text);
+  if (!sf) return refuse("not_parsable", "the file does not parse without errors, so no position in it can be trusted.");
+  const mutatedText = mutated.toString("utf8");
+  const mutatedSf = parseLike(mutatedText, sf);
+  const parses = parseErrorCount(mutatedSf) === 0;
+  if (parses) {
+    const before = treeShape(sf);
+    const after = treeShape(mutatedSf);
+    if (before.length === after.length && before.every((entry, i) => entry === after[i])) {
+      return refuse("no_op_mutation", "the edit changes comments or spacing only: the program is the same.");
+    }
+    // The smallest node that holds the whole edit.
+    let holder: ts.Node = sf;
+    const descend = (node: ts.Node): void => {
+      ts.forEachChild(node, (child) => {
+        if (child.getStart(sf) <= charStart && charEnd <= child.end) {
+          holder = child;
+          descend(child);
+        }
+      });
+    };
+    descend(sf);
+    const bodyCharStart = fileBytes.subarray(0, body.start).toString("utf8").length;
+    const bodyCharEnd = fileBytes.subarray(0, body.end).toString("utf8").length;
+    const holderStart = holder.getStart(sf);
+    if (holdsStatements(holder) || !(bodyCharStart < holderStart && holder.end < bodyCharEnd)) {
+      return refuse("not_single_site", "the edit is not inside one statement or expression of the function: it spans more than one place.");
+    }
+    const deltaChars = mutatedText.length - text.length;
+    const promised = shapeAround(sf, holderStart, holder.end);
+    const actual = shapeAround(mutatedSf, holderStart, holder.end + deltaChars);
+    if (!promised || !actual || promised.length !== actual.length || promised.some((entry, i) => entry !== actual[i])) {
+      return refuse("not_single_site", "the edit changes how the code around it parses, not only that place.");
+    }
+  }
+  const delta = mutated.length - fileBytes.length;
+  const fn = target.function.bytes;
+  return {
+    ok: true,
+    plan: {
+      operator: EDIT_OPERATOR.id,
+      site: { bytes: { start, end }, lines: { start: lineOf(fileBytes, start), end: lineOf(fileBytes, end - 1) } },
+      original_text: edit.original_text,
+      replacement_text: edit.replacement_text,
+      original_site_sha256: sha256Hex(fileBytes.subarray(start, end)),
+      mutated,
+      mutated_file_sha256: sha256Hex(mutated),
+      mutated_function_sha256: sha256Hex(mutated.subarray(fn.start, fn.end + delta)),
+      parses,
+      diff: unifiedFileDiff(repoPath, text, mutatedText)
+    }
+  };
+}
+
+/** Plan again the fault a run recorded, from the record alone: by its operator, or by its own edit. */
+export function replanFromRecord(fileBytes: Buffer, target: TargetDescription, repoPath: string, record: Pick<FaultRecord, "operator" | "site" | "original_text" | "replacement_text">): FaultPlanResult {
+  if (record.operator.id === EDIT_OPERATOR.id) {
+    return planEdit(fileBytes, target, repoPath, { start: record.site.bytes.start, end: record.site.bytes.end, original_text: record.original_text, replacement_text: record.replacement_text });
+  }
+  return planFault(fileBytes, target, repoPath, record.operator.id, record.site.bytes.start);
+}
+
 /** The deterministic record of a planned fault. */
 export function faultRecordOf(
   plan: FaultPlan,
@@ -268,7 +438,7 @@ export function faultRecordOf(
     file: ctx.file,
     file_sha256: ctx.file_sha256,
     function_sha256: ctx.function_sha256,
-    operator: { id: plan.operator, version: FAULT_OPERATORS[plan.operator].version },
+    operator: { id: plan.operator, version: plan.operator === EDIT_OPERATOR.id ? EDIT_OPERATOR.version : FAULT_OPERATORS[plan.operator].version },
     rationale: ctx.rationale,
     site: plan.site,
     original_text: plan.original_text,

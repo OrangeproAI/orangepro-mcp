@@ -15,7 +15,7 @@ import {
   type CandidateVerdict,
   type GenerationRequest
 } from "./contracts/candidate.js";
-import { planFault, type FaultRecord } from "./contracts/faultRecord.js";
+import { EDIT_OPERATOR, replanFromRecord, type FaultRecord } from "./contracts/faultRecord.js";
 import { newRunId, recordBytes, recordSha256, sha256Hex, verifyRunFolder, writeFileAtomic, writeRunManifest } from "./contracts/io.js";
 import { checkOracle, type Oracle } from "./contracts/oracle.js";
 import { FAULT_CLASSIFIER_VERSION, RUN_PROFILE_VERSION, type Classification, type ObservedTest, type RunProfile, type StageName, type StageObservation } from "./contracts/receipt.js";
@@ -172,6 +172,16 @@ export function loadFaultRun(root: string, fromRun: string): FaultRun {
     if (t) counts[stage] = { executed: t.executed, passed: t.passed, failed: t.failed, pending: t.pending };
   }
   const fault = readJson(join(dir, "fault-record.json")) as FaultRecord;
+  // An approval supplied with a candidate was accepted for these exact bytes; any change since then stops here.
+  const supplied = (readJson(join(dir, "run-profile.json")) as RunProfile).supplied_approval;
+  if (supplied) {
+    const witnessFile = join(dir, "inputs", "witness.cjs");
+    const oracleNow = sha256Hex(readFileSync(join(dir, "oracle.json")));
+    const witnessNow = existsSync(witnessFile) ? sha256Hex(readFileSync(witnessFile)) : "";
+    if (oracleNow !== supplied.oracle_sha256 || witnessNow !== supplied.witness_sha256) {
+      refuse("fault_run_invalid", `in ${fromRun} the expected behavior or its witness is not what was approved (sha256 differs from the approval recorded in the run profile).`);
+    }
+  }
   return {
     faultKey: faultKeyOf(fault),
     dir,
@@ -207,7 +217,21 @@ export function globMatches(pattern: string, path: string): boolean {
 }
 
 /** The selected test files as the checkout holds them, each checked to be a regular file of the checkout with the fault run's bytes. */
-export function selectedFiles(run: FaultRun, sourceRoot: string): Array<{ path: string; sha256: string; bytes: Buffer }> {
+export function selectedFiles(run: FaultRun, sourceRoot: string, addTo?: string | null): Array<{ path: string; sha256: string; bytes: Buffer }> {
+  // A whole-suite-only fault run selected no test file: the caller names the one existing test file the new test is added to.
+  if (run.profile.selected_tests.length === 0) {
+    if (!addTo) return refuse("fault_run_invalid", "this fault run selected no test file (it ran the whole suite alone): name the existing test file the new test is added to with --add-to.");
+    const allowed = allowedPaths(run.fixtureBytes);
+    const abs = join(sourceRoot, addTo);
+    const regular = insideRepoPath(addTo) && existsSync(abs) && lstatSync(abs).isFile() && realInside(sourceRoot, abs);
+    if (!regular || !allowed.patterns.some((p) => globMatches(p, addTo)) || allowed.never.some((p) => globMatches(p, addTo))) {
+      return refuse("fault_run_invalid", `${addTo} is not an existing test file the fixture allows a patch to touch.`);
+    }
+    if (!run.originalSelected.some((test) => test.file === addTo)) return refuse("fault_run_invalid", `${addTo} ran no test in the fault run's whole-suite run, so a test added to it would not be part of the suite.`);
+    const bytes = readFileSync(abs);
+    return [{ path: addTo, sha256: sha256Hex(bytes), bytes }];
+  }
+  if (addTo) return refuse("fault_run_invalid", "--add-to is only for a fault run that selected no test file; this one names its test files.");
   return run.profile.selected_tests.map((test) => {
     const abs = join(sourceRoot, test.path);
     const regular = insideRepoPath(test.path) && existsSync(abs) && lstatSync(abs).isFile() && realInside(sourceRoot, abs);
@@ -222,9 +246,9 @@ export function selectedFiles(run: FaultRun, sourceRoot: string): Array<{ path: 
   });
 }
 
-const RULES = (run: FaultRun): string[] => [
+const RULES = (run: FaultRun, hosts: string[]): string[] => [
   "Write exactly one new test: one it(…) call, added to one of the selected test files. Do not change, move or remove any existing line: the patch only adds lines.",
-  `Put everything the test needs inside that one it(…) call, next to the tests it belongs with (${run.profile.selected_tests.map((test) => test.path).join(", ")}), in the same style as its neighbours.`,
+  `Put everything the test needs inside that one it(…) call, next to the tests it belongs with (${hosts.join(", ")}), in the same style as its neighbours.`,
   "Go through the public entry point the oracle names, as the neighbouring tests do. Use only modules the file already loads.",
   "Assert the oracle's expected result. Never assert what the faulty code returns, and never read the code's own text: the fault is shown so you know what must be caught, not as an expected value.",
   `Change only what the test declares itself, and only direct members, one level and named in the code (local.name or local['name']), of a local it makes itself: an object or array literal, a function or class, Object.create(…), new Object() with no argument, or new of a built-in such as Error, Date, Map, Set, Array, URL or a typed array. Values from other calls (an app from express(), a handler's req or res) and anything from outside the test are read-only to it: never replace, stub or assign to ${run.record.identity.name}, anything it is defined on, or anything it uses. Never write, define or give an object the members stack, stackTraceLimit, prepareStackTrace, captureStackTrace or __proto__. Never use .only, .skip or .retries.`,
@@ -237,10 +261,10 @@ const RULES = (run: FaultRun): string[] => [
 ];
 
 /** The generation request for a fault run and a checkout. test-brief writes it; verify-test rebuilds it and requires the same bytes. */
-function buildGenerationRequest(run: FaultRun, sourceRoot: string): GenerationRequest {
-  const neighbours = selectedFiles(run, sourceRoot).map((file) => ({ path: file.path, sha256: file.sha256, text: file.bytes.toString("utf8") }));
+function buildGenerationRequest(run: FaultRun, sourceRoot: string, addTo?: string | null): GenerationRequest {
+  const neighbours = selectedFiles(run, sourceRoot, addTo).map((file) => ({ path: file.path, sha256: file.sha256, text: file.bytes.toString("utf8") }));
   const fault = run.faultRecord;
-  const first = run.profile.selected_tests[0]!.path;
+  const first = neighbours[0]!.path;
   return {
     version: GENERATION_REQUEST_VERSION,
     fault_run: { run_id: run.runId, manifest_sha256: run.manifestSha },
@@ -261,7 +285,7 @@ function buildGenerationRequest(run: FaultRun, sourceRoot: string): GenerationRe
     full_title_example: run.originalSelected[0]?.full_title ?? null,
     neighbours,
     allowed_paths: allowedPaths(run.fixtureBytes),
-    rules: RULES(run),
+    rules: RULES(run, neighbours.map((file) => file.path)),
     assertion_record_template: {
       version: ASSERTION_RECORD_VERSION,
       generation_request_sha256: "<sha256 of generation-request.json>",
@@ -288,16 +312,16 @@ export interface TestBriefResult {
   generation_request_sha256: string;
 }
 
-export function opTestBrief(root: string, opts: { from_run: string; source?: string }, deps: Pick<ProbeFaultDeps, "runId">): TestBriefResult {
+export function opTestBrief(root: string, opts: { from_run: string; source?: string; add_to?: string }, deps: Pick<ProbeFaultDeps, "runId">): TestBriefResult {
   refusingCommand = "test-brief";
   const run = loadFaultRun(root, opts.from_run);
   const sourceRoot = resolve(opts.source ?? root);
-  const request = buildGenerationRequest(run, sourceRoot);
+  const request = buildGenerationRequest(run, sourceRoot, opts.add_to);
   const runId = (deps.runId ?? newRunId)();
   const runDir = join(workspacePaths(root).dir, "proof-runs", runId);
   if (existsSync(runDir)) throw new Error(`${runDir} already exists.`);
   mkdirSync(runDir, { recursive: true });
-  writeFileAtomic(join(runDir, "fault-run.json"), recordBytes(tagged("test_brief", run, { source: opts.source ?? null })));
+  writeFileAtomic(join(runDir, "fault-run.json"), recordBytes(tagged("test_brief", run, { source: opts.source ?? null, ...(opts.add_to ? { add_to: opts.add_to } : {}) })));
   writeFileAtomic(join(runDir, "brief", "generation-request.json"), recordBytes(request));
   writeFileAtomic(join(runDir, "brief", "brief.md"), briefMarkdown(request, toWorkspaceRel(root, run.dir), toWorkspaceRel(root, runDir), opts.source ?? null));
   writeRunManifest(runDir, runId, ORANGEPRO_VERSION);
@@ -461,6 +485,8 @@ export function textControls(path: string, original: Buffer, fault: Buffer, plan
     faultText = Buffer.concat([fault.subarray(0, start), cond(`!${x}`, x), fault.subarray(faultOpEnd)]);
     originalSiteEnd = opEnd;
     faultSiteEnd = faultOpEnd;
+  } else if (plan.operator === EDIT_OPERATOR.id) {
+    return editControls(path, original, fault, start, end);
   } else {
     return null;
   }
@@ -470,6 +496,68 @@ export function textControls(path: string, original: Buffer, fault: Buffer, plan
   if (!sameShape(path, original, start, originalSiteEnd, originalText, start + originalCond)) return null;
   if (!sameShape(path, fault, start, faultSiteEnd, faultText, start + faultCond)) return null;
   return { originalText, faultText };
+}
+
+/**
+ * The text controls of a fault given as its own edit. The site is the smallest expression that holds
+ * the whole edit and can stand inside a conditional without changing what the kept version does; each
+ * enclosing expression inside the function is tried in turn. Both versions are written in parentheses.
+ * Null when no expression qualifies.
+ */
+function editControls(path: string, original: Buffer, fault: Buffer, start: number, end: number): { originalText: Buffer; faultText: Buffer } | null {
+  const text = original.toString("utf8");
+  const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+  const charStart = original.subarray(0, start).toString("utf8").length;
+  const charEnd = original.subarray(0, end).toString("utf8").length;
+  const delta = fault.length - original.length;
+  // Innermost first: every node that holds the whole edit.
+  const holders: ts.Node[] = [];
+  const descend = (node: ts.Node): void => {
+    ts.forEachChild(node, (child) => {
+      if (child.getStart(source) <= charStart && charEnd <= child.end) {
+        holders.unshift(child);
+        descend(child);
+      }
+    });
+  };
+  descend(source);
+  const byte = (charIndex: number): number => Buffer.byteLength(text.slice(0, charIndex), "utf8");
+  const cond = (other: string, kept: string): Buffer => Buffer.from(`(0 ? (${other}) : 1 ? (${kept}) : (${other}))`, "utf8");
+  for (const node of holders) {
+    // Expressions only: the search ends at the statement that holds the edit.
+    if (ts.isBlock(node) || (node.kind >= ts.SyntaxKind.FirstStatement && node.kind <= ts.SyntaxKind.LastStatement)) break;
+    if (!standsInConditional(node)) continue;
+    const from = byte(node.getStart(source));
+    const to = byte(node.end);
+    const faultTo = to + delta;
+    if (faultTo < from) continue;
+    const o = original.subarray(from, to).toString("utf8");
+    const r = fault.subarray(from, faultTo).toString("utf8");
+    const originalText = Buffer.concat([original.subarray(0, from), cond(r, o), original.subarray(to)]);
+    const faultText = Buffer.concat([fault.subarray(0, from), cond(o, r), fault.subarray(faultTo)]);
+    if (!parsesAs(path, originalText.toString("utf8")) || !parsesAs(path, faultText.toString("utf8"))) continue;
+    if (!sameShape(path, original, from, to, originalText, from + (originalText.length - original.length) + (to - from))) continue;
+    if (!sameShape(path, fault, from, faultTo, faultText, from + (faultText.length - fault.length) + (faultTo - from))) continue;
+    return { originalText, faultText };
+  }
+  return null;
+}
+
+/**
+ * Whether putting this node inside `(… ? … : …)` keeps what it does. Not when it is written to, deleted,
+ * or called as a method (the call would lose its `this`), and not in the middle of an optional chain.
+ * Places where a conditional cannot be written at all fail the parse and shape checks instead.
+ */
+function standsInConditional(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) return false;
+  if ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) && (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken)) return false;
+  if (ts.isDeleteExpression(parent) || ts.isTypeOfExpression(parent)) return false;
+  if ((ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === node) return false;
+  if ((ts.isCallExpression(parent) || ts.isTaggedTemplateExpression(parent)) && (ts.isCallExpression(parent) ? parent.expression : parent.tag) === node && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) || node.kind === ts.SyntaxKind.SuperKeyword)) return false;
+  if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent) || ts.isCallExpression(parent) || ts.isNonNullExpression(parent)) && parent.expression === node && (parent.flags & ts.NodeFlags.OptionalChain) !== 0) return false;
+  return true;
 }
 
 /**
@@ -515,6 +603,8 @@ export interface CheckedBrief {
   requestBytes: Buffer;
   briefMdBytes: Buffer;
   requestSha: string;
+  /** The test file the brief named for the new test, when the fault run selected none. */
+  addTo: string | null;
 }
 
 /** A test-brief run for this fault run: its manifest verifies, and its two files are the bytes test-brief writes for this fault run and checkout. */
@@ -525,16 +615,17 @@ export function checkBrief(root: string, run: FaultRun, brief: string, sourceRoo
   const requestPath = join(briefDir, "brief", "generation-request.json");
   const briefTagPath = join(briefDir, "fault-run.json");
   if (!existsSync(requestPath) || !existsSync(briefTagPath)) refuse("brief_invalid", `${brief} is not a test-brief run.`);
-  const briefTag = readJson(briefTagPath) as { kind?: string; fault_run?: { manifest_sha256?: string }; source?: string | null };
+  const briefTag = readJson(briefTagPath) as { kind?: string; fault_run?: { manifest_sha256?: string }; source?: string | null; add_to?: string };
+  const addTo = typeof briefTag.add_to === "string" ? briefTag.add_to : null;
   if (briefTag.kind !== "test_brief" || briefTag.fault_run?.manifest_sha256 !== run.manifestSha) refuse("brief_invalid", "the brief was written for another fault run.");
   const requestBytes = readFileSync(requestPath);
-  const rebuilt = buildGenerationRequest(run, sourceRoot);
+  const rebuilt = buildGenerationRequest(run, sourceRoot, addTo);
   const briefMdBytes = existsSync(join(briefDir, "brief", "brief.md")) ? readFileSync(join(briefDir, "brief", "brief.md")) : Buffer.alloc(0);
   const briefMdRebuilt = Buffer.from(briefMarkdown(rebuilt, toWorkspaceRel(root, run.dir), toWorkspaceRel(root, briefDir), briefTag.source ?? null), "utf8");
   if (!requestBytes.equals(recordBytes(rebuilt)) || !briefMdBytes.equals(briefMdRebuilt)) {
     refuse("brief_invalid", "the brief is not the one test-brief writes for this fault run and this checkout (edited, or written by another version).");
   }
-  return { briefDir, briefCheck, requestBytes, briefMdBytes, requestSha: sha256Hex(requestBytes) };
+  return { briefDir, briefCheck, requestBytes, briefMdBytes, requestSha: sha256Hex(requestBytes), addTo };
 }
 
 export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeFaultDeps): VerifyTestResult {
@@ -542,7 +633,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   // ── everything that can be checked before a copy exists ──
   const run = loadFaultRun(root, opts.from_run);
   const sourceRoot = resolve(opts.source ?? root);
-  const { briefDir, briefCheck, requestBytes, briefMdBytes, requestSha } = checkBrief(root, run, opts.brief, sourceRoot);
+  const { briefDir, briefCheck, requestBytes, briefMdBytes, requestSha, addTo } = checkBrief(root, run, opts.brief, sourceRoot);
 
   const recordCheck = checkAssertionRecord(opts.assertion);
   if (!recordCheck.ok) return refuse("assertion_invalid", recordCheck.message);
@@ -569,7 +660,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   if (!allowed.patterns.some((p) => globMatches(p, patch.path)) || allowed.never.some((p) => globMatches(p, patch.path))) {
     refuse("candidate_invalid", `${patch.path} is not a test file the fixture allows a patch to touch.`);
   }
-  const selected = selectedFiles(run, sourceRoot);
+  const selected = selectedFiles(run, sourceRoot, addTo);
   const target = selected.find((file) => file.path === patch.path);
   if (!target) refuse("candidate_invalid", `${patch.path} is not one of the test files the fault run selected; the new test goes beside them.`);
   const applied = applyAdditivePatch(target!.bytes, patch);
@@ -610,7 +701,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   const bound = tsjs?.bound;
   if (!tsjs || !bound) return refuse("fault_mismatch", `${run.record.identity.symbol_id} is not changed by its exact position any more.`);
   const fileBytes = readFileSync(tsjs.targetAbs);
-  const replanned = planFault(fileBytes, bound.target, run.record.identity.file, run.faultRecord.operator.id, run.faultRecord.site.bytes.start);
+  const replanned = replanFromRecord(fileBytes, bound.target, run.record.identity.file, run.faultRecord);
   if (!replanned.ok || replanned.plan.mutated_file_sha256 !== run.faultRecord.mutated_file_sha256 || sha256Hex(Buffer.from(replanned.plan.diff, "utf8")) !== run.faultRecord.diff.sha256) {
     return refuse("fault_mismatch", "the fault planned now is not the fault the run recorded (bytes or diff differ).");
   }
@@ -646,7 +737,8 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
           fault_record_sha256: run.faultRecordSha,
           target_record_sha256: run.profile.target_record_sha256,
           brief_run: { run_id: briefCheck.ok ? briefCheck.manifest.run_id : null, manifest_sha256: sha256Hex(readFileSync(join(briefDir, "MANIFEST.json"))) },
-          generation_request_sha256: requestSha
+          generation_request_sha256: requestSha,
+          ...(addTo ? { host_test: { path: selected[0]!.path, sha256: selected[0]!.sha256 } } : {})
         })
       )
     );
@@ -671,7 +763,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
         bound,
         plan,
         tmp,
-        mustHold: run.profile.selected_tests
+        mustHold: selected.map((file) => ({ path: file.path, sha256: file.sha256 }))
       })
     );
     // The patched test file goes into both copies as OrangePro built it; each copy then differs from before in that file only.

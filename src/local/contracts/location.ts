@@ -25,6 +25,11 @@ export interface LocationEdit {
   end: number;
   original_sha256: string;
   replacement: string;
+  /**
+   * The sha256 of the whole file with the edit applied, when the edit is not one of the proof script's
+   * own token changes. The script then writes the edit only if it produces exactly that file.
+   */
+  planned_sha256?: string;
 }
 
 export interface SourceLocation {
@@ -107,6 +112,7 @@ export function validateLocation(value: unknown): LocationResult {
     if (!isOffset(edit.start) || !isOffset(edit.end) || !HEX64.test(String(edit.original_sha256)) || typeof edit.replacement !== "string") {
       return fail("an edit needs start, end, original_sha256 and replacement.");
     }
+    if (edit.planned_sha256 !== undefined && !HEX64.test(String(edit.planned_sha256))) return fail("an edit's planned_sha256 must be a lowercase hex sha256.");
     if (!(loc.body.start < edit.start && edit.start < edit.end && edit.end < loc.body.end - 1)) return fail("an edit must lie strictly inside the body.");
   }
   return { ok: true, location: loc as SourceLocation };
@@ -145,14 +151,10 @@ export function locationArgs(loc: SourceLocation): string[] {
 
 /** The script's arguments for an edit inside the body, appended after `locationArgs`. */
 export function locationEditArgs(edit: LocationEdit): string[] {
-  return [
-    "--bound-edit-start",
-    String(edit.start),
-    "--bound-edit-end",
-    String(edit.end),
-    "--bound-edit-expect-sha256",
-    edit.original_sha256,
-    "--bound-edit-replacement",
-    edit.replacement
-  ];
+  const place = ["--bound-edit-start", String(edit.start), "--bound-edit-end", String(edit.end), "--bound-edit-expect-sha256", edit.original_sha256];
+  // A planned edit travels in hex, so its text can start with dashes or hold any byte.
+  if (edit.planned_sha256 !== undefined) {
+    return [...place, "--bound-edit-replacement-hex", Buffer.from(edit.replacement, "utf8").toString("hex") || "-", "--bound-edit-planned-sha256", edit.planned_sha256];
+  }
+  return [...place, "--bound-edit-replacement", edit.replacement];
 }

@@ -42,7 +42,9 @@ import { autoProve, isNotExercised, isReachUnknown, isRoastSurvivor } from "./au
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
-import { proposeFault, proposeOracle, renderProposedOracle, sourceRootFor } from "./pluginCalls.js";
+import { MAX_CANDIDATES, proposeFaults, proposeOracle, renderProposedOracle, sourceRootFor, writeProposedOracle } from "./pluginCalls.js";
+import { checkFaultEditInput, type FaultEditInput } from "./contracts/faultRecord.js";
+import { opProbeCandidates, renderCandidates, scopeWords, suppliedOracle as suppliedOracleOf } from "./faultCandidates.js";
 import { addonStatusFor, addonStatusLine } from "./plugins.js";
 import { opTestBrief, opVerifyTest, renderTestBrief, renderVerifyTest } from "./candidateTest.js";
 import { opExportTests, renderExportTests } from "./exportTests.js";
@@ -169,11 +171,11 @@ Usage:
   opro changed-targets --base <sha> --merged <sha> [--range] [--limit 3] [--json]
     # read-only: maps the lines one merged change touched to exact functions and prints a target record for each selected one;
     # needs the graph, HEAD and a clean checkout at the merged commit; --range accepts a base that is not its first parent
-  opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <fixture-manifest.json> --tests <file>[,<file>…] --witness <file> [--full-suite] [--rationale <text>] [--allow-proposed-oracle] [--json]
+  opro probe-fault --target-record <file> (--fault <operator>@<byte> | --fault-edit <file.json>) --oracle <file> --fixture <fixture-manifest.json> (--tests <file>[,<file>…] | --full-suite) --witness <file> [--full-suite] [--max-candidates <n>] [--accept-supplied-approvals] [--rationale <text>] [--allow-proposed-oracle] [--json]
     # one exact fault inside a bound target, run against the named existing tests on an original and a faulty copy,
     # every command inside the fixture's container (docker, network off); operators: rounding_floor_ceil, negation_removal;
     # needs an installed checkout; writes .orangepro/proof-runs/<run-id>/ and prints caught / missed / no claim
-  opro test-brief --from-run <probe-fault run folder> [--source <checkout>] [--json]
+  opro test-brief --from-run <probe-fault run folder> [--add-to <test file>] [--source <checkout>] [--json]
     # for a fault the existing tests missed: writes brief.md and generation-request.json for a coding agent to write one test
   opro verify-test --from-run <probe-fault run folder> --brief <test-brief run folder> --candidate <patch> --assertion <assertion-record.json> [--source <checkout>] [--json]
     # the new test, as a patch that only adds one it(…) call, on the original, the same fault, two text controls, restored,
@@ -853,32 +855,105 @@ async function main(): Promise<number> {
         const targetRecord = readTargetRecordFlag(cwd, need("target-record"));
         const given = (flag: string): boolean => typeof flags[flag] === "string" && (flags[flag] as string).trim() !== "";
         const addonSource = sourceRootFor(cwd, typeof flags.source === "string" ? flags.source : undefined);
-        const proposedFault = given("fault") ? null : await proposeFault(cwd, addonSource, targetRecord);
-        if (!given("oracle") && (given("fault") || proposedFault)) {
-          const proposedOracle = await proposeOracle(cwd, addonSource, workspacePaths(cwd).dir, targetRecord);
-          if (proposedOracle) {
-            if (json) printJson({ result: "needs_approval", ...proposedOracle });
-            else for (const line of renderProposedOracle(proposedOracle)) out(line);
+        if (given("fault") && given("fault-edit")) throw new Error("probe-fault takes --fault or --fault-edit, not both");
+        const personFault = given("fault") || given("fault-edit");
+        let personEdit: FaultEditInput | undefined;
+        if (given("fault-edit")) {
+          const checked = checkFaultEditInput(readJson("fault-edit"));
+          if (!checked.ok) throw new ProbeFaultRefusal("invalid_fault_spec", checked.message);
+          personEdit = checked.input;
+        }
+        let cap: number | null = null;
+        if (flags["max-candidates"] !== undefined) {
+          const n = Number(flags["max-candidates"]);
+          if (!Number.isInteger(n) || n < 1 || n > MAX_CANDIDATES) throw new Error(`--max-candidates must be a whole number from 1 to ${MAX_CANDIDATES}`);
+          if (personFault) throw new Error("--max-candidates applies only when an add-on proposes the faults; leave out --fault and --fault-edit");
+          cap = n;
+        }
+        const acceptApprovals = asBool(flags["accept-supplied-approvals"], false);
+        // With --full-suite, --tests may be left out: the whole suite is run alone.
+        const selectedTests = (): string[] => (asBool(flags["full-suite"], false) && !given("tests") ? [] : need("tests").split(","));
+        const proposals = personFault ? [] : await proposeFaults(cwd, addonSource, targetRecord);
+        const runOptions = () => ({
+          fixture_bytes: readFileSync(resolve(cwd, need("fixture"))),
+          tests: selectedTests(),
+          full_suite: asBool(flags["full-suite"], false),
+          source: typeof flags.source === "string" ? flags.source : undefined
+        });
+        const needsApproval = (candidate: (typeof proposals)[number], index: number | null): boolean => {
+          const files = writeProposedOracle(cwd, workspacePaths(cwd).dir, targetRecord, candidate);
+          if (!files) return false;
+          if (json) printJson({ result: "needs_approval", ...(index === null ? {} : { candidate: index }), ...files });
+          else for (const line of renderProposedOracle(files)) out(line);
+          return true;
+        };
+
+        if (cap === null) {
+          const proposedFault = proposals[0] ?? null;
+          let supplied: ReturnType<typeof suppliedOracleOf> | null = null;
+          if (!given("oracle") && (personFault || proposedFault)) {
+            if (proposedFault?.oracle !== undefined) {
+              if (acceptApprovals) supplied = suppliedOracleOf(proposedFault);
+              else if (needsApproval(proposedFault, null)) return 0;
+            }
+            if (!supplied) {
+              const proposedOracle = await proposeOracle(cwd, addonSource, workspacePaths(cwd).dir, targetRecord);
+              if (proposedOracle) {
+                if (json) printJson({ result: "needs_approval", ...proposedOracle });
+                else for (const line of renderProposedOracle(proposedOracle)) out(line);
+                return 0;
+              }
+            }
+          }
+          const faultEdit = personEdit ?? proposedFault?.edit;
+          res = opProbeFault(
+            cwd,
+            {
+              target_record: targetRecord,
+              fault: faultEdit ? "" : (proposedFault?.fault ?? need("fault")),
+              ...(faultEdit ? { fault_edit: faultEdit } : {}),
+              oracle: supplied?.oracle ?? readJson("oracle"),
+              fixture_bytes: readFileSync(resolve(cwd, need("fixture"))),
+              tests: selectedTests(),
+              witness_bytes: supplied?.witness_bytes ?? readFileSync(resolve(cwd, need("witness"))),
+              full_suite: asBool(flags["full-suite"], false),
+              source: typeof flags.source === "string" ? flags.source : undefined,
+              rationale: typeof flags.rationale === "string" ? flags.rationale : proposedFault?.reason,
+              ...(proposedFault?.addon ? { addon: proposedFault.addon } : {}),
+              ...(supplied ? { supplied_approval: { via: supplied.via } } : {}),
+              allow_proposed_oracle: asBool(flags["allow-proposed-oracle"], false)
+            },
+            { clock: systemClock }
+          );
+        } else {
+          // Ranked candidates: tried in the add-on's order, up to the caller's cap, until the first one the tests miss.
+          if (proposals.length === 0) throw new Error("--max-candidates needs an add-on that proposes faults; none answered");
+          const fullSuite = asBool(flags["full-suite"], false);
+          if (!json) out(`Trying up to ${Math.min(cap, proposals.length)} of ${proposals.length} proposed faults, in the order given: at most that many probe-fault runs. Stops at the first one ${scopeWords(fullSuite)}.`);
+          const outcome = opProbeCandidates(
+            cwd,
+            {
+              target_record: targetRecord,
+              proposals,
+              cap,
+              ...(given("oracle") ? { person_oracle: { oracle: readJson("oracle"), witness_bytes: readFileSync(resolve(cwd, need("witness"))) } } : {}),
+              accept_supplied_approvals: acceptApprovals,
+              run: runOptions()
+            },
+            { clock: systemClock }
+          );
+          if (outcome.kind === "needs_approval") {
+            if (json) printJson({ result: "needs_approval", candidate: outcome.candidate, ...outcome.files });
+            else for (const line of renderProposedOracle(outcome.files)) out(line);
             return 0;
           }
+          if (json) printJson(outcome.chosen ? { ...outcome.chosen, candidates: outcome.summary } : { result: "no_candidate_survived", candidates: outcome.summary });
+          else {
+            for (const line of renderCandidates(outcome)) out(line);
+            if (outcome.chosen) for (const line of renderProbeFault(outcome.chosen)) out(line);
+          }
+          return 0;
         }
-        res = opProbeFault(
-          cwd,
-          {
-            target_record: targetRecord,
-            fault: proposedFault?.fault ?? need("fault"),
-            oracle: readJson("oracle"),
-            fixture_bytes: readFileSync(resolve(cwd, need("fixture"))),
-            tests: need("tests").split(","),
-            witness_bytes: readFileSync(resolve(cwd, need("witness"))),
-            full_suite: asBool(flags["full-suite"], false),
-            source: typeof flags.source === "string" ? flags.source : undefined,
-            rationale: typeof flags.rationale === "string" ? flags.rationale : proposedFault?.reason,
-            ...(proposedFault?.addon ? { addon: proposedFault.addon } : {}),
-            allow_proposed_oracle: asBool(flags["allow-proposed-oracle"], false)
-          },
-          { clock: systemClock }
-        );
       } catch (e) {
         if (json && (e instanceof ProofRefusalError || e instanceof ProbeFaultRefusal)) {
           printJson({ error: e.message, refusal: e.code });
@@ -1012,7 +1087,7 @@ async function main(): Promise<number> {
       };
       try {
         if (command === "test-brief") {
-          const res = opTestBrief(cwd, { from_run: need("from-run"), source: typeof flags.source === "string" ? flags.source : undefined }, {});
+          const res = opTestBrief(cwd, { from_run: need("from-run"), source: typeof flags.source === "string" ? flags.source : undefined, ...(typeof flags["add-to"] === "string" ? { add_to: flags["add-to"] } : {}) }, {});
           if (json) printJson(res);
           else for (const line of renderTestBrief(res)) out(line);
           return 0;

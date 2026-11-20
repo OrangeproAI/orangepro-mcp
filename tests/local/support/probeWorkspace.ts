@@ -13,7 +13,8 @@ import { boundaryFailures, containerUser, dockerExecutor, dockerRunArgs, resolve
 import { opChangedTargets } from "../../../src/local/changedTargets.js";
 import { canonicalJson, recordBytes, recordSha256, verifyRunFolder, writeRunManifest } from "../../../src/local/contracts/io.js";
 import { checkOracle, type Oracle } from "../../../src/local/contracts/oracle.js";
-import { faultRecordOf, parseFaultSpec, planFault } from "../../../src/local/contracts/faultRecord.js";
+import { faultRecordOf, parseFaultSpec, planFault, type FaultEditInput } from "../../../src/local/contracts/faultRecord.js";
+import { locationOf } from "../../../src/local/contracts/location.js";
 import { describeTarget, type TargetRecord } from "../../../src/local/contracts/targetRecord.js";
 import { classifyFaultRun, containerFileUrl, failedAtAssertion, faultSpanCount, mochaPlanOf, opProbeFault, ProbeFaultRefusal, type ProbeFaultOptions, type ProbeFaultResult } from "../../../src/local/faultProbe.js";
 import { opAnalyze, opInit, ProofRefusalError, type DynamicProofRunner } from "../../../src/local/operations.js";
@@ -299,4 +300,16 @@ export function readRun(w: Workspace, result: ProbeFaultResult, rel: string): an
 
 export function trackedChanges(repo: string): string {
   return git(repo, "status", "--porcelain", "--untracked-files=no");
+}
+
+/** A fault given as its own edit, on `api.seconds` in API_AFTER: the engine's own location for the target, with the edit, and the original text. */
+export function editInput(original: string, replacement: string, after = "api.seconds"): FaultEditInput {
+  const bytes = Buffer.from(API_AFTER);
+  const described = describeTarget(bytes, "api.seconds");
+  if (!described.ok) throw new Error("fixture error");
+  const located = locationOf("lib/api.js", described.target);
+  if (!located.ok) throw new Error(located.reason);
+  const start = API_AFTER.indexOf(original, API_AFTER.indexOf(after));
+  if (start < 0) throw new Error(`fixture has no ${original}`);
+  return { location: { ...located.location, edit: { start, end: start + original.length, original_sha256: sha256(original), replacement } }, original_text: original };
 }

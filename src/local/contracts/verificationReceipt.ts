@@ -59,6 +59,12 @@ export interface VerificationReceipt {
   tool: { name: string; version: string; build_sha256: string | null };
   /** Present only when an add-on's answer was used in the fault run. */
   addon?: import("../pluginApi.js").AddonProvenance;
+  /** Present only when the fault was one of several proposed candidates. `runs_to_first_hit` counts test runs, never refusals. */
+  candidates?: import("./receipt.js").CandidateTrail & { runs_to_first_hit: number };
+  /** Present only when the approval of the expected behavior was supplied through an add-on. */
+  supplied_approval?: import("./receipt.js").SuppliedApproval;
+  /** Present only when an add-on drafted the expected behavior: its origin, beside the person's approval. */
+  oracle_draft?: import("./receipt.js").OracleDraft & { approved_by: string | null };
   run_ids: { fault: string; brief: string; verify: string; export: string };
   run_manifests: Array<{ run_id: string; sha256: string }>;
   source: {

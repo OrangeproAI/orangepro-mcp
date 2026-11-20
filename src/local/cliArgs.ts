@@ -17,6 +17,9 @@ export interface ParsedArgs {
  * is preserved as a positional rather than swallowed as the flag's value.
  */
 export const VALUE_FLAGS = new Set([
+  "add-to",
+  "fault-edit",
+  "max-candidates",
   "agent-pass",
   "assertion",
   "brief",

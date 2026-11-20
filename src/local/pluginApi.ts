@@ -5,7 +5,7 @@
 // a person's input, and only the engine's own runs set an evidence tier or a verdict.
 
 /** Same major version: the add-on is used. A different major: it is not. */
-export const PLUGIN_API_VERSION = "1.0.0" as const;
+export const PLUGIN_API_VERSION = "1.1.0" as const;
 
 /** The one package name the engine looks for. */
 export const ADDON_PACKAGE = "@orangepro/mcp-pro" as const;
@@ -33,15 +33,57 @@ export interface FaultSelectorContext {
   operators: readonly string[];
 }
 
-export interface FaultProposal {
-  /** `<operator>@<byte offset>`, exactly as `--fault` takes it. */
-  fault: string;
-  /** Why this fault, in plain words. */
-  reason: string;
+/** A byte span, end exclusive. */
+export interface AddonByteSpan {
+  start: number;
+  end: number;
 }
 
+/**
+ * The engine's one exact-position format (`orangepro.location.v1`), written out here so
+ * this file imports nothing. Every span and hash is read from the target record.
+ */
+export interface AddonSourceLocation {
+  version: "orangepro.location.v1";
+  file: string;
+  file_sha256: string;
+  route: "bound" | "position";
+  name: string;
+  targets?: string[];
+  statement: AddonByteSpan;
+  function: AddonByteSpan;
+  function_sha256: string;
+  body: AddonByteSpan;
+  /** The change, strictly inside the body. */
+  edit?: { start: number; end: number; original_sha256: string; replacement: string; planned_sha256?: string };
+}
+
+/** A fault as its own edit (interface 1.1): the target's location with its `edit`, and the original text beside it. */
+export interface FaultEditProposal {
+  location: AddonSourceLocation;
+  original_text: string;
+}
+
+export interface FaultProposal {
+  /** `<operator>@<byte offset>`, exactly as `--fault` takes it. Give this or `edit`. */
+  fault?: string;
+  /** Interface 1.1: the fault as its own edit, exactly as `--fault-edit` takes it. */
+  edit?: FaultEditProposal;
+  /** Why this fault, in plain words. */
+  reason: string;
+  /** Interface 1.1: this candidate's own expected behavior (`oracle.json`), with its witness script's text. */
+  oracle?: unknown;
+  witness_source?: string;
+}
+
+/**
+ * What a run showed about a fault and the tests that ran on it (interface 1.1). The four
+ * readings are never merged; only `ran_but_missed` says the tests miss the fault.
+ */
+export type ProofOutcome = "caught" | "ran_but_missed" | "never_ran" | "cant_tell";
+
 export interface FaultSelector {
-  /** Ordered, best first. The engine checks the first one as it checks `--fault`. */
+  /** Ordered, best first. The engine checks each one it tries as it checks `--fault`; it tries the first, or as many as the caller allows. */
   proposeFaults(context: FaultSelectorContext): Promise<FaultProposal[]> | FaultProposal[];
 }
 

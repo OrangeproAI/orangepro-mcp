@@ -14,7 +14,7 @@ import type { StageName, StageObservation } from "../../src/local/contracts/rece
 import type { ContainerExecutor, ContainerRequest } from "../../src/local/boundary.js";
 import { failedAtAssertion, frameColumn, frameLocation, ProbeFaultRefusal } from "../../src/local/faultProbe.js";
 import type { DynamicProofRunner } from "../../src/local/operations.js";
-import { deps, hostExecutor, OFFSETS, PASSING_TESTS, passingProbe, probe, script, sha256, trackedChanges, workspace, type Workspace } from "./support/probeWorkspace.js";
+import { deps, editInput, hostExecutor, OFFSETS, PASSING_TESTS, passingProbe, probe, script, sha256, trackedChanges, workspace, type Workspace } from "./support/probeWorkspace.js";
 
 const ROUNDING = `rounding_floor_ceil@${OFFSETS.floorInSeconds}`;
 const NEGATION = `negation_removal@${OFFSETS.bangInSeconds}`;
@@ -203,6 +203,19 @@ describe("opro verify-test — the new test on the same fault", { timeout: 180_0
     // The stage after the unconfirmed rewrite never ran.
     expect(result.verdict.stages.map((ref) => ref.stage)).not.toContain("candidate_fault_text_control");
   });
+
+  it("verified_gap for a fault given as its own edit: replanned from the record alone, with text controls on the expression that holds the edit", () => {
+    const w = workspace();
+    const probed = probe(w, "", { full_suite: true, fault_edit: editInput("value / 1000", "(value + 600) / 1000") });
+    expect(probed.fault_record.operator).toEqual({ id: "edit", version: 1 });
+    const run = briefFor(w, probed);
+    const after = withTest(PASSING_TESTS, NEW_TEST);
+    const patch = candidate(PASSING_TESTS, after);
+    const result = verify(run, patch, recordFor(run, patch, after, ASSERT_ONE));
+    expect(result.verdict).toMatchObject({ result: "verified_gap", reason: null, other_failures_on_fault: [] });
+    expect(result.verdict.stages.map((ref) => ref.stage)).toEqual(expect.arrayContaining(["candidate_fault_text_control", "candidate_original_text_control", "candidate_restored"]));
+    expect(trackedChanges(w.repo)).toBe("");
+  }, 120_000);
 
   it("verified_gap: passes on the original (twice), fails at its declared line on the fault (twice), alone in the whole suite, holds both text controls, passes restored", () => {
     const run = survivedRun();
@@ -944,4 +957,33 @@ describe("the independent read of demo.7 (round 3)", { timeout: 180_000 }, () =>
     const docs = readFileSync(path.join(process.cwd(), "docs", "local-proof-kit.md"), "utf8").replace(/\s+/g, " ");
     for (const words of ["one level and named in the code", "a whole-suite count other than the fixture's baseline", "count as hooks only when the file does not declare", "used only when it parses exactly as the fault"]) expect(docs).toContain(words);
   });
+});
+
+describe("a whole-suite-only fault run (no selected test file)", () => {
+  it("probe-fault runs the whole suite alone; the brief names the file to add to; verify-test reaches a verdict", () => {
+    const w = workspace();
+    const probed = probe(w, ROUNDING, { tests: [], full_suite: true });
+    expect(probed.classification).toMatchObject({ classification: "survived_unverified", scope: "full_suite", reason: null, reached_by_selected_tests: "reached" });
+    expect(probed.classification.statement).toContain("The whole existing suite (2 tests) passed");
+    const profile = JSON.parse(readFileSync(path.join(w.repo, probed.run_dir, "run-profile.json"), "utf8"));
+    expect(profile.selected_tests).toEqual([]);
+    expect(profile.full_suite_argv).toBeNull();
+    expect(readdirSync(path.join(w.repo, probed.run_dir, "stages")).sort()).not.toContain("original_full_suite.json");
+    // No file to add to: refused by name. Then with the file named.
+    expect(messageOf(() => opTestBrief(w.repo, { from_run: probed.run_dir }, { runId: () => "run_brief_wso_0" }))).toMatch(/--add-to/);
+    expect(messageOf(() => opTestBrief(w.repo, { from_run: probed.run_dir, add_to: "lib/api.js" }, { runId: () => "run_brief_wso_1" }))).toMatch(/not an existing test file the fixture allows/);
+    const brief = opTestBrief(w.repo, { from_run: probed.run_dir, add_to: TEST_FILE }, { runId: () => "run_brief_wso_2" });
+    const run: Run = { w, faultRun: probed.run_dir, brief: brief.run_dir, requestSha: brief.generation_request_sha256 };
+    const after = withTest(PASSING_TESTS, NEW_TEST);
+    const patch = candidate(PASSING_TESTS, after);
+    const result = verify(run, patch, recordFor(run, patch, after, ASSERT_ONE));
+    expect(result.verdict).toMatchObject({ result: "verified_gap", reason: null });
+  }, 120_000);
+
+  it("a fault the whole suite catches is caught at whole-suite scope; without --full-suite a test file is still required", () => {
+    const w = workspace();
+    expect(probe(w, NEGATION, { tests: [], full_suite: true }).classification).toMatchObject({ classification: "caught_by_existing", scope: "full_suite" });
+    expect(refusalOf(() => probe(w, ROUNDING, { tests: [] }))).toBe("tests_invalid");
+    expect(messageOf(() => opTestBrief(w.repo, { from_run: probe(w, ROUNDING, { full_suite: true }).run_dir, add_to: TEST_FILE }, { runId: () => "run_brief_wso_3" }))).toMatch(/only for a fault run that selected no test file/);
+  }, 120_000);
 });
