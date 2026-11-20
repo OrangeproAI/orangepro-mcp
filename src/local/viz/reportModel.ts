@@ -20,9 +20,9 @@ import { byHandCounts, type ByHandRun, type ReportByHand } from "./byHand.js";
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 6;
+export const REPORT_DATA_VERSION = 7;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r16.1";
+export const REPORT_RENDERER_VERSION = "r17.1";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
@@ -409,6 +409,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
         { k: "Git history", v: prov.churnState === "complete" ? `Full: ${plural(prov.commitsScanned ?? 0, "commit", "commits")} over the last ${days} days` : `Incomplete (${prov.history}); change counts may be low` },
         { k: "Coverage", v: coverageFiles.length ? `${coverageFiles.join(", ")}: ${n(evidence.runtime)} functions executed` : "None found. Run your tests with coverage to add this evidence." },
         { k: "Tests", v: testsInput(data.scan.tests.total, links) },
+        ...(graph.analysis?.route_links ? [{ k: "Route links", v: routeLinksText(graph.analysis.route_links) }] : []),
         ...(input.addon ? [{ k: "Add-on", v: `${input.addon.name} ${input.addon.version} proposed: ${input.addon.used.join(", ")}. Its answers are proposals; OrangePro's own runs decide every result.` }] : [])
       ],
       counted: [
@@ -530,4 +531,21 @@ function rankedTotal(graph: LocalGraph, repoRoot: string, build: BehaviorReportB
 
 export function isReportModel(value: unknown): value is ReportModel {
   return Boolean(value) && typeof value === "object" && (value as ReportModel).version === REPORT_DATA_VERSION && Array.isArray((value as ReportModel).worklist);
+}
+
+/** Run details: what static route linking (J4) did. Counts only; a route link is Linked evidence, never proof. */
+function routeLinksText(r: NonNullable<NonNullable<LocalGraph["analysis"]>["route_links"]>): string {
+  const parts = [
+    `${n(r.linked_requests)} of ${n(r.requests)} test requests to an app's routes linked a test to ${n(r.links)} ${r.links === 1 ? "function" : "functions"}`
+  ];
+  const notLinked = [
+    r.no_route ? `${n(r.no_route)} matched no route` : "",
+    r.several_routes ? `${n(r.several_routes)} matched several routes or a wildcard` : "",
+    r.app_not_traced ? `${n(r.app_not_traced)} went to an app the test builds or that could not be traced` : "",
+    r.handler_not_mapped ? `${n(r.handler_not_mapped)} reached a handler that is not a counted function and calls none` : ""
+  ].filter(Boolean);
+  if (notLinked.length) parts.push(`Not linked: ${notLinked.join("; ")}`);
+  const unread = r.unknown_routes + r.unknown_mounts;
+  if (unread) parts.push(`${n(unread)} ${unread === 1 ? "route or mount is" : "routes or mounts are"} built at run time and could not be read`);
+  return `${parts.join(". ")}.`;
 }

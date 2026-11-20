@@ -386,7 +386,7 @@ const DETAILED_JS = String.raw`
   function listReason(r) {
     if (r.proofTimedOut) return r.reason;
     if (r.verb === "check" && r.readFirst) return "Read " + r.readFirst.split("/").pop() + " first: a test there may cover it.";
-    if (r.verb === "prove" && r.linkedTest && r.evidence === "linked") return r.linkedTest.split("/").pop() + " calls it; not yet proven to catch a break.";
+    if (r.verb === "prove" && r.linkedTest && r.evidence === "linked") return r.linkedTest.split("/").pop() + (r.linkedVia ? " reaches it " + r.linkedVia : " calls it") + "; not yet proven to catch a break.";
     return r.reason;
   }
   function testsCell(r) {
@@ -474,7 +474,7 @@ const DETAILED_JS = String.raw`
     P.push("Add a test for " + r.title + " (" + where + ") in " + M.repo.name + (M.repo.commit ? " at commit " + M.repo.commit.slice(0, 12) : "") + ".");
     if (r.facts && r.facts.length) P.push("Why it matters: " + r.facts.join(" "));
     if (r.verb === "check" && r.readFirst) P.push("First read " + r.readFirst + ". If a test there already calls " + r.title + " and checks its result, do not write a new one: strengthen that test if needed and prove it with the command below.");
-    else if (r.verb === "prove") P.push((r.linkedTest ? "The test " + r.linkedTest + " calls it" : "A test already runs it") + ". Check that it fails when " + r.title + " is broken; if it does not, add the assertion that is missing.");
+    else if (r.verb === "prove") P.push((r.linkedTest ? "The test " + r.linkedTest + (r.linkedVia ? " reaches it " + r.linkedVia : " calls it") : "A test already runs it") + ". Check that it fails when " + r.title + " is broken; if it does not, add the assertion that is missing.");
     else if (r.reason) P.push("Today: " + r.reason);
     if (slot && slot.state !== "not_drafted") {
       P.push("Test to write: " + slot.title + (slot.type ? " (" + slot.type + ")" : ""));
@@ -526,7 +526,7 @@ const DETAILED_JS = String.raw`
     if (r.fileLink) h += '<div class="box"><span class="tiny">Test file linked to its file</span>' + pathLink(r.fileLink, null) + "</div>";
     if (r.provenTest) h += '<div class="box"><span class="tiny">Test that catches a break</span>' + (r.provenTestPath ? pathLink(r.provenTestPath, null, r.provenTest) : '<span class="mono">' + brk(r.provenTest) + "</span>") + "</div>";
     if (r.readFirst) h += '<div class="box"><span class="tiny">Read before writing a new test</span>' + pathLink(r.readFirst, null) + "</div>";
-    if (r.linkedTest) h += '<div class="box"><span class="tiny">Test that calls it</span>' + pathLink(r.linkedTest, null) + "</div>";
+    if (r.linkedTest) h += '<div class="box"><span class="tiny">' + (r.linkedVia ? "Test that reaches it" : "Test that calls it") + "</span>" + pathLink(r.linkedTest, null) + (r.linkedVia ? '<span class="tiny">' + esc(r.linkedVia) + "</span>" : "") + "</div>";
     h += "</section>";
     if (r.patch) {
       var pl = ['<a href="' + esc(r.patch.page) + '">Proof page</a>', '<a href="' + esc(r.patch.patch) + '">orangepro-tests.patch</a>'];

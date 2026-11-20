@@ -131,7 +131,7 @@ A successful `orangepro_prove` sets the oracle field `proven` to true and writes
 
 **What OrangePro doesn't count, so linked numbers are a floor, not a coverage percentage:**
 - tests that only assert on mocks;
-- calls made over HTTP or from end-to-end suites;
+- calls made over HTTP or from end-to-end suites, apart from one case: a supertest request to an Express app the test imports is linked to the function its route runs (below);
 - in Python, objects that reach a test only through a fixture;
 - in JavaScript and TypeScript, calls on an object a test gets from a fixture (for example Playwright's `test.extend`), and calls to an inherited method, which are not linked to the class that defines it.
 
@@ -260,6 +260,7 @@ Optional. Put it in `.orangepro/config.json` in the repository, or in `~/.orange
 - **Python proof** runs pytest through the repository's own environment: an existing `.venv` or `venv`, then `uv` or `poetry` when their lock files are present, else `python -m pytest`. Set `proof.python_runner` to use your own command.
 - **Java proof** needs Maven (Surefire) and JUnit 5. Gradle and JUnit 4 projects are mapped and linked, but not proven yet.
 - **Not traced yet,** so tested code can show as Unconfirmed: calls through Go test-suite methods and helper constructors, dependency injection that is wired at runtime, reflection, and calls made over HTTP or RPC.
+- **Route links (JavaScript and TypeScript, Express):** a supertest request (`request(app).get('/users/1')`) to an app the test imports from the repository links the test to the function the matching route runs. A named handler links to itself. An inline handler links to the counted functions it calls directly, one call deep. Exactly one route must match. The row says how the link was made ("reaches it via route GET /users/:id (app.js:12)"). It is a link, not proof. Routes and mounts built at run time, apps a test builds itself, and other HTTP clients are not linked; Run details counts them.
 
 ---
 

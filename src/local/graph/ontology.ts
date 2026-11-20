@@ -406,6 +406,19 @@ export interface AnalysisMeta {
   };
   /** Static confirmation outcome (Phase 4): hard TESTED_BY/COVERS edges found by the TypeChecker confirmer. */
   confirmed_coverage?: ConfirmedCoverageMeta;
+  /** Static route links (J4): supertest requests matched to a traced app's routes. Counts only; the links are hard edges with `route_link`. */
+  route_links?: {
+    routes: number;
+    unknown_routes: number;
+    unknown_mounts: number;
+    requests: number;
+    linked_requests: number;
+    links: number;
+    no_route: number;
+    several_routes: number;
+    app_not_traced: number;
+    handler_not_mapped: number;
+  };
   /** Static assertion candidates over the denominator behaviors, split by linked test layer (Phase 5.1). */
   confirmed_by_layer?: ConfirmedCoverageByLayer;
   /** Coverage-tool report ingestion: runtime-covered symbols, separate from exact test proof. */
