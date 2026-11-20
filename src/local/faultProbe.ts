@@ -64,7 +64,8 @@ export const PROBE_FAULT_REFUSALS = [
   "profile_option_not_allowed",
   "tests_invalid",
   "not_installed",
-  "prepare_failed"
+  "prepare_failed",
+  "oracle_not_approved"
 ] as const;
 export type ProbeFaultRefusalCode = (typeof PROBE_FAULT_REFUSALS)[number];
 
@@ -95,6 +96,8 @@ export interface ProbeFaultOptions {
   rationale?: string;
   /** Set only when an add-on chose the fault; written into the run profile. */
   addon?: AddonProvenance;
+  /** Run an expected behavior whose approval is only "proposed". Off by default; the run profile records it. */
+  allow_proposed_oracle?: boolean;
 }
 
 export interface ProbeFaultDeps {
@@ -715,7 +718,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   if (targetLanguage(target) !== "typescript") throw new ProbeFaultRefusal("unsupported_route", "probe-fault supports JavaScript and TypeScript targets only.");
   const { sourceRoot, symbolTarget, tsjs } = proofPreflight(root, { target_record: record, source: opts.source }, graph, target, "typescript");
   const bound = tsjs?.bound;
-  if (!tsjs || !bound) throw new ProbeFaultRefusal("unsupported_route", `${target} is not changed by its exact position (a prototype or exported-object method); an exact fault needs that route.`);
+  if (!tsjs || !bound) throw new ProbeFaultRefusal("unsupported_route", `${target} has no exact position the proof script can change (it was refused before this point); an exact fault needs one.`);
   const fileBytes = readFileSync(tsjs.targetAbs);
   const planned = planFault(fileBytes, bound.target, record.identity.file, spec.operator, spec.offset);
   if (!planned.ok) {
@@ -732,6 +735,14 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     throw new ProbeFaultRefusal("oracle_mismatch", `the oracle is for another target (record sha256 ${oracle.target_record_sha256}, this record is ${recordSha}).`);
   }
   if (sha256Hex(opts.witness_bytes) !== oracle.witness.sha256) throw new ProbeFaultRefusal("witness_mismatch", "the witness script is not the one the oracle names (sha256 differs).");
+  // A fault is judged against an expected behavior a person approved. A proposed one runs only when asked
+  // for by name, and the run says so (run profile here; the receipt carries the oracle's approval as is).
+  if (oracle.approval.status !== "approved" && opts.allow_proposed_oracle !== true) {
+    throw new ProbeFaultRefusal(
+      "oracle_not_approved",
+      "the expected behavior is only proposed: a person has to approve it (approval.status approved, with by, at and where) before a fault is judged against it. To run it anyway, pass --allow-proposed-oracle; the run is then recorded as judged against an unapproved expected behavior."
+    );
+  }
 
   const fixture = readFixture(opts.fixture_bytes);
   if (fixture.mergedSha !== record.identity.merged_commit) {
@@ -883,7 +894,9 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       full_suite_argv: fullArgv,
       runner: { name: "mocha", version: mochaVersion },
       container: containerProfile(fixture, mountsFor, { ...reportEnv, ...coverageEnv }),
-      limits: { stage_deadline_ms: deadlineMs }
+      limits: { stage_deadline_ms: deadlineMs },
+      // Only an unapproved run carries this, so an approved run's profile keeps its bytes.
+      ...(oracle.approval.status !== "approved" ? { oracle_status: { approval: oracle.approval.status, allowed_by: "--allow-proposed-oracle" as const } } : {})
     };
     writeFileAtomic(join(runDir, "run-profile.json"), recordBytes(profile));
     const runner = createStageRunner({

@@ -82,6 +82,8 @@ export interface RunProfile {
   runner: { name: "mocha"; version: string };
   container: ContainerProfile;
   limits: { stage_deadline_ms: number };
+  /** Present only when the expected behavior was not approved and the run was asked for anyway. */
+  oracle_status?: { approval: "proposed"; allowed_by: "--allow-proposed-oracle" };
   /** verify-test only: the candidate and its assertion record, frozen before any stage, so every stage file commits to them. */
   candidate?: { patch_sha256: string; assertion_record_sha256: string; generation_request_sha256: string };
 }

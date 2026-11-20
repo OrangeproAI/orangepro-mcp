@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { withBoundEcho } from "./support/boundEcho.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,17 +98,17 @@ function fakeOracleStdout(over: Record<string, unknown> = {}): string {
   });
 }
 
-const provenRunner = () => ({ exitCode: 0, stderr: "", stdout: fakeOracleStdout() });
-const survivedRunner = () => ({
+const provenRunner = (args: string[] = []) => ({ exitCode: 0, stderr: "", stdout: withBoundEcho(fakeOracleStdout(), args) });
+const survivedRunner = (args: string[] = []) => ({
   exitCode: 0,
   stderr: "",
-  stdout: fakeOracleStdout({
+  stdout: withBoundEcho(fakeOracleStdout({
     status: "associated_survived",
     reach: "ran",
     proven: false,
     reason: "mutated target did not change the test outcome",
     mutant: { exitCode: 0, timedOut: false, assertionFailure: false }
-  })
+  }), args)
 });
 
 /** Analyze `source` into workspace `ws` (mirrors the CLI ws/source split). */

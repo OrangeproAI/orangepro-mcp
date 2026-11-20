@@ -296,9 +296,14 @@ change to the exact functions they fall in, and to the counted functions that ca
 changed helper. Lines that belong to no function, or that cannot be followed to a counted
 function, are reported as `unknown` and mark the run incomplete: they are never reported
 as low risk. Each target is a record of the function's exact bytes and hashes. `opro prove
---target-record <file>` re-derives the record from the file before trusting it, and for a
-prototype or exported-object method changes the function by its exact position rather
-than by searching for its name; `--preview` shows that change without running a test.
+--target-record <file>` re-derives the record from the file before trusting it. Every
+JavaScript and TypeScript proof changes the function at its exact position (its file's
+hash, its own bytes and the name it is declared under), never by searching for its name;
+`--preview` shows that change without running a test. A function whose position cannot be
+confirmed on raw bytes is refused with the reason: an arrow without a body in braces, a
+return type or type parameter written with braces, or an unbalanced brace inside a string,
+regex or comment in the body. Changes proposed by other components use the same location
+format (`src/local/contracts/location.ts`).
 
 `opro probe-fault` asks one narrow question about one target: do the named existing tests
 notice one small, valid fault inside it? It takes a target record, a fault written as

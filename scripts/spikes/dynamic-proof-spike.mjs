@@ -91,6 +91,7 @@ function usage() {
     "--replacement must be inert: either empty or a single return of a JSON literal, e.g. 'return {\"ok\":false};'. Use --replacement-mode promise-json for Promise<T> methods.",
     "--link-node-modules is a trusted-repo speed mode: source files are copied, but node_modules is symlinked and must not be treated as write-isolated.",
     "Bound mutation (a member written `owner.name = function` or `F.prototype.name = function`): pass --bound-file-sha256 <hex> --bound-statement-start <n> --bound-function-start <n> --bound-body-start <n> --bound-body-end <n> (raw-byte offsets, end exclusive) and one --bound-target <owner.name> per name. The function is then changed by its exact position, never by a name search; any disagreement is a named refusal.",
+    "Position mutation (every other function with a block body): the same --bound-file-sha256, --bound-statement-start, --bound-function-start, --bound-body-start and --bound-body-end, plus --bound-route position, --bound-name <declared name, or default>, --bound-function-end <n> and --bound-function-sha256 <hex>. OrangePro's own commands always send one of the two bindings; without one, this script falls back to a search by --method, kept only for calling the script directly.",
     "--preview (bound mutation only) prints the diff the mutation would make and stops: no copy, no test run. --test is not needed.",
     "Exact edit inside a bound body: add --bound-edit-start <n> --bound-edit-end <n> --bound-edit-expect-sha256 <hex> --bound-edit-replacement <text>. Only a closed set of token changes is allowed (Math.floor <-> Math.ceil, removing a unary !); --replacement is not needed.",
     "--prepare <empty dir> (bound mutation only) makes the original and the mutated copy under that folder, prints where they are, and runs no test. The caller runs the tests and removes the folder.",
@@ -1022,7 +1023,14 @@ class BoundRefusal extends Error {
 const JS_IDENTIFIER = "[\\p{ID_Start}$_][\\p{ID_Continue}$\\u200c\\u200d]*";
 // `<owner>.<property>` or `<F>.prototype.<property>`: the only two shapes that reach this path.
 const BOUND_TARGET_RE = new RegExp(`^${JS_IDENTIFIER}(?:\\.prototype)?\\.${JS_IDENTIFIER}$`, "u");
-const BOUND_ARG_KEYS = ["boundFileSha256", "boundStatementStart", "boundFunctionStart", "boundBodyStart", "boundBodyEnd", "boundTarget"];
+const BOUND_ARG_KEYS = ["boundFileSha256", "boundStatementStart", "boundFunctionStart", "boundBodyStart", "boundBodyEnd", "boundTarget", "boundRoute", "boundName", "boundFunctionEnd", "boundFunctionSha256"];
+// The two exact-position routes. `bound`: a member written `owner.name = function` / `F.prototype.name = function`,
+// checked against the names written before it. `position`: every other function with a block body (a declaration,
+// a const function, a class or object-literal method, `name: function`, an unnamed default), checked against its
+// own bytes and the name it is declared under. Neither ever falls back to the name search.
+const BOUND_ROUTES = new Set(["bound", "position"]);
+// The name a position-routed function is declared under. `default` stands for an unnamed default export.
+const POSITION_NAME_RE = /^[\p{ID_Start}$_#][\p{ID_Continue}$\u200c\u200d]*$/u;
 const BOUND_EDIT_KEYS = ["boundEditStart", "boundEditEnd", "boundEditExpectSha256", "boundEditReplacement"];
 // The only edits allowed inside a bound body: the bytes found and the bytes written, as a pair. `word` edits
 // must start and end on a name boundary; the caller has already checked with a parser that the span is one
@@ -1055,15 +1063,32 @@ function parseBinding(args) {
     functionStart: offset("boundFunctionStart"),
     bodyStart: offset("boundBodyStart"),
     bodyEnd: offset("boundBodyEnd"),
-    targets: args.boundTarget ?? []
+    targets: args.boundTarget ?? [],
+    route: args.boundRoute ?? "bound"
   };
+  if (!BOUND_ROUTES.has(binding.route)) {
+    throw new BoundRefusal("invalid_binding", "--bound-route must be bound or position");
+  }
   if (!/^[0-9a-f]{64}$/.test(binding.fileSha256)) {
     throw new BoundRefusal("invalid_binding", "--bound-file-sha256 must be a sha256 in lowercase hex");
   }
   if (![binding.statementStart, binding.functionStart, binding.bodyStart, binding.bodyEnd].every(Number.isSafeInteger)) {
     throw new BoundRefusal("invalid_binding", "--bound-statement-start, --bound-function-start, --bound-body-start and --bound-body-end must all be given as non-negative integers");
   }
-  if (binding.targets.length === 0 || binding.targets.some(target => !BOUND_TARGET_RE.test(target))) {
+  if (binding.route === "position") {
+    binding.name = String(args.boundName ?? "");
+    binding.functionEnd = offset("boundFunctionEnd");
+    binding.functionSha256 = String(args.boundFunctionSha256 ?? "");
+    if (binding.targets.length > 0) {
+      throw new BoundRefusal("invalid_binding", "--bound-target belongs to the bound route; a position binding names its function with --bound-name");
+    }
+    if (!POSITION_NAME_RE.test(binding.name)) {
+      throw new BoundRefusal("invalid_binding", "--bound-name must be the name the function is declared under (or default for an unnamed default export)");
+    }
+    if (!Number.isSafeInteger(binding.functionEnd) || !/^[0-9a-f]{64}$/.test(binding.functionSha256)) {
+      throw new BoundRefusal("invalid_binding", "a position binding needs --bound-function-end (a non-negative integer) and --bound-function-sha256 (lowercase hex)");
+    }
+  } else if (binding.targets.length === 0 || binding.targets.some(target => !BOUND_TARGET_RE.test(target))) {
     throw new BoundRefusal("invalid_binding", "at least one --bound-target is required, each written owner.property or Owner.prototype.property");
   }
   if (BOUND_EDIT_KEYS.some(key => args[key] !== undefined)) {
@@ -1110,6 +1135,86 @@ function planBoundMutation(original, binding, replacementBody, marker = REACH_MA
   if (!(statementStart <= functionStart && functionStart < bodyStart && bodyStart < bodyEnd && bodyEnd <= original.length)) {
     throw new BoundRefusal("invalid_binding", "the byte offsets are out of order or outside the file");
   }
+  if (binding.route === "position") {
+    checkPositionPrefix(original, binding);
+  } else {
+    checkBoundPrefix(original, binding);
+  }
+  const position = binding.route === "position";
+  // The recorded body is the first block after the function's parameters: between the function's first
+  // byte and the body's opening brace there is no brace outside parentheses. A body span that is a later
+  // function's body, a block nested in this one, or a block inside a comment further down fails here.
+  // (So does a return type or a type parameter written with braces: raw bytes cannot tell it from a body.)
+  let parenDepth = 0;
+  for (let i = functionStart; i < bodyStart; i += 1) {
+    if (original[i] === 0x28) {
+      parenDepth += 1;
+    } else if (original[i] === 0x29) {
+      parenDepth -= 1;
+    } else if ((original[i] === 0x7b || original[i] === 0x7d) && parenDepth <= 0) {
+      throw position
+        ? new BoundRefusal("brace_in_signature", "a brace comes before the body, outside the parameters (a return type or type parameter written with braces); raw bytes cannot tell it from the body, so the function is not changed")
+        : new BoundRefusal("brace_scan_mismatch", "the recorded body is not the first block after the function's parameters");
+    }
+  }
+  // The raw brace count must land on the recorded end of the body, and the name search's own scan of the
+  // same text must agree. One unbalanced brace inside a string, a regex, a template or a comment moves
+  // both away from the parser's answer, and the function is refused instead of being cut in the wrong place.
+  let textClose = -1;
+  try {
+    const openChar = original.subarray(0, bodyStart).toString("utf8").length;
+    textClose = Buffer.byteLength(text.slice(0, findMatchingBrace(text, openChar)), "utf8");
+  } catch {
+    textClose = -1;
+  }
+  if (original[bodyStart] !== 0x7b || rawBraceClose(original, bodyStart) !== bodyEnd - 1 || textClose !== bodyEnd - 1) {
+    throw position
+      ? new BoundRefusal("brace_in_string", "a brace inside a string, regex, template or comment in the body throws off a raw brace count, so the body's end cannot be confirmed on raw bytes and the function is not changed")
+      : new BoundRefusal("brace_scan_mismatch", "a raw brace count from the body's opening brace does not end at the recorded end of the body");
+  }
+  if (binding.edit) {
+    return planBoundEdit(original, binding);
+  }
+  const lineStart = statementStart === 0 ? 0 : original.lastIndexOf(0x0a, statementStart - 1) + 1;
+  let indentEnd = lineStart;
+  while (indentEnd < statementStart && (original[indentEnd] === 0x20 || original[indentEnd] === 0x09)) {
+    indentEnd += 1;
+  }
+  const indent = original.subarray(lineStart, indentEnd).toString("latin1");
+  const replacement = Buffer.from(`{\n${bodyLines(replacementBody, `${indent}  `, marker)}\n${indent}}`, "utf8");
+  const mutated = Buffer.concat([original.subarray(0, bodyStart), replacement, original.subarray(bodyEnd)]);
+  return { original, mutated, replacementBytes: replacement.length };
+}
+
+// A position binding: the function's own bytes are the bytes it was bound to, its body lies inside it, and the
+// name it is declared under is written before the body as a whole name (an unnamed default: the statement
+// begins `export default`). The file hash has already matched, so these catch a caller that sent offsets
+// from a different parse, not a changed file.
+function checkPositionPrefix(original, binding) {
+  const { statementStart, functionStart, functionEnd, bodyStart, bodyEnd, name } = binding;
+  if (!(statementStart <= functionStart && bodyEnd <= functionEnd && functionEnd <= original.length)) {
+    throw new BoundRefusal("invalid_binding", "the byte offsets are out of order or outside the file");
+  }
+  if (sha256Hex(original.subarray(functionStart, functionEnd)) !== binding.functionSha256) {
+    throw new BoundRefusal("function_hash_mismatch", "the bytes at the recorded position are not the function the binding was made from");
+  }
+  const signature = original.subarray(Math.min(statementStart, functionStart), bodyStart).toString("utf8");
+  if (name === "default") {
+    if (!/^export\s+default\b/.test(signature)) {
+      throw new BoundRefusal("name_mismatch", "an unnamed default export must begin with export default");
+    }
+    return;
+  }
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`(?<![\\p{ID_Continue}$\\u200c\\u200d#])${escaped}(?![\\p{ID_Continue}$\\u200c\\u200d])`, "u").test(signature)) {
+    throw new BoundRefusal("name_mismatch", `${name} is not written before the recorded body; the position does not point at that function`);
+  }
+}
+
+// A bound member: the statement begins where a name can begin, and nothing but the recorded names, each
+// followed by `=`, comes before the function.
+function checkBoundPrefix(original, binding) {
+  const { statementStart, functionStart, targets } = binding;
   // The statement begins where a name can begin. A byte before it that continues a name or a member chain
   // (`book|shelf.count =`, `this.|shelf.count =`) means the bytes read below are the tail of another owner.
   // A non-ASCII character there is refused as well, unless it is white space (a byte order mark included).
@@ -1133,45 +1238,6 @@ function planBoundMutation(original, binding, replacementBody, marker = REACH_MA
   ) {
     throw new BoundRefusal("prefix_mismatch", `the bytes before the function are not exactly ${targets.map(target => `${target} =`).join(" ")}`);
   }
-  // The recorded body is the first block after the function's parameters: between the function's first
-  // byte and the body's opening brace there is no brace outside parentheses. A body span that is a later
-  // function's body, a block nested in this one, or a block inside a comment further down fails here.
-  // (So does a return type or a type parameter written with braces: raw bytes cannot tell it from a body.)
-  let parenDepth = 0;
-  for (let i = functionStart; i < bodyStart; i += 1) {
-    if (original[i] === 0x28) {
-      parenDepth += 1;
-    } else if (original[i] === 0x29) {
-      parenDepth -= 1;
-    } else if ((original[i] === 0x7b || original[i] === 0x7d) && parenDepth <= 0) {
-      throw new BoundRefusal("brace_scan_mismatch", "the recorded body is not the first block after the function's parameters");
-    }
-  }
-  // The raw brace count must land on the recorded end of the body, and the name search's own scan of the
-  // same text must agree. One unbalanced brace inside a string, a regex, a template or a comment moves
-  // both away from the parser's answer, and the function is refused instead of being cut in the wrong place.
-  let textClose = -1;
-  try {
-    const openChar = original.subarray(0, bodyStart).toString("utf8").length;
-    textClose = Buffer.byteLength(text.slice(0, findMatchingBrace(text, openChar)), "utf8");
-  } catch {
-    textClose = -1;
-  }
-  if (original[bodyStart] !== 0x7b || rawBraceClose(original, bodyStart) !== bodyEnd - 1 || textClose !== bodyEnd - 1) {
-    throw new BoundRefusal("brace_scan_mismatch", "a raw brace count from the body's opening brace does not end at the recorded end of the body");
-  }
-  if (binding.edit) {
-    return planBoundEdit(original, binding);
-  }
-  const lineStart = statementStart === 0 ? 0 : original.lastIndexOf(0x0a, statementStart - 1) + 1;
-  let indentEnd = lineStart;
-  while (indentEnd < statementStart && (original[indentEnd] === 0x20 || original[indentEnd] === 0x09)) {
-    indentEnd += 1;
-  }
-  const indent = original.subarray(lineStart, indentEnd).toString("latin1");
-  const replacement = Buffer.from(`{\n${bodyLines(replacementBody, `${indent}  `, marker)}\n${indent}}`, "utf8");
-  const mutated = Buffer.concat([original.subarray(0, bodyStart), replacement, original.subarray(bodyEnd)]);
-  return { original, mutated, replacementBytes: replacement.length };
 }
 
 // A few bytes strictly inside the body, which must be exactly the bytes the caller expects and one of the
@@ -1232,6 +1298,7 @@ function boundSummary(binding, plan) {
     changedBytes: plan.edit ? { start: plan.edit.start, end: plan.edit.end } : { start: binding.bodyStart, end: binding.bodyEnd },
     replacementBytes: plan.replacementBytes,
     targets: binding.targets,
+    ...(binding.route === "position" ? { route: "position", name: binding.name } : {}),
     ...(plan.edit ? { edit: plan.edit, bodyBytes: { start: binding.bodyStart, end: binding.bodyEnd } } : {})
   };
 }
@@ -2840,7 +2907,9 @@ function runProof(args, root, binding) {
 function boundAttempt(args, binding, givenRoot) {
   // A linked source root is refused, and the root is resolved to its real path before any copy: copying a
   // linked root yields a link back to the checkout, and the "copy" would be the checkout itself.
-  if (lstatSync(givenRoot).isSymbolicLink()) {
+  // A bound member refuses a linked root, as before. A position-routed function resolves it, as the search
+  // by name it replaces did: the copy is made from the real folder, never through the link.
+  if (lstatSync(givenRoot).isSymbolicLink() && binding.route !== "position") {
     throw new BoundRefusal("symlinked_target", "the source root is a symbolic link");
   }
   const root = realpathSync(givenRoot);
@@ -3030,6 +3099,11 @@ function main() {
   }
   if (!binding && (args.prepare !== undefined || BOUND_EDIT_KEYS.some(key => args[key] !== undefined))) {
     throw new BoundRefusal("preview_requires_bound", "--prepare and an exact edit need the --bound-* arguments; the name search has neither");
+  }
+  // OrangePro's own commands set this: they change a function only at its exact position, so a call from
+  // them without a binding is a defect, refused here rather than answered by a search by name.
+  if (!binding && process.env.ORANGEPRO_PROOF_NO_NAME_SEARCH === "1") {
+    throw new BoundRefusal("name_search_disabled", "this call came from OrangePro without an exact position; OrangePro never changes a function found by searching for its name");
   }
   const output = binding ? runBound(args, binding) : runProof(args, nameSearchRoot(path.resolve(args.root)), null);
   if (args.json) {

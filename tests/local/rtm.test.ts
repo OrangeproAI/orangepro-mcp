@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { withBoundEcho } from "./support/boundEcho.js";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -312,10 +313,10 @@ describe("RTM builder", () => {
     opInit(W, deps);
     opAnalyze(W, { source: W }, deps);
 
-    const oracle = (proven: boolean, assertionFailure: boolean) => () => ({
+    const oracle = (proven: boolean, assertionFailure: boolean) => (args: string[] = []) => ({
       exitCode: 0,
       stderr: "",
-      stdout: JSON.stringify({
+      stdout: withBoundEcho(JSON.stringify({
         status: proven ? "proven" : "associated_survived",
         proven,
         reason: proven ? "baseline passed and mutant failed at an assertion" : "mutated target did not change the test outcome",
@@ -327,7 +328,7 @@ describe("RTM builder", () => {
         baseline: { exitCode: 0, timedOut: false },
         mutant: { exitCode: assertionFailure ? 1 : 0, timedOut: false, assertionFailure },
         medianProofMs: 5
-      })
+      }), args)
     });
     const proveOpts = (replacement: string, run_id: string) => ({
       target_symbol: "sym:service.ts#createOrder",
@@ -366,10 +367,10 @@ describe("RTM builder", () => {
     // new bytes, so the cert must not bind to the stale analyzed fingerprint → refuse.
     writeFileSync(join(W, "service.ts"), "export function createOrder(id: string): string {\n  return `ORDER-${id}`.toLowerCase();\n}\n", "utf8");
 
-    const provenRunner = () => ({
+    const provenRunner = (args: string[] = []) => ({
       exitCode: 0,
       stderr: "",
-      stdout: JSON.stringify({
+      stdout: withBoundEcho(JSON.stringify({
         status: "proven",
         proven: true,
         reason: "baseline passed and mutant failed at an assertion",
@@ -381,7 +382,7 @@ describe("RTM builder", () => {
         baseline: { exitCode: 0, timedOut: false },
         mutant: { exitCode: 1, timedOut: false, assertionFailure: true },
         medianProofMs: 5
-      })
+      }), args)
     });
 
     expect(() =>

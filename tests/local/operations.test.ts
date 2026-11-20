@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { withBoundEcho } from "./support/boundEcho.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -480,10 +481,10 @@ describe("start orchestration", () => {
         // This test exercises RTM capping, not proving. Since auto-drive now attempts Go
         // free-function targets (Add/TestAdd here), stub the prove runner so it stays fast and
         // toolchain-independent instead of spawning a real `go test`.
-        dynamicProofRunner: () => ({
+        dynamicProofRunner: (args) => ({
           exitCode: 0,
           stderr: "",
-          stdout: JSON.stringify({ status: "associated_survived", proven: false, reason: "stubbed for RTM-capping test" })
+          stdout: withBoundEcho(JSON.stringify({ status: "associated_survived", proven: false, reason: "stubbed for RTM-capping test" }), args)
         }),
         coverageRunner: (_cwd, _command, args) => {
           const coverArg = args.find((a) => a.startsWith("-coverprofile="));
@@ -766,7 +767,7 @@ describe("gap-fill ledger", () => {
         return {
           exitCode: 0,
           stderr: "",
-          stdout: JSON.stringify({
+          stdout: withBoundEcho(JSON.stringify({
             status: "proven",
             proven: true,
             reason: "baseline passed and mutant failed at an assertion",
@@ -783,7 +784,7 @@ describe("gap-fill ledger", () => {
               failureSummary: "AssertionError: secret should not be persisted"
             },
             medianProofMs: 12
-          })
+          }), args)
         };
       }
     });
@@ -845,10 +846,10 @@ describe("gap-fill ledger", () => {
       run_id: "run:dynamic-survived"
     }, {
       ...deps,
-      dynamicProofRunner: () => ({
+      dynamicProofRunner: (args) => ({
         exitCode: 0,
         stderr: "",
-        stdout: JSON.stringify({
+        stdout: withBoundEcho(JSON.stringify({
           status: "associated_survived",
           reach: "ran",
           proven: false,
@@ -861,7 +862,7 @@ describe("gap-fill ledger", () => {
           baseline: { exitCode: 0, timedOut: false },
           mutant: { exitCode: 0, timedOut: false, assertionFailure: false },
           medianProofMs: 9
-        })
+        }), args)
       })
     });
 
@@ -963,7 +964,7 @@ describe("gap-fill ledger", () => {
         return {
           exitCode: 0,
           stderr: "",
-          stdout: JSON.stringify({
+          stdout: withBoundEcho(JSON.stringify({
             status: "associated_survived",
             proven: false,
             runner: "vitest",
@@ -973,7 +974,7 @@ describe("gap-fill ledger", () => {
             method: "place",
             baseline: { exitCode: 0, timedOut: false },
             mutant: { exitCode: 0, timedOut: false, assertionFailure: false }
-          })
+          }), args)
         };
       }
     });
@@ -996,10 +997,10 @@ describe("gap-fill ledger", () => {
       run_id: "run:baseline-failed"
     }, {
       ...deps,
-      dynamicProofRunner: () => ({
+      dynamicProofRunner: (args) => ({
         exitCode: 2,
         stderr: "",
-        stdout: JSON.stringify({
+        stdout: withBoundEcho(JSON.stringify({
           status: "unrunnable",
           proven: false,
           reason: "baseline test did not pass",
@@ -1007,7 +1008,7 @@ describe("gap-fill ledger", () => {
           replacementMode: "return-json",
           baseline: { exitCode: 1, timedOut: false },
           mutant: { exitCode: 1, timedOut: false, assertionFailure: false }
-        })
+        }), args)
       })
     });
     expect(baselineFailed.record).toMatchObject({
@@ -1029,10 +1030,10 @@ describe("gap-fill ledger", () => {
       run_id: "run:runtime-failed"
     }, {
       ...deps,
-      dynamicProofRunner: () => ({
+      dynamicProofRunner: (args) => ({
         exitCode: 0,
         stderr: "",
-        stdout: JSON.stringify({
+        stdout: withBoundEcho(JSON.stringify({
           status: "associated_non_assertion_failure",
           proven: false,
           reason: "mutant failed, but not with a trusted assertion failure",
@@ -1040,7 +1041,7 @@ describe("gap-fill ledger", () => {
           replacementMode: "return-json",
           baseline: { exitCode: 0, timedOut: false },
           mutant: { exitCode: 1, timedOut: false, assertionFailure: false }
-        })
+        }), args)
       })
     });
     expect(runtimeFailed.record).toMatchObject({
@@ -1072,7 +1073,7 @@ describe("gap-fill ledger", () => {
         replacement: "return null;"
       }, {
         ...deps,
-        dynamicProofRunner: () => ({
+        dynamicProofRunner: (args) => ({
           exitCode: 1,
           stdout: "not json",
           stderr: "api_key=super-secret-value"
@@ -1315,7 +1316,7 @@ describe("gap-fill ledger", () => {
       return {
         exitCode: 2,
         stderr: "",
-        stdout: JSON.stringify({
+        stdout: withBoundEcho(JSON.stringify({
           status: "unrunnable",
           proven: false,
           reason: "environment unavailable",
@@ -1334,7 +1335,7 @@ describe("gap-fill ledger", () => {
             stdout_tail: redactedStdout,
             stderr_tail: redactedStderr
           }
-        })
+        }), args)
       };
     };
     const prove = (run_id: string, runner?: "auto" | "pytest") => opDynamicProof(W, {
@@ -1396,7 +1397,7 @@ describe("gap-fill ledger", () => {
       return {
         exitCode: 0,
         stderr: "",
-        stdout: JSON.stringify({
+        stdout: withBoundEcho(JSON.stringify({
           status: "associated_survived",
           reach: "ran",
           proven: false,
@@ -1406,7 +1407,7 @@ describe("gap-fill ledger", () => {
           func: "answer",
           baseline: { exitCode: 0, timedOut: false },
           mutant: { exitCode: 0, timedOut: false, assertionFailure: false }
-        })
+        }), args)
       };
     };
     const run = (run_id: string, runner?: "pytest") => opProveLoop(W, {
