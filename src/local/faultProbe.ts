@@ -21,6 +21,7 @@ import {
 } from "./boundary.js";
 import { canonicalJson, newRunId, recordBytes, recordSha256, sha256Hex, writeFileAtomic, writeRunManifest } from "./contracts/io.js";
 import { checkOracle, type Oracle } from "./contracts/oracle.js";
+import type { AddonProvenance } from "./pluginApi.js";
 import { FAULT_OPERATORS, faultRecordOf, parseFaultSpec, planFault, type FaultPlan, type FaultRecord } from "./contracts/faultRecord.js";
 import {
   CLASSIFICATION_VERSION,
@@ -92,6 +93,8 @@ export interface ProbeFaultOptions {
   full_suite?: boolean;
   source?: string;
   rationale?: string;
+  /** Set only when an add-on chose the fault; written into the run profile. */
+  addon?: AddonProvenance;
 }
 
 export interface ProbeFaultDeps {
@@ -867,6 +870,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       version: RUN_PROFILE_VERSION,
       run_id: runId,
       tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
+      ...(opts.addon ? { addon: opts.addon } : {}),
       fixture_manifest_sha256: sha256Hex(opts.fixture_bytes),
       source_pr: fixture.prNumber,
       merged_commit: record.identity.merged_commit,

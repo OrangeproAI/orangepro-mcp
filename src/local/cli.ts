@@ -42,6 +42,8 @@ import { autoProve, isNotExercised, isReachUnknown, isRoastSurvivor } from "./au
 import type { AutoProveAttempt } from "./autoProve.js";
 import { opChangedTargets, renderChangedTargets } from "./changedTargets.js";
 import { opProbeFault, ProbeFaultRefusal, renderProbeFault } from "./faultProbe.js";
+import { proposeFault, proposeOracle, renderProposedOracle, sourceRootFor } from "./pluginCalls.js";
+import { addonStatusFor, addonStatusLine } from "./plugins.js";
 import { opTestBrief, opVerifyTest, renderTestBrief, renderVerifyTest } from "./candidateTest.js";
 import { opExportTests, renderExportTests } from "./exportTests.js";
 import { opDraftTest, renderDraftTest } from "./draftTest.js";
@@ -60,7 +62,7 @@ import { buildAgentWorkflowPack, normalizeAgentClient, renderAgentWorkflowPack }
 import { preloadTreeSitter } from "./analyze/treeSitter/engine.js";
 import { treeSitterLanguages } from "./analyze/treeSitter/languages.js";
 import { reportProgress, setProgressReporter } from "./util/progress.js";
-import { WORKSPACE_DIR } from "./workspace.js";
+import { WORKSPACE_DIR, workspacePaths } from "./workspace.js";
 import { summarizeCorpusScope, type CorpusScopeSummary } from "./corpusScope.js";
 import {
   JobRecord,
@@ -777,6 +779,7 @@ async function main(): Promise<number> {
         out("Recommendations (smallest next steps to improve generated tests):");
         for (const r of res.recommendations) out(`  ${r.priority}. ${r.action}  [${r.expected_score_impact}]\n     why: ${r.why}`);
         out(`Can continue without these: ${res.can_continue_without_recommendations}`);
+        out(addonStatusLine(await addonStatusFor(cwd)));
       }
       return 0;
     }
@@ -846,18 +849,32 @@ async function main(): Promise<number> {
       };
       let res;
       try {
+        // Add-on: with no --fault or no --oracle, an installed add-on may propose one. Without an add-on nothing here changes.
+        const targetRecord = readTargetRecordFlag(cwd, need("target-record"));
+        const given = (flag: string): boolean => typeof flags[flag] === "string" && (flags[flag] as string).trim() !== "";
+        const addonSource = sourceRootFor(cwd, typeof flags.source === "string" ? flags.source : undefined);
+        const proposedFault = given("fault") ? null : await proposeFault(cwd, addonSource, targetRecord);
+        if (!given("oracle") && (given("fault") || proposedFault)) {
+          const proposedOracle = await proposeOracle(cwd, addonSource, workspacePaths(cwd).dir, targetRecord);
+          if (proposedOracle) {
+            if (json) printJson({ result: "needs_approval", ...proposedOracle });
+            else for (const line of renderProposedOracle(proposedOracle)) out(line);
+            return 0;
+          }
+        }
         res = opProbeFault(
           cwd,
           {
-            target_record: readTargetRecordFlag(cwd, need("target-record")),
-            fault: need("fault"),
+            target_record: targetRecord,
+            fault: proposedFault?.fault ?? need("fault"),
             oracle: readJson("oracle"),
             fixture_bytes: readFileSync(resolve(cwd, need("fixture"))),
             tests: need("tests").split(","),
             witness_bytes: readFileSync(resolve(cwd, need("witness"))),
             full_suite: asBool(flags["full-suite"], false),
             source: typeof flags.source === "string" ? flags.source : undefined,
-            rationale: typeof flags.rationale === "string" ? flags.rationale : undefined
+            rationale: typeof flags.rationale === "string" ? flags.rationale : proposedFault?.reason,
+            ...(proposedFault?.addon ? { addon: proposedFault.addon } : {})
           },
           { clock: systemClock }
         );

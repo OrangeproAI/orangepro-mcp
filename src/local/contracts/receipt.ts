@@ -64,6 +64,8 @@ export interface RunProfile {
   run_id: string;
   /** `build_sha256`: the stamped build that ran (P0.6), null when run from source. */
   tool: { name: string; version: string; build_sha256?: string | null };
+  /** Present only when an add-on's answer was used in this run (it chose the fault). */
+  addon?: import("../pluginApi.js").AddonProvenance;
   fixture_manifest_sha256: string;
   /** `source.pr.number` of the fixture, when it records one. */
   source_pr: number | null;
