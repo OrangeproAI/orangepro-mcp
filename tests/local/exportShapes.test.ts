@@ -339,11 +339,12 @@ describe("definition spans", () => {
       return d.ok ? d.target.mutation_route : d.refused;
     };
     const literal = "module.exports = { run(a) { return a; }, stop: function (a) { return a; }, wait: (a) => { return a; } };\n";
-    expect(route(literal, "run")).toBe("name_search");
-    expect(route(literal, "stop")).toBe("unsupported_shape");
-    expect(route(literal, "wait")).toBe("unsupported_shape");
-    expect(route("export default function () { return 1; }\n", "default")).toBe("unsupported_shape");
-    expect(route("export function plain() { return 1; }\n", "plain")).toBe("name_search");
+    expect(route(literal, "run")).toBe("position");
+    expect(route(literal, "stop")).toBe("position");
+    expect(route(literal, "wait")).toBe("position");
+    expect(route("export default function () { return 1; }\n", "default")).toBe("position");
+    expect(route("export function plain() { return 1; }\n", "plain")).toBe("position");
+    expect(route("export const twice = (n) => n * 2;\n", "twice")).toBe("position"); // refused later as no_block_body
     expect(route("function F() {}\nmodule.exports = F;\nF.prototype.go = function () { return 1; };\n", "F.go")).toBe("bound");
     expect(route("export function plain() { return 1; }\n", "missing")).toBe("symbol_not_found");
   });

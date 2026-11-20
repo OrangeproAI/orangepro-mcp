@@ -30,8 +30,12 @@ export interface SourceSpan {
   bytes: ByteSpan;
 }
 
-/** How a function reaches the mutator. Decided by re-parsing the file, never by a flag on a graph node. */
-export type MutationRoute = "bound" | "name_search" | "unsupported_shape";
+/**
+ * How a function reaches the mutator. Decided by re-parsing the file, never by a flag on a graph node.
+ * There is no search by name: every function OrangePro changes is changed at its exact position
+ * (`bound` or `position`, see contracts/location.ts), or refused.
+ */
+export type MutationRoute = "bound" | "position" | "unsupported_shape";
 
 export interface TargetDescription {
   /** Symbol name as in the graph id `sym:<file>#<name>`. */
@@ -55,6 +59,8 @@ export interface TargetDescription {
   file_sha256: string;
   function_sha256: string;
   mutation_route: MutationRoute;
+  /** Position route only: the name the function is declared under (`default` for an unnamed default export). */
+  declared_name?: string;
 }
 
 export type DescribeRefusal = "not_utf8" | "line_rule_mismatch" | "symbol_not_found" | "not_a_function";
@@ -119,63 +125,43 @@ export function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-// The proof script's name search (`mutateMethod` in scripts/spikes/dynamic-proof-spike.mjs),
-// repeated pattern for pattern so the route can be decided before any runner starts. It
-// stops at the first `)` and has no word boundary before the name: `put(key = d()) {` is
-// not matched, and the tail of `function input(key) {` is.
-export function nameSearchPatterns(escaped: string): { method: string; freeFn: string } {
-  return {
-    method: `((?:async\\s+)?${escaped}\\s*(?:<[^\\n\\{]+>)?\\s*\\([^)]*\\)\\s*(?::\\s*[^\\{]+)?\\s*)\\{`,
-    freeFn: `(^|\\n)([ \\t]*(?:export\\s+)?(?:const|let|var)\\s+${escaped}\\s*(?::\\s*[^=\\n]+)?\\s*=\\s*(?:(?:async\\s+)?(?:<[^(\\n{]+>\\s*)?\\([^)]*\\)\\s*(?::\\s*[^={]+)?\\s*=>\\s*|(?:async\\s+)?function\\s*(?:${escaped})?\\s*(?:<[^(\\n{]+>\\s*)?\\([^)]*\\)\\s*(?::\\s*[^={]+)?\\s*)\\{)`
-  };
-}
-
 /**
- * The `{ … }` the name search would replace for `method`, as half-open UTF-16 offsets
- * into `text`, or null when the search finds no definition, finds more than one (the
- * script's "Ambiguous method"), or its raw brace count never closes.
+ * The name a function is declared under, as written before its body: the last segment
+ * of the symbol name, or of one of its aliases, found there as a whole name. An unnamed
+ * default export is `default`. Null when none is written there, which means the
+ * parser's span does not show the function under any of its names.
  */
-export function nameSearchBody(text: string, method: string): [number, number] | null {
-  const patterns = nameSearchPatterns(method.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const opens = [
-    ...[...text.matchAll(new RegExp(patterns.method, "gm"))].map((m) => m.index + m[0].length - 1),
-    ...[...text.matchAll(new RegExp(patterns.freeFn, "gm"))].map((m) => m.index + m[1]!.length + m[2]!.length - 1)
-  ];
-  if (opens.length !== 1) return null;
-  let depth = 0;
-  for (let i = opens[0]!; i < text.length; i++) {
-    if (text[i] === "{") depth++;
-    else if (text[i] === "}" && --depth === 0) return [opens[0]!, i + 1];
+export function declaredNameOf(site: Pick<FunctionSite, "name" | "aliases" | "shape_form" | "statement" | "fn" | "body">, text: string): string | null {
+  if (!site.fn || !site.body) return null;
+  const signature = text.slice(Math.min(site.statement[0], site.fn[0]), site.body[0]);
+  if (site.shape_form === "unnamed_default") return /^export\s+default\b/.test(signature) ? "default" : null;
+  const last = (name: string) => name.split(".").filter(Boolean).pop() ?? name;
+  for (const name of [site.name, ...(site.aliases ?? [])].map(last)) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?<![\\p{ID_Continue}$\\u200c\\u200d#])${escaped}(?![\\p{ID_Continue}$\\u200c\\u200d])`, "u").test(signature)) return name;
   }
   return null;
 }
 
 /**
  * Which mutator may touch this function.
- *  - bound: prototype and exported-object members — changed by exact position.
- *  - name_search: declarations, const functions, class methods, and an object-literal
- *    method written `name(…) {` — today's search matches their real definition.
- *  - unsupported_shape: an object-literal property written `name: function` / `name: (…) =>`,
- *    an object-literal method whose key is not a plain identifier (`"name"(…) {`), and
- *    the unnamed default — the name search cannot find them and can change a
- *    different function, so every prove path refuses before any search runs.
- *
- * A function 0.2.58 already sees (no `seen_by`) keeps the name search exactly as it
- * is. A newly visible one may use it only when the search lands on its own body, to
- * the byte: the search is run here on `text` (the file as the script reads it), and
- * no match, several matches or any other span is `unsupported_shape` too.
+ *  - bound: prototype and exported-object members (`owner.name = function`), changed by
+ *    exact position and checked against the names assigned before them.
+ *  - position: every other function the parser binds (declarations, const functions,
+ *    class and object-literal methods, `name: function`, the unnamed default, the
+ *    implementation of an overloaded function), changed by exact position and checked
+ *    against its own bytes and its declared name. A function without a block body is
+ *    on this route too and is refused as `no_block_body` before any runner starts.
+ *  - unsupported_shape: the declared name is not written before the parser's body
+ *    span, so the position cannot be confirmed.
  */
 export function mutationRouteOf(
-  site: Pick<FunctionSite, "name" | "seen_by" | "shape_form" | "fn_kind" | "key_is_identifier" | "body">,
+  site: Pick<FunctionSite, "name" | "aliases" | "shape_form" | "statement" | "fn" | "body">,
   text: string
 ): MutationRoute {
   if (site.shape_form === "member" || site.shape_form === "prototype") return "bound";
-  if (site.shape_form === "unnamed_default") return "unsupported_shape";
-  if (site.shape_form === "literal_inline" && !(site.fn_kind === "method" && site.key_is_identifier === true)) return "unsupported_shape";
-  if (!site.seen_by) return "name_search";
-  // The name the runner is given: the last segment of the symbol name.
-  const picked = nameSearchBody(text, site.name.split(".").filter(Boolean).pop() ?? site.name);
-  return picked !== null && site.body !== undefined && picked[0] === site.body[0] && picked[1] === site.body[1] ? "name_search" : "unsupported_shape";
+  if (!site.body) return "position";
+  return declaredNameOf(site, text) !== null ? "position" : "unsupported_shape";
 }
 
 /**
@@ -257,7 +243,11 @@ export function describeTarget(fileBytes: Buffer, symbolName: string): DescribeR
       ...(site.body ? { body: span(site.body) } : {}),
       file_sha256: sha256Hex(fileBytes),
       function_sha256: sha256Hex(fileBytes.subarray(fn.bytes.start, fn.bytes.end)),
-      mutation_route: mutationRouteOf(site, text)
+      ...((): Pick<TargetDescription, "mutation_route" | "declared_name"> => {
+        const route = mutationRouteOf(site, text);
+        const declared = route === "position" ? declaredNameOf(site, text) : null;
+        return declared ? { mutation_route: route, declared_name: declared } : { mutation_route: route };
+      })()
     }
   };
 }

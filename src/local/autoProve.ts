@@ -217,15 +217,13 @@ function isEligibleHardExistingTarget(node: GraphNode | undefined): boolean {
 }
 
 /**
- * A TS/JS function the proof runner refuses by shape: an object-literal property
- * written `name: function` / `name: (…) =>`, a method with a quoted key, an unnamed
- * default export, or a newly visible function the name search does not find at its
- * own definition. The name search cannot find it and can change a different function,
- * so no lane starts a runner for it. Decided by re-parsing the file, never from a
- * flag on the node.
+ * A TS/JS function whose exact position cannot be confirmed: none of its names is
+ * written before the body the parser found, or its name also belongs to another
+ * top-level function. No lane starts a runner for it. Decided by re-parsing the
+ * file, never from a flag on the node.
  */
 const UNSUPPORTED_SHAPE_SKIP_REASON =
-  "unsupported_shape: written as an object-literal `name: function` property, a method with a quoted key or an unnamed default export, or a newly visible function the search by name does not find at its own definition; the proof runner cannot change it by position yet, so no proof was attempted.";
+  "unsupported_shape: none of the function's names is written before the body the parser found, or the name also belongs to another top-level function, so its exact position cannot be confirmed; no proof was attempted.";
 
 function unsupportedShapeProbe(sourceRoot: string): (symId: string) => boolean {
   const seen = new Map<string, boolean>();

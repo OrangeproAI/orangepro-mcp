@@ -143,6 +143,7 @@ import {
   type TargetDescription,
   type TargetRecord
 } from "./contracts/targetRecord.js";
+import { locationArgs, locationOf, type SourceLocation } from "./contracts/location.js";
 import { verifyTargetRecord } from "./changedTargets.js";
 import { applyAiLinks, generateAiLinks, summarizeAiLinks, type AiLinkedSummary, type AiLinksResult } from "./aiGraph/links.js";
 import { applyAiFlows, generateAiFlows, isValidStoredCandidateFlowMeta, revalidateCandidateFlowMeta, type AiFlowsResult } from "./flows/llmFlowDiscovery.js";
@@ -316,7 +317,13 @@ export const PROOF_REFUSAL_CODES = [
   "edit_mismatch",
   "operator_not_allowed",
   "no_op_mutation",
-  "not_single_site"
+  "not_single_site",
+  "symbol_not_found",
+  "brace_in_signature",
+  "brace_in_string",
+  "name_mismatch",
+  "function_hash_mismatch",
+  "name_search_disabled"
 ] as const;
 export type ProofRefusalCode = (typeof PROOF_REFUSAL_CODES)[number];
 
@@ -339,7 +346,7 @@ export interface DynamicProofPreview {
   target_symbol: string;
   /** Workspace-relative target file. */
   target: string;
-  mutation_route: "bound";
+  mutation_route: "bound" | "position";
   /** Unified diff of the mutated file against the checkout file. Nothing was written. */
   diff: string;
   file_sha256: string;
@@ -355,8 +362,8 @@ export interface DynamicProofOracleSummary {
   reason?: string;
   /** Whether the mutated function ran under the test; set by the proof scripts that carry a marker. */
   reach?: Reach;
-  /** Present only when the function was changed by its exact position; absent for the name search. */
-  mutation_route?: "bound";
+  /** Set for a JS/TS function: always changed by its exact position. Absent for Go, Java and Python. */
+  mutation_route?: "bound" | "position";
   /** Optional language-runner refusal class; absent for legacy TS/Go/Java spikes. */
   category?: "environment_unavailable" | "collection_error" | "project_boundary" | "mutation_unsupported";
   runner?: string;
@@ -670,6 +677,9 @@ export function defaultDynamicProofRunner(args: string[], opts: { cwd?: string; 
   }
   const child = spawnSync(process.execPath, [script, ...args], {
     cwd: opts.cwd,
+    // The JS/TS proof script refuses a call without an exact position when this is set: OrangePro's
+    // commands never change a function found by a search for its name.
+    env: { ...process.env, ORANGEPRO_PROOF_NO_NAME_SEARCH: "1" },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -983,7 +993,7 @@ function assertTargetFileFresh(sourceRoot: string, targetRel: string, graph: Loc
 }
 
 interface TsJsProofRoute {
-  /** null → the file does not show the symbol as a function: today's name search decides, as before. */
+  /** null → the file does not show the symbol as a function: refused as `symbol_not_found`. */
   route: MutationRoute | null;
   described: DescribeResult | null;
 }
@@ -1002,23 +1012,6 @@ function routeTsJsProofTarget(targetAbs: string, symbolName: string): TsJsProofR
   // name search handles keeps today's behaviour. A name the file exports only as a
   // colliding `name: function` property has no symbol and is `unsupported_shape` here too.
   return { route: mutationRouteFor(bytes, symbolName), described };
-}
-
-/** The spike's binding arguments for a bound target. Offsets are raw bytes, ends exclusive. */
-function boundMutationArgs(target: TargetDescription, body: ByteSpan, targets: string[]): string[] {
-  return [
-    "--bound-file-sha256",
-    target.file_sha256,
-    "--bound-statement-start",
-    String(target.statement.bytes.start),
-    "--bound-function-start",
-    String(target.function.bytes.start),
-    "--bound-body-start",
-    String(body.start),
-    "--bound-body-end",
-    String(body.end),
-    ...targets.flatMap((name) => ["--bound-target", name])
-  ];
 }
 
 /**
@@ -1086,7 +1079,8 @@ const RECORD_DESCRIPTION_FIELDS = [
   "body",
   "file_sha256",
   "function_sha256",
-  "mutation_route"
+  "mutation_route",
+  "declared_name"
 ] as const satisfies readonly (keyof TargetDescription)[];
 // The identity fields that need git or the graph as well.
 const RECORD_CONTEXT_FIELDS = ["merged_commit", "package_root", "file", "symbol_id", "via_helper"] as const;
@@ -1995,8 +1989,8 @@ function pythonModuleRoot(sourceRoot: string, targetRel: string, testRel: string
 
 export interface TsJsProofPlan {
   targetAbs: string;
-  /** Present only for a function changed by its exact position. */
-  bound?: { target: TargetDescription; body: ByteSpan; args: string[] };
+  /** The exact position the proof script changes; every JS/TS target that passes the preflight has one. */
+  bound?: { target: TargetDescription; body: ByteSpan; location: SourceLocation; args: string[] };
 }
 
 export interface ProofPreflight {
@@ -2036,28 +2030,27 @@ export function proofPreflight(root: string, opts: DynamicProofOptions, graph: L
     return { sourceRoot, symbolTarget };
   }
   // Which mutator may touch this function is decided here, by re-parsing the file —
-  // never from a flag on the graph node and never from the caller. `name_search`, and
-  // a symbol the file does not show as a function, take today's path unchanged.
+  // never from a flag on the graph node and never from the caller. Every JS/TS function
+  // is changed at its exact position (bound or position) or refused: nothing searches by name.
   const targetAbs = resolveContained(sourceRoot, targetRel);
   const symbolName = target.slice(target.lastIndexOf("#") + 1);
   const { route, described } = routeTsJsProofTarget(targetAbs, symbolName);
   if (opts.target_record !== undefined) {
     assertTargetRecordCurrent(opts.target_record, { root, graph, sourceRoot, target, targetRel, symbolName, described });
   }
+  if (route === null) {
+    throw new ProofRefusalError(
+      "symbol_not_found",
+      `the parser does not find ${symbolName} as a function in ${targetRel}, so there is no exact position to change.`
+    );
+  }
   if (route === "unsupported_shape") {
     throw new ProofRefusalError(
       "unsupported_shape",
-      `${symbolName} in ${targetRel} is an object-literal \`name: function\` property, a method with a quoted key, an unnamed default export, or a newly visible function the search by name does not find at its own definition. The proof runner cannot change it by position yet, and a search by name could change a different function.`
+      `${symbolName} in ${targetRel}: none of its names is written before the body the parser found, so its position cannot be confirmed, or its name also belongs to another top-level function. Nothing was changed.`
     );
   }
-  if (opts.preview && route !== "bound") {
-    throw new ProofRefusalError(
-      "preview_requires_bound",
-      `a preview exists only for a prototype or exported-object method, which is changed by its exact position; ${symbolName} in ${targetRel} is not one.`
-    );
-  }
-  if (route !== "bound") return { sourceRoot, symbolTarget, tsjs: { targetAbs } };
-  // From here a failure is final: nothing falls back to the name search.
+  // From here a failure is final: nothing falls back to a search by name.
   if (!described?.ok) {
     const refused = described?.refused === "not_utf8" ? "not_utf8" : "line_rule_mismatch";
     throw new ProofRefusalError(
@@ -2068,16 +2061,18 @@ export function proofPreflight(root: string, opts: DynamicProofOptions, graph: L
     );
   }
   const { body, targets } = described.target;
-  if (!targets || targets.length === 0) {
+  if (route === "bound" && (!targets || targets.length === 0)) {
     throw new ProofRefusalError("invalid_binding", `no assignment target was found before ${symbolName} in ${targetRel}.`);
   }
   if (!body) {
     throw new ProofRefusalError("no_block_body", `${symbolName} in ${targetRel} is an arrow function without a body in braces; there is no block to replace.`);
   }
+  const located = locationOf(targetRel, described.target);
+  if (!located.ok) throw new ProofRefusalError("invalid_binding", located.reason);
   return {
     sourceRoot,
     symbolTarget,
-    tsjs: { targetAbs, bound: { target: described.target, body: body.bytes, args: boundMutationArgs(described.target, body.bytes, targets) } }
+    tsjs: { targetAbs, bound: { target: described.target, body: body.bytes, location: located.location, args: locationArgs(located.location) } }
   };
 }
 
@@ -2107,7 +2102,7 @@ export function opDynamicProof(
   // DynamicProofOracleSummary shape. Everything from `closed` onward (the trust gate,
   // the cert, appendLedgerRecord, the return summary) is language-agnostic and unchanged.
   let oracle: DynamicProofOracleSummary;
-  let mutationRoute: "bound" | undefined;
+  let mutationRoute: "bound" | "position" | undefined;
   let proofModuleRoot: string | undefined;
   let testRel: string;
   let replacementMode: string;
@@ -2246,10 +2241,10 @@ export function opDynamicProof(
       throw new Error(`Python proof runner exited ${run.exitCode}; no dynamic proof can be credited. ${redactSecrets(run.stderr).slice(0, 300)}`);
     }
   } else {
-    // Which mutator may touch this function was decided in the preflight, by re-parsing
-    // the file. `name_search`, and a symbol the file does not show as a function, take
-    // today's path unchanged (no `bound`).
+    // Which position was decided in the preflight, by re-parsing the file. A JS/TS target
+    // always arrives here with one; there is no search by name.
     const { targetAbs, bound } = tsjs as TsJsProofPlan;
+    if (!bound) throw new Error(`prove: ${target} reached the proof runner without an exact position.`);
     if (!opts.preview && !opts.test_path) throw new Error("prove requires --test <path>.");
     if (opts.replacement === undefined) throw new Error("prove requires --replacement <sentinel>.");
     testRel = opts.test_path ? toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.test_path)) : "";
@@ -2264,7 +2259,7 @@ export function opDynamicProof(
     if (runner !== "auto" && runner !== "vitest" && runner !== "jest" && runner !== "mocha") {
       throw new Error("prove --runner must be one of: auto, vitest, jest, mocha.");
     }
-    if (opts.preview && bound) {
+    if (opts.preview) {
       // The diff only: no test run, no ledger record.
       const previewArgs = [
         "--root",
@@ -2290,7 +2285,7 @@ export function opDynamicProof(
         preview: true,
         target_symbol: target,
         target: targetRel,
-        mutation_route: "bound",
+        mutation_route: bound.location.route,
         diff: shown.diff,
         file_sha256: bound.target.file_sha256,
         mutated_sha256: shown.bound.mutatedSha256,
@@ -2323,17 +2318,11 @@ export function opDynamicProof(
 
     const scriptPath = dynamicProofSpikePath();
     const startedAt = Date.now();
-    if (bound) {
-      args.push(...bound.args);
-      const boundRun = runBoundSpike(deps.dynamicProofRunner ?? defaultDynamicProofRunner, args, sourceRoot, targetAbs, targetRel, bound.target.file_sha256, bound.body);
-      oracle = boundRun.oracle;
-      oracle.diagnostics = runnerProcessDiagnostics(boundRun.run, args, sourceRoot, scriptPath, startedAt, oracle);
-      mutationRoute = "bound";
-    } else {
-      const run = (deps.dynamicProofRunner ?? defaultDynamicProofRunner)(args, { cwd: sourceRoot });
-      oracle = parseDynamicProofJson(run.stdout, run.stderr);
-      oracle.diagnostics = runnerProcessDiagnostics(run, args, sourceRoot, scriptPath, startedAt, oracle);
-    }
+    args.push(...bound.args);
+    const boundRun = runBoundSpike(deps.dynamicProofRunner ?? defaultDynamicProofRunner, args, sourceRoot, targetAbs, targetRel, bound.target.file_sha256, bound.body);
+    oracle = boundRun.oracle;
+    oracle.diagnostics = runnerProcessDiagnostics(boundRun.run, args, sourceRoot, scriptPath, startedAt, oracle);
+    mutationRoute = bound.location.route;
   }
   oracle = withReachOutcome(withTimeoutOutcome(oracle));
   const closed = dynamicProofSucceeded(oracle);

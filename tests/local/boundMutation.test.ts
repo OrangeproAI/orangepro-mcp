@@ -9,12 +9,13 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { autoProve, existingAssociatedTests } from "../../src/local/autoProve.js";
 import { opChangedTargets } from "../../src/local/changedTargets.js";
-import { describeTarget, mutationRouteFor, nameSearchBody, nameSearchPatterns, TARGET_RECORD_VERSION } from "../../src/local/contracts/targetRecord.js";
+import { describeTarget, mutationRouteFor, TARGET_RECORD_VERSION } from "../../src/local/contracts/targetRecord.js";
+import { locationArgs, locationOf } from "../../src/local/contracts/location.js";
 import type { TargetDescription, TargetRecord } from "../../src/local/contracts/targetRecord.js";
 import { makeEdge, makeProofEdges } from "../../src/local/graph/factories.js";
 import type { GraphNode } from "../../src/local/graph/ontology.js";
 import { loadLedger } from "../../src/local/ledger.js";
-import { opAnalyze, opDynamicProof, opInit, opProveLoop, ProofRefusalError } from "../../src/local/operations.js";
+import { defaultDynamicProofRunner, opAnalyze, opDynamicProof, opInit, opProveLoop, ProofRefusalError } from "../../src/local/operations.js";
 import type { DynamicProofRunner, ProveLoopOptions, ProveLoopResult } from "../../src/local/operations.js";
 import { loadGraph, saveGraph, workspacePaths } from "../../src/local/workspace.js";
 
@@ -97,6 +98,14 @@ function bindingOf(target: TargetDescription): Binding {
     bodyEnd: target.body.bytes.end,
     targets: target.targets
   };
+}
+
+/** The proof script's arguments for a function on the position route, as the product sends them. */
+function positionArgsIn(repo: string, rel: string, symbol: string): string[] {
+  const located = locationOf(rel, describeIn(repo, rel, symbol));
+  if (!located.ok) throw new Error(`fixture error: ${symbol} has no location (${located.reason})`);
+  expect(located.location.route).toBe("position");
+  return locationArgs(located.location);
 }
 
 function bindingArgs(binding: Binding): string[] {
@@ -845,7 +854,7 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     }
   });
 
-  it("leaves a function the name search handles on today's path, with today's arguments", () => {
+  it("sends a declaration down the position path with its exact location", () => {
     const W = makeWorkspace();
     const { calls, runner } = recordingRunner();
     const result = opDynamicProof(
@@ -855,13 +864,14 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     );
     expect(calls).toEqual([[
       "--root", W, "--test", "test/basket.test.js", "--target", "lib/orders.ts", "--method", "createOrder", "--replacement", "return null;",
-      "--replacement-mode", "return-json", "--runner", "vitest", "--json"
+      "--replacement-mode", "return-json", "--runner", "vitest", "--json", ...positionArgsIn(W, "lib/orders.ts", "createOrder")
     ]]);
-    expect(result.oracle).not.toHaveProperty("mutation_route");
+    expect(calls[0]).toEqual(expect.arrayContaining(["--bound-route", "position", "--bound-name", "createOrder"]));
+    expect(result.oracle.mutation_route).toBe("position");
     expect(result.record.closed).toBe(true);
   });
 
-  it("refuses `get: function` beside `function forget`, and `validate: function` beside a private `function validate`, as unsupported_shape", () => {
+  it("proves `get: function` beside `function forget` by position, and refuses `validate: function` beside a private `function validate`", () => {
     const W = makeWorkspace();
     // The collision emits no symbol (`name_collision`). Name it in the graph anyway, as a stale or
     // hand-made graph could: the refusal must not depend on the analyzer having left it out.
@@ -872,56 +882,56 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     expect(graph.nodes.some((n) => n.external_id === "sym:lib/checks.js#validate")).toBe(false);
     graph.nodes.push({ ...(measure as GraphNode), id: "CodeSymbol:validate-by-hand", external_id: "sym:lib/checks.js#validate", title: "validate" });
     saveGraph(graphPath, graph);
-    expect(mutationRouteFor(Buffer.from(TOOLS), "get")).toBe("unsupported_shape");
+    expect(mutationRouteFor(Buffer.from(TOOLS), "get")).toBe("position");
+    expect(mutationRouteFor(Buffer.from(TOOLS), "put")).toBe("position");
+    expect(mutationRouteFor(Buffer.from(CHECKS), "measure")).toBe("position");
     expect(mutationRouteFor(Buffer.from(CHECKS), "validate")).toBe("unsupported_shape");
-    expect(mutationRouteFor(Buffer.from(TOOLS), "put")).toBe("name_search");
 
     const before = snapshot(W);
-    for (const symbolId of ["sym:lib/tools.js#get", "sym:lib/checks.js#validate", "sym:lib/checks.js#measure"]) {
-      const { calls, runner } = recordingRunner();
-      const refusal = refusalOf(() =>
-        opDynamicProof(W, { target_symbol: symbolId, source: W, test_path: "test/basket.test.js", replacement: KILL }, { ...deps, dynamicProofRunner: runner })
-      );
-      expect(refusal.code).toBe("unsupported_shape");
-      expect(refusal.message).toContain("prove refused (unsupported_shape)");
-      expect(calls).toEqual([]); // refused before any search or copy
+    const { calls, runner } = recordingRunner();
+    const refusal = refusalOf(() =>
+      opDynamicProof(W, { target_symbol: "sym:lib/checks.js#validate", source: W, test_path: "test/basket.test.js", replacement: KILL }, { ...deps, dynamicProofRunner: runner })
+    );
+    expect(refusal.code).toBe("unsupported_shape");
+    expect(calls).toEqual([]); // refused before any copy
+    expect(snapshot(W)).toEqual(before); // the private `validate` is untouched
+    expect(refusalOf(() => opProveLoop(W, { target_symbol: "sym:lib/checks.js#validate", source: W, test_path: "test/basket.test.js", replacement: KILL }, deps)).code).toBe("unsupported_shape");
+
+    // `get` and `measure` go by position: the exact property body, never `forget`.
+    for (const [rel, name] of [["lib/tools.js", "get"], ["lib/checks.js", "measure"]] as const) {
+      const sent = recordingRunner();
+      const result = opDynamicProof(W, { target_symbol: `sym:${rel}#${name}`, source: W, test_path: "test/basket.test.js", replacement: KILL }, { ...deps, dynamicProofRunner: sent.runner });
+      expect(sent.calls).toHaveLength(1);
+      expect(sent.calls[0]!.slice(-positionArgsIn(W, rel, name).length)).toEqual(positionArgsIn(W, rel, name));
+      expect(result.oracle.mutation_route).toBe("position");
     }
-    expect(snapshot(W)).toEqual(before); // `forget` and the private `validate` are untouched
-    expect(loadLedger(W).records).toEqual([]);
-    // The wrapper refuses the same way.
-    expect(refusalOf(() => opProveLoop(W, { target_symbol: "sym:lib/tools.js#get", source: W, test_path: "test/basket.test.js", replacement: KILL }, deps)).code).toBe("unsupported_shape");
+    // With the real script the change lands on `get`'s own body; `forget` keeps its bytes.
+    const real = opDynamicProof(W, { target_symbol: "sym:lib/tools.js#get", source: W, test_path: "test/basket.test.js", replacement: KILL, runner: "mocha" }, deps);
+    expect(real.oracle.mutation_route).toBe("position");
+    expect(real.record.closed).toBe(false); // the test never calls `get`
+    expect(readFileSync(path.join(W, "lib/tools.js"), "utf8")).toBe(TOOLS);
   });
 
-  it("refuses an object-literal method with a quoted key beside a function whose name ends the same way, before any search", () => {
-    // The search for `name(` cannot match `"name"(key) {`; it matches the tail of `function rename(key) {`.
+  it("proves an object-literal method with a quoted key by position, never the function whose name ends the same way", () => {
+    // A search for `name(` would not match `"name"(key) {`; it would match the tail of `function rename(key) {`.
     const tools = (key: string): string =>
       ["'use strict';", "function rename(key) {", "  return 'renamed:' + key;", "}", "module.exports = {", `  ${key}(key) { return 'name:' + key; },`, "  relabel(key) { return rename(key); }", "};", ""].join("\n");
     for (const key of ['"name"', "'name'", "async 'name'", "*'name'"]) {
-      expect(mutationRouteFor(Buffer.from(tools(key)), "name"), key).toBe("unsupported_shape");
-      expect(describeTarget(Buffer.from(tools(key)), "name"), key).toMatchObject({ ok: true, target: { shape_form: "literal_inline", fn_kind: "method", mutation_route: "unsupported_shape" } });
+      expect(mutationRouteFor(Buffer.from(tools(key)), "name"), key).toBe("position");
+      expect(describeTarget(Buffer.from(tools(key)), "name"), key).toMatchObject({ ok: true, target: { shape_form: "literal_inline", fn_kind: "method", mutation_route: "position", declared_name: "name" } });
     }
-    // The quoted key alone decides it: with no other function in the file the route is the same.
-    expect(mutationRouteFor(Buffer.from('module.exports = {\n  "name"(key) { return key; }\n};\n'), "name")).toBe("unsupported_shape");
-    expect(mutationRouteFor(Buffer.from("module.exports = {\n  name(key) { return key; }\n};\n"), "name")).toBe("name_search");
-
     const W = makeWorkspace({
       "lib/index.js": "exports.tools = require('./tools');\n",
       "lib/tools.js": tools('"name"'),
       // Never calls `tools.name`: a proof from this test would be a proof of `rename`.
       "test/relabel.test.js": "const assert = require('node:assert/strict');\nconst tools = require('../lib/tools');\ndescribe('tools', () => { it('relabels', () => { assert.equal(tools.relabel('a'), 'renamed:a'); }); });\n"
     });
-    expect(loadGraph(workspacePaths(W).graphPath).nodes.some((n) => n.external_id === "sym:lib/tools.js#name")).toBe(true);
-    const before = snapshot(W);
     const opts = { target_symbol: "sym:lib/tools.js#name", source: W, test_path: "test/relabel.test.js", replacement: KILL, runner: "mocha" } as const;
-    const { calls, runner } = recordingRunner();
-    const refusal = refusalOf(() => opDynamicProof(W, opts, { ...deps, dynamicProofRunner: runner }));
-    expect(refusal.code).toBe("unsupported_shape");
-    expect(calls).toEqual([]);
-    // The real script is never started either, and the wrapper refuses the same way.
-    expect(refusalOf(() => opDynamicProof(W, opts, deps)).code).toBe("unsupported_shape");
-    expect(refusalOf(() => opProveLoop(W, opts, deps)).code).toBe("unsupported_shape");
-    expect(loadLedger(W).records).toEqual([]);
-    expect(snapshot(W)).toEqual(before); // `rename` is untouched
+    const result = opDynamicProof(W, opts, deps);
+    expect(result.oracle.mutation_route).toBe("position");
+    // `relabel` still passes on the mutant: `rename` was never touched, so nothing is credited to `name`.
+    expect(result.record.closed).toBe(false);
+    expect(readFileSync(path.join(W, "lib/tools.js"), "utf8")).toBe(tools('"name"'));
   });
 
   it("does not credit a runner that never confirms the bound route", () => {
@@ -965,16 +975,16 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     expect(result.record.closed).toBe(true);
   });
 
-  it("the loop refuses an unsupported shape before its setup commands run, and runs them for a function it can prove", () => {
+  it("the loop refuses a function it cannot change before its setup commands run, and runs them for a function it can prove", () => {
     const W = makeWorkspace();
     const marker = path.join(W, "setup-ran.txt");
     const setup = [{ command: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`] }];
     const { calls, runner } = recordingRunner();
     const loopDeps = { ...deps, dynamicProofRunner: runner, suppressBehaviorReportRefresh: true };
     const refusal = refusalOf(() =>
-      opProveLoop(W, { target_symbol: "sym:lib/tools.js#get", source: W, test_path: "test/basket.test.js", replacement: KILL, setup_commands: setup }, loopDeps)
+      opProveLoop(W, { target_symbol: "sym:lib/basket.js#basket.twice", source: W, test_path: "test/basket.test.js", replacement: KILL, setup_commands: setup }, loopDeps)
     );
-    expect(refusal.code).toBe("unsupported_shape");
+    expect(refusal.code).toBe("no_block_body");
     expect(existsSync(marker)).toBe(false);
     expect(calls).toEqual([]);
 
@@ -1016,13 +1026,12 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     expect(loadLedger(W).records).toEqual([]);
     expect(snapshot(W)).toEqual(before);
 
-    // A preview exists on the bound path only.
-    const { calls, runner } = recordingRunner();
-    const refusal = refusalOf(() =>
-      opDynamicProof(W, { target_symbol: "sym:lib/orders.ts#createOrder", source: W, replacement: KILL, preview: true }, { ...deps, dynamicProofRunner: runner })
-    );
-    expect(refusal.code).toBe("preview_requires_bound");
-    expect(calls).toEqual([]);
+    // A declaration on the position route previews the same way.
+    const order = describeIn(W, "lib/orders.ts", "createOrder");
+    const shown = opDynamicProof(W, { target_symbol: "sym:lib/orders.ts#createOrder", source: W, replacement: KILL, preview: true }, deps);
+    expect(shown).toMatchObject({ preview: true, mutation_route: "position", file_sha256: order.file_sha256, changed_bytes: order.body!.bytes, checkout_unchanged: true });
+    expect(shown.diff).toContain(`+  ${KILL}`);
+    expect(snapshot(W)).toEqual(before);
   });
 
   it("proves a bound member end to end with the real script, and leaves the checkout as it was", () => {
@@ -1067,7 +1076,7 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     expect(loadLedger(W).records).toEqual([]);
   });
 
-  it("U+2028 before the target refuses a bound member and leaves a name-search function on today's path", () => {
+  it("U+2028 before the target refuses a bound member and a declaration alike", () => {
     const separator = String.fromCharCode(0x2028);
     const lib = [
       `/* a line separator ${separator} inside a comment */`,
@@ -1091,9 +1100,12 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
     expect(snapshot(W)).toEqual(before);
 
     const named = recordingRunner();
-    opDynamicProof(W, { target_symbol: "sym:lib/orders.ts#createOrder", source: W, test_path: "lib/index.js", replacement: "return null;" }, { ...deps, dynamicProofRunner: named.runner });
-    expect(named.calls).toHaveLength(1);
-    expect(named.calls[0]).not.toContain("--bound-file-sha256");
+    expect(
+      refusalOf(() =>
+        opDynamicProof(W, { target_symbol: "sym:lib/orders.ts#createOrder", source: W, test_path: "lib/index.js", replacement: "return null;" }, { ...deps, dynamicProofRunner: named.runner })
+      ).code
+    ).toBe("line_rule_mismatch");
+    expect(named.calls).toEqual([]);
   });
 
   it("a file that is not valid UTF-8 refuses a bound member as not_utf8", () => {
@@ -1111,7 +1123,7 @@ describe("opDynamicProof — routing by re-parsing the target file", { timeout: 
 
 // ── The name search: a linked source root, and which new functions may use it ───────
 
-describe("name search — a symlinked source root is copied, never written through", { timeout: 120_000 }, () => {
+describe("a symlinked source root is copied, never written through", { timeout: 120_000 }, () => {
   const CALC = ["'use strict';", "function twice(n) {", "  return n * 2;", "}", "module.exports = { twice };", ""].join("\n");
   const CALC_TEST = [
     "const assert = require('node:assert/strict');",
@@ -1159,107 +1171,156 @@ describe("name search — a symlinked source root is copied, never written throu
     opInit(link, deps);
     opAnalyze(link, { source: link }, deps);
     const before = snapshot(repo);
-    // `twice` is visible only through the exported literal, and the search lands on its own body.
-    expect(mutationRouteFor(Buffer.from(CALC), "twice")).toBe("name_search");
+    // `twice` is visible only through the exported literal; it is changed at its exact position.
+    expect(mutationRouteFor(Buffer.from(CALC), "twice")).toBe("position");
     const result = opDynamicProof(link, { target_symbol: "sym:lib/calc.js#twice", source: link, test_path: "test/calc.test.js", replacement: KILL, runner: "mocha" }, deps);
     expect(result.oracle).toMatchObject({ status: "proven", proven: true });
-    expect(result.oracle).not.toHaveProperty("mutation_route");
+    expect(result.oracle.mutation_route).toBe("position");
     expect(result.record).toMatchObject({ target_symbol: "sym:lib/calc.js#twice", closed: true });
     expect(readFileSync(path.join(repo, "lib/calc.js"), "utf8")).toBe(CALC);
     expect(snapshot(repo)).toEqual(before);
   });
 });
 
-describe("name search — a newly visible function uses it only when the search lands on its own body", { timeout: 120_000 }, () => {
-  // The search stops at the first `)` and has no word boundary: it does not match `put(key = d()) {`
-  // and it does match the tail of `function input(key) {`.
+describe("position route — the shapes a search by name got wrong", { timeout: 120_000 }, () => {
   const HELPERS = ["function d() { return 'k'; }", "function input(key) {", "  return 'in:' + key;", "}"];
-  const WRONG_TARGET: Record<string, string> = {
-    "an exported-literal method": [...HELPERS, "module.exports = {", "  put(key = d()) { return 'put:' + key; },", "  read(key) { return input(key); }", "};", ""].join("\n"),
-    "an exported-literal reference": [...HELPERS, "function put(key = d()) {", "  return 'put:' + key;", "}", "module.exports = { put, read: function (key) { return input(key); } };", ""].join("\n"),
-    "an export list": [...HELPERS, "function put(key = d()) {", "  return 'put:' + key;", "}", "export { put };", ""].join("\n")
-  };
+  // Each case: the file, the function, and the first line of its own body (what must be changed).
+  const SHAPES: Array<[label: string, src: string, name: string, firstBodyLine: string]> = [
+    ["a default parameter that calls a function (the old search stopped at its first `)`)", [...HELPERS, "module.exports = {", "  put(key = d()) { return 'put:' + key; },", "  read(key) { return input(key); }", "};", ""].join("\n"), "put", "{ return 'put:' + key; }"],
+    ["a recursive call before a ternary's `:` (ufo's parseURL)", ["export function parse(input = '', proto?: string): string {", "  if (!input.includes('://')) {", "    return proto ? parse(proto + input) : input;", "  }", "  return input.toLowerCase();", "}", ""].join("\n"), "parse", "{\n  if (!input.includes('://')) {"],
+    ["overload signatures before the implementation (ufo's hasProtocol)", ["export function has(input: string): boolean;", "export function has(input: string, strict: boolean): boolean;", "export function has(input: string, strict = false): boolean {", "  return strict ? input.startsWith('a') : input.length > 0;", "}", ""].join("\n"), "has", "{\n  return strict"],
+    ["a parameter typed as a function (ufo's filterQuery)", ["export function keep(input: string, test: (key: string) => boolean): string {", "  return test(input) ? input : '';", "}", ""].join("\n"), "keep", "{\n  return test(input)"],
+    ["a same-named inner function (hono's middleware factories)", ["export const cache = (options: number) => {", "  const ttl = options * 2;", "  return async function cache(c: number) {", "    return c + ttl;", "  };", "};", ""].join("\n"), "cache", "{\n  const ttl"],
+    ["a method whose name ends another method's name", ["export class Box {", "  reopen(a: number) { return a + 1; }", "  open(a: number) { return a + 2; }", "}", ""].join("\n"), "Box.open", "{ return a + 2; }"],
+    ["a function expression with another inner name", ["const run = function start(x) { return x + 1; };", "module.exports = { run };", ""].join("\n"), "run", "{ return x + 1; }"],
+    ["`name: (…) =>` in an exported object", ["module.exports = {", "  twice: (n) => {", "    return n * 2;", "  }", "};", ""].join("\n"), "twice", "{\n    return n * 2;"],
+    ["an unnamed default export", ["export default function (n: number): number {", "  return n * 3;", "}", ""].join("\n"), "default", "{\n  return n * 3;"]
+  ];
 
-  it("repeats the script's own search patterns, so the route cannot drift from the runner", () => {
-    const source = readFileSync(script, "utf8");
-    const methodTemplate = /const methodRe = new RegExp\(`([^`]+)`, "gm"\);/.exec(source)?.[1];
-    const freeFnTemplate = /const freeFnRe = new RegExp\(\s*`([^`]+)`,\s*"gm"\s*\);/.exec(source)?.[1];
-    expect(methodTemplate).toBeDefined();
-    expect(freeFnTemplate).toBeDefined();
-    // Evaluate the script's template literals as the script does, with a stand-in for the escaped name.
-    const evaluate = (template: string): string => new Function("escaped", `return \`${template}\`;`)("NAME") as string;
-    expect(nameSearchPatterns("NAME")).toEqual({ method: evaluate(methodTemplate!), freeFn: evaluate(freeFnTemplate!) });
+  it("binds each shape to the function's own body, by its declared name", () => {
+    for (const [label, src, name, firstBodyLine] of SHAPES) {
+      const described = describeTarget(Buffer.from(src), name);
+      expect(described.ok, label).toBe(true);
+      if (!described.ok) continue;
+      expect(described.target.mutation_route, label).toBe("position");
+      expect(Buffer.from(src).subarray(described.target.body!.bytes.start).toString("utf8").startsWith(firstBodyLine), label).toBe(true);
+      const located = locationOf("lib/x.ts", described.target);
+      expect(located.ok, label).toBe(true);
+    }
   });
 
-  it("finds what the search would replace: one definition, or nothing when there are none or several", () => {
-    const body = (src: string, open: string): [number, number] => {
-      const start = src.indexOf(open) + open.length - 1;
-      return [start, src.indexOf("}", start) + 1];
+  it("the script changes exactly that body, and only that body, for every shape", () => {
+    for (const [label, src, name] of SHAPES) {
+      const rel = name === "default" ? "lib/x.ts" : src.includes("module.exports") ? "lib/x.js" : "lib/x.ts";
+      const repo = makeRepo({ [rel]: src }, "position-shape");
+      const target = describeIn(repo, rel, name);
+      const located = locationOf(rel, target);
+      if (!located.ok) throw new Error(label);
+      const out = runSpike(["--root", repo, "--target", rel, "--method", name, "--replacement", KILL, "--preview", "--json", ...locationArgs(located.location)]);
+      expect(out.json, label).toMatchObject({ status: "preview", bound: { fileSha256: target.file_sha256, changedBytes: target.body!.bytes, route: "position" } });
+      const changed = changedOldLines(String((out.json as { diff?: string }).diff));
+      expect(changed.first, label).toBeGreaterThanOrEqual(target.body!.lines.start);
+      expect(changed.last, label).toBeLessThanOrEqual(target.body!.lines.end);
+      expect(readFileSync(path.join(repo, rel), "utf8"), label).toBe(src);
+    }
+  });
+
+  it("refuses by name what raw bytes cannot confirm, and nothing is written", () => {
+    const repo = makeRepo(
+      {
+        "lib/typed.ts": "export function box(n: number): { n: number } {\n  return { n };\n}\n",
+        "lib/strings.ts": "export function open(s: string): string {\n  return s + '{';\n}\n",
+        "lib/arrow.ts": "export const twice = (n: number) => n * 2;\n",
+        "lib/plain.ts": "export function plain(n: number): number {\n  return n + 1;\n}\nexport function other(n: number): number {\n  return n - 1;\n}\n"
+      },
+      "position-refusals"
+    );
+    const before = snapshot(repo);
+    const spikeWith = (rel: string, name: string, edit: (args: string[]) => string[] = (a) => a): SpikeJson => {
+      const located = locationOf(rel, describeIn(repo, rel, name));
+      if (!located.ok) throw new Error(located.reason);
+      return runSpike(["--root", repo, "--target", rel, "--method", name, "--replacement", KILL, "--preview", "--json", ...edit(locationArgs(located.location))]).json;
     };
-    const plain = "function twice(n) {\n  return n * 2;\n}\nexport { twice };\n";
-    expect(nameSearchBody(plain, "twice")).toEqual(body(plain, "function twice(n) {"));
-    const arrow = "const twice = (n) => {\n  return n * 2;\n};\nexport { twice };\n";
-    expect(nameSearchBody(arrow, "twice")).toEqual(body(arrow, "const twice = (n) => {"));
-    expect(nameSearchBody("const twice = (n) => n * 2;\nexport { twice };\n", "twice")).toBeNull();
-    expect(nameSearchBody("function twice(n) {\n  return 1;\n}\nfunction retwice(n) {\n  return 2;\n}\n", "twice")).toBeNull();
-    for (const [label, src] of Object.entries(WRONG_TARGET)) {
-      expect(nameSearchBody(src, "put"), label).toEqual(body(src, "function input(key) {"));
-    }
+    expect(spikeWith("lib/typed.ts", "box")).toMatchObject({ status: "refused", refusal: "brace_in_signature" });
+    expect(spikeWith("lib/strings.ts", "open")).toMatchObject({ status: "refused", refusal: "brace_in_string" });
+    // A position that names another function, or carries another function's hash.
+    const swap = (flag: string, value: string) => (args: string[]): string[] => args.map((v, i) => (args[i - 1] === flag ? value : v));
+    expect(spikeWith("lib/plain.ts", "plain", swap("--bound-name", "other"))).toMatchObject({ status: "refused", refusal: "name_mismatch" });
+    expect(spikeWith("lib/plain.ts", "plain", swap("--bound-function-sha256", "0".repeat(64)))).toMatchObject({ status: "refused", refusal: "function_hash_mismatch" });
+    expect(spikeWith("lib/plain.ts", "plain", swap("--bound-file-sha256", "0".repeat(64)))).toMatchObject({ status: "refused", refusal: "stale_hash" });
+    // A position binding with a bound target, or a bound one without, is a malformed binding.
+    expect(spikeWith("lib/plain.ts", "plain", (a) => [...a, "--bound-target", "x.y"])).toMatchObject({ status: "refused", refusal: "invalid_binding" });
+    // An arrow without braces has no location at all, and the product refuses it before the script.
+    expect(locationOf("lib/arrow.ts", describeIn(repo, "lib/arrow.ts", "twice"))).toMatchObject({ ok: false });
+    expect(snapshot(repo)).toEqual(before);
   });
 
-  it("routes a new function to unsupported_shape when the search would change another function, find several, or find none", () => {
-    for (const [label, src] of Object.entries(WRONG_TARGET)) {
-      expect(mutationRouteFor(Buffer.from(src), "put"), label).toBe("unsupported_shape");
-    }
-    // Several matches (`open(a) {` is also the tail of `reopen(a) {`), and no match (the function has another name).
-    expect(mutationRouteFor(Buffer.from("class Box {\n  open(a) { return a; }\n  reopen(a) { return a; }\n}\nexport { Box };\n"), "Box.open")).toBe("unsupported_shape");
-    expect(mutationRouteFor(Buffer.from("const run = function start(x) { return x; };\nmodule.exports = { run };\n"), "run")).toBe("unsupported_shape");
-    expect(mutationRouteFor(Buffer.from("const twice = (n) => n * 2;\nexport { twice };\n"), "twice")).toBe("unsupported_shape");
-    // A return type written with braces: the search would cut at the type's brace.
-    expect(mutationRouteFor(Buffer.from("function box(n: number): { n: number } {\n  return { n };\n}\nexport { box };\n"), "box")).toBe("unsupported_shape");
+  it("proves the ufo shapes end to end with the real script and a real test", () => {
+    const LIB = [
+      "'use strict';",
+      "function parse(input, proto) {",
+      "  if (input.indexOf('://') === -1) {",
+      "    return proto ? parse(proto + input) : input;",
+      "  }",
+      "  return input.toLowerCase();",
+      "}",
+      "module.exports = { parse };",
+      ""
+    ].join("\n");
+    const TEST = "const assert = require('node:assert/strict');\nconst lib = require('../lib/url');\ndescribe('url', () => { it('lowers', () => { assert.equal(lib.parse('HTTP://A'), 'http://a'); }); });\n";
+    const W = makeWorkspace({ "lib/index.js": "exports.url = require('./url');\n", "lib/url.js": LIB, "test/url.test.js": TEST });
+    const result = opDynamicProof(W, { target_symbol: "sym:lib/url.js#parse", source: W, test_path: "test/url.test.js", replacement: KILL, runner: "mocha" }, deps);
+    expect(result.oracle).toMatchObject({ status: "proven", proven: true, mutation_route: "position" });
+    expect(result.record.closed).toBe(true);
+    expect(readFileSync(path.join(W, "lib/url.js"), "utf8")).toBe(LIB);
+  });
+});
 
-    // With nothing in the search's way, each new shape keeps the name search.
-    const found: Array<[string, string]> = [
-      ["function twice(n) {\n  return n * 2;\n}\nexport { twice };\n", "twice"],
-      ["const twice = (n) => {\n  return n * 2;\n};\nexport { twice as double };\n", "twice"],
-      ["function twice(n) {\n  return n * 2;\n}\nmodule.exports = { double: twice };\n", "twice"],
-      ["module.exports = {\n  put(key) { return 'put:' + key; },\n  async take(key) { return key; }\n};\n", "put"],
-      ["module.exports = {\n  put(key) { return 'put:' + key; },\n  async take(key) { return key; }\n};\n", "take"],
-      ["class Box {\n  open(a) { return a; }\n}\nexport { Box };\n", "Box.open"]
-    ];
-    for (const [src, name] of found) expect(mutationRouteFor(Buffer.from(src), name), `${name} in ${JSON.stringify(src)}`).toBe("name_search");
+describe("no OrangePro command reaches the search by name", { timeout: 120_000 }, () => {
+  const CALC = ["'use strict';", "function twice(n) {", "  return n * 2;", "}", "module.exports = { twice };", ""].join("\n");
+  const CALC_TEST = "const assert = require('node:assert/strict');\nconst calc = require('../lib/calc');\ndescribe('calc', () => { it('doubles', () => { assert.equal(calc.twice(2), 4); }); });\n";
 
-    // A function 0.2.58 already sees keeps today's route, whatever the search would do with it.
-    const released = [...HELPERS, "export function put(key = d()) {", "  return 'put:' + key;", "}", ""].join("\n");
-    expect(mutationRouteFor(Buffer.from(released), "put")).toBe("name_search");
-    expect(mutationRouteFor(Buffer.from("export class Box {\n  open(a) { return a; }\n  reopen(a) { return a; }\n}\n"), "Box.open")).toBe("name_search");
+  it("the script refuses a call without a position when OrangePro made it, and changes nothing", () => {
+    const repo = makeRepo({ "lib/calc.js": CALC, "test/calc.test.js": CALC_TEST }, "no-name-search");
+    const before = snapshot(repo);
+    const args = ["--root", repo, "--test", "test/calc.test.js", "--target", "lib/calc.js", "--method", "twice", "--replacement", KILL, "--runner", "mocha", "--mocha-bin", mochaBin, "--json"];
+    const run = spawnSync(process.execPath, [script, ...args], { encoding: "utf8", env: { ...process.env, ORANGEPRO_PROOF_NO_NAME_SEARCH: "1" } });
+    expect(JSON.parse(run.stdout)).toMatchObject({ status: "refused", refusal: "name_search_disabled" });
+    expect(snapshot(repo)).toEqual(before);
+    // The product's own runner always sets it.
+    const viaProduct = defaultDynamicProofRunner(args, { cwd: repo });
+    expect(JSON.parse(viaProduct.stdout)).toMatchObject({ status: "refused", refusal: "name_search_disabled" });
   });
 
-  it("opDynamicProof and the loop refuse such a function before any runner starts, and leave a 0.2.58 function on today's path", () => {
-    const released = [...HELPERS, "export function put(key = d()) {", "  return 'put:' + key;", "}", ""].join("\n");
-    const W = makeWorkspace({
-      "lib/index.js": "exports.tools = require('./tools');\n",
-      "lib/tools.js": WRONG_TARGET["an exported-literal method"]!,
-      "lib/released.ts": released,
-      "test/tools.test.js": "const assert = require('node:assert/strict');\nconst tools = require('../lib/tools');\ndescribe('tools', () => { it('reads', () => { assert.equal(tools.read('a'), 'in:a'); }); });\n"
-    });
-    const before = snapshot(W);
-    const opts = { target_symbol: "sym:lib/tools.js#put", source: W, test_path: "test/tools.test.js", replacement: KILL, runner: "mocha" } as const;
-    const refused = recordingRunner();
-    expect(refusalOf(() => opDynamicProof(W, opts, { ...deps, dynamicProofRunner: refused.runner })).code).toBe("unsupported_shape");
-    expect(refused.calls).toEqual([]);
-    // With the real script as well: the test never calls `put`, and nothing is credited to it.
-    expect(refusalOf(() => opDynamicProof(W, opts, deps)).code).toBe("unsupported_shape");
-    expect(refusalOf(() => opProveLoop(W, opts, deps)).code).toBe("unsupported_shape");
-    expect(loadLedger(W).records).toEqual([]);
-    expect(snapshot(W)).toEqual(before);
-
-    const today = recordingRunner();
-    opDynamicProof(W, { ...opts, target_symbol: "sym:lib/released.ts#put", runner: "vitest" }, { ...deps, dynamicProofRunner: today.runner });
-    expect(today.calls).toEqual([[
-      "--root", W, "--test", "test/tools.test.js", "--target", "lib/released.ts", "--method", "put", "--replacement", KILL,
-      "--replacement-mode", "return-json", "--runner", "vitest", "--json"
-    ]]);
+  it("every JS/TS proof path sends an exact position: prove, the loop, a preview and auto-prove", async () => {
+    const W = makeWorkspace();
+    const sent: string[][] = [];
+    const watching: DynamicProofRunner = (args, opts) => {
+      sent.push(args);
+      return defaultDynamicProofRunner(args, opts);
+    };
+    const shapes = ["sym:lib/orders.ts#createOrder", "sym:lib/basket.js#basket.total", "sym:lib/crate.js#Crate.weigh", "sym:lib/tools.js#get", "sym:lib/tools.js#put", "sym:lib/checks.js#measure"];
+    for (const target_symbol of shapes) {
+      opDynamicProof(W, { target_symbol, source: W, test_path: "test/basket.test.js", replacement: KILL, runner: "mocha" }, { ...deps, dynamicProofRunner: watching });
+      opDynamicProof(W, { target_symbol, source: W, replacement: KILL, preview: true }, { ...deps, dynamicProofRunner: watching });
+      opProveLoop(W, { target_symbol, source: W, test_path: "test/basket.test.js", replacement: KILL, runner: "mocha" }, { ...deps, dynamicProofRunner: watching, suppressBehaviorReportRefresh: true });
+    }
+    for (const symbolId of shapes) {
+      const graphPath = workspacePaths(W).graphPath;
+      const graph = loadGraph(graphPath);
+      const node = graph.nodes.find((n) => n.external_id === symbolId)!;
+      graph.edges.push(...makeProofEdges({ testRel: "test/basket.test.js", symId: symbolId, provenance: node.provenance, lastVerified: 1 }));
+      saveGraph(graphPath, graph);
+    }
+    const loopDeps = { ...deps, dynamicProofRunner: watching, suppressBehaviorReportRefresh: true };
+    await autoProve(W, { existingOnly: true }, { ...loopDeps, proveLoop: (root: string, opts: ProveLoopOptions) => opProveLoop(root, opts, loopDeps) });
+    expect(sent.length).toBeGreaterThanOrEqual(shapes.length * 3);
+    for (const args of sent) {
+      expect(args).toContain("--bound-file-sha256");
+      expect(args).toContain("--bound-body-start");
+    }
+    const outputs = JSON.stringify(loadLedger(W));
+    expect(outputs).not.toMatch(/name_search_disabled|Ambiguous method|Could not find method/);
   });
 });
 
@@ -1385,7 +1446,7 @@ describe("opDynamicProof — a target record is a claim", { timeout: 120_000 }, 
       ["another file hash", { ...good, identity: { ...good.identity, file_sha256: "0".repeat(64) } }],
       ["another target name", { ...good, identity: { ...good.identity, targets: ["other.count"] } }],
       ["another package root", { ...good, identity: { ...good.identity, package_root: "" } }],
-      ["another route", { ...good, identity: { ...good.identity, mutation_route: "name_search" } }],
+      ["another route", { ...good, identity: { ...good.identity, mutation_route: "position" } }],
       ["a field nobody can rebuild", { ...good, identity: { ...good.identity, extra_claim: true } as TargetRecord["identity"] }],
       ["another record version", { ...good, version: "orangepro.target_record.v0" as TargetRecord["version"] }],
       // The same name in a second package whose file is byte-identical: the bytes agree, the place does not.
@@ -1568,6 +1629,33 @@ describe("opDynamicProof — a target record is a claim", { timeout: 120_000 }, 
     expect(preview.changed_bytes).toEqual(record.identity.body!.bytes);
     expect(preview.file_sha256).toBe(record.identity.file_sha256);
   });
+
+  it("accepts a record `opChangedTargets` writes for a declaration on the position route, declared name included", () => {
+    const LIB = (n: number) => ["export function withoutBase(input: string, base: string): string {", "  if (!input.startsWith(base)) {", "    return input;", "  }", `  return input.slice(base.length + ${n});`, "}", ""].join("\n");
+    const repo = makeRepo({ "package.json": JSON.stringify({ name: "u", version: "1.0.0", main: "src/index.ts" }), "src/index.ts": "export * from \"./utils\";\n", "src/utils.ts": LIB(0), "notes.txt": "n\n" }, "position-changed");
+    git(repo, "init", "-q");
+    const base = commitAll(repo, "first");
+    writeFileSync(path.join(repo, "src/utils.ts"), LIB(1));
+    const merged = commitAll(repo, "second");
+    opInit(repo, deps);
+    analyzed(repo);
+    const changed = opChangedTargets(repo, { base, merged });
+    if (changed.status !== "ok") throw new Error(`fixture error: changed-targets refused (${changed.refused})`);
+    const found = changed.targets.find((t) => t.identity.name === "withoutBase");
+    if (!found) throw new Error(`fixture error: ${JSON.stringify(changed).slice(0, 600)}`);
+    const record = JSON.parse(JSON.stringify(found)) as TargetRecord;
+    expect(record.identity).toMatchObject({ mutation_route: "position", declared_name: "withoutBase" });
+    const preview = opDynamicProof(repo, { target_symbol: record.identity.symbol_id, source: repo, replacement: KILL, preview: true, target_record: record }, deps);
+    expect(preview).toMatchObject({ mutation_route: "position", changed_bytes: record.identity.body!.bytes });
+    // A record that lost its declared name is refused as stale, by field.
+    const { declared_name: _dropped, ...withoutName } = record.identity;
+    void _dropped;
+    const refusal = refusalOf(() =>
+      opDynamicProof(repo, { target_symbol: record.identity.symbol_id, source: repo, replacement: KILL, preview: true, target_record: { ...record, identity: withoutName } as TargetRecord }, deps)
+    );
+    expect(refusal.code).toBe("stale_record");
+    expect(refusal.message).toContain("declared_name");
+  });
 });
 
 // ── The `prove` command ─────────────────────────────────────────────────────────────
@@ -1613,7 +1701,7 @@ describe("opro prove — --preview, --target-record and a named refusal in JSON"
         ".gitignore": ".orangepro/\n.orangeproignore\n",
         "lib/index.js": "exports.shelf = require('./shelf');\nexports.tools = require('./tools');\n",
         "lib/shelf.js": SHELF_BEFORE,
-        "lib/tools.js": "module.exports = {\n  get: function (key) { return 'value:' + key; }\n};\n",
+        "lib/tools.js": "module.exports = {\n  get: (key) => 'value:' + key\n};\n",
         "test/shelf.test.js": "const assert = require('node:assert/strict');\nconst shelf = require('../lib/shelf');\ndescribe('shelf', () => { it('counts', () => { assert.equal(shelf.count([1, 2]), 3); }); });\n"
       },
       "bound-loop-cli"
@@ -1649,7 +1737,7 @@ describe("opro prove — --preview, --target-record and a named refusal in JSON"
     // A refusal known before setup comes before it: the setup command never runs.
     const unsupported = loop("--target-symbol", "sym:lib/tools.js#get", "--setup", "touch setup-ran.txt");
     expect(unsupported.status).toBe(1);
-    expect(JSON.parse(unsupported.stdout)).toMatchObject({ refusal: "unsupported_shape", error: expect.stringContaining("prove refused (unsupported_shape)") });
+    expect(JSON.parse(unsupported.stdout)).toMatchObject({ refusal: "no_block_body", error: expect.stringContaining("prove refused (no_block_body)") });
     expect(existsSync(path.join(repo, "setup-ran.txt"))).toBe(false);
 
     expect(loadLedger(repo).records).toEqual([]);
@@ -1700,8 +1788,14 @@ describe("auto-prove — the two new reasons and the refused shapes", { timeout:
     expect(linked("documented_private")).toBe(false);
   });
 
-  it("skips a refused shape by name before the prove loop is called, and still attempts its neighbours", async () => {
+  it("attempts `name: function` by position, skips a name that collides with a private function, and still attempts its neighbours", async () => {
     const W = makeWorkspace();
+    const graphPath = workspacePaths(W).graphPath;
+    const graph = loadGraph(graphPath);
+    const measure = graph.nodes.find((n) => n.external_id === "sym:lib/checks.js#measure")!;
+    graph.nodes.push({ ...measure, id: "CodeSymbol:validate-by-hand", external_id: "sym:lib/checks.js#validate", title: "validate" });
+    saveGraph(graphPath, graph);
+    hardLinked(W, "sym:lib/checks.js#validate", "test/basket.test.js");
     hardLinked(W, "sym:lib/tools.js#get", "test/basket.test.js");
     hardLinked(W, "sym:lib/basket.js#basket.total", "test/basket.test.js");
     const asked: string[] = [];
@@ -1710,14 +1804,14 @@ describe("auto-prove — the two new reasons and the refused shapes", { timeout:
       return { status: "unrunnable", reason: "not run in this test" };
     };
     const result = await autoProve(W, { existingOnly: true }, { ...deps, proveLoop });
-    expect(asked).toEqual(["sym:lib/basket.js#basket.total"]);
-    expect(result.attempted).toBe(1);
-    const skip = result.skipped.find((s) => s.target_symbol === "sym:lib/tools.js#get");
+    expect([...asked].sort()).toEqual(["sym:lib/basket.js#basket.total", "sym:lib/tools.js#get"]);
+    expect(result.attempted).toBe(2);
+    const skip = result.skipped.find((s) => s.target_symbol === "sym:lib/checks.js#validate");
     expect(skip).toMatchObject({ category: "mutation_unsupported", language: "typescript" });
     expect(skip?.reason.startsWith("unsupported_shape: ")).toBe(true);
   });
 
-  it("skips a quoted-key method and a new function the search would miss, and still attempts the method the search finds", async () => {
+  it("attempts a quoted-key method and a method with a default parameter by position, beside the method they once hid behind", async () => {
     const W = makeWorkspace({
       "lib/index.js": "exports.tools = require('./tools');\n",
       "lib/tools.js": [
@@ -1743,11 +1837,7 @@ describe("auto-prove — the two new reasons and the refused shapes", { timeout:
       return { status: "unrunnable", reason: "not run in this test" };
     };
     const result = await autoProve(W, { existingOnly: true }, { ...deps, proveLoop });
-    expect(asked).toEqual(["sym:lib/tools.js#relabel"]);
-    for (const name of ["name", "me"]) {
-      const skip = result.skipped.find((s) => s.target_symbol === `sym:lib/tools.js#${name}`);
-      expect(skip, name).toMatchObject({ category: "mutation_unsupported", language: "typescript" });
-      expect(skip?.reason.startsWith("unsupported_shape: "), name).toBe(true);
-    }
+    expect([...asked].sort()).toEqual(["sym:lib/tools.js#me", "sym:lib/tools.js#name", "sym:lib/tools.js#relabel"]);
+    expect(result.skipped.filter((s) => (s.target_symbol ?? "").startsWith("sym:lib/tools.js#"))).toEqual([]);
   });
 });

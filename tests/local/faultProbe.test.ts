@@ -485,6 +485,7 @@ describe("opProbeFault — what a run concludes, and when it makes no claim", { 
   it.each([
     ["an oracle for another record", (w: Workspace) => ({ oracle: { ...w.oracle, target_record_sha256: "f".repeat(64) } }), "oracle_mismatch"],
     ["a witness the oracle does not name", () => ({ witness_bytes: Buffer.from("console.log(1)\n") }), "witness_mismatch"],
+    ["an expected behavior that is only proposed", (w: Workspace) => ({ oracle: { ...w.oracle, approval: { status: "proposed" } } }), "oracle_not_approved"],
     ["a fixture frozen at another commit", (w: Workspace) => ({ fixture_bytes: Buffer.from(w.fixture.toString().replace(w.record.identity.merged_commit, "e".repeat(40))) }), "fixture_mismatch"],
     ["a fixture with a disallowed Mocha option", (w: Workspace) => ({ fixture_bytes: Buffer.from(w.fixture.toString().replace('"--check-leaks"', '"--loader","x"')) }), "profile_option_not_allowed"],
     ["a selected test that is the target file", () => ({ tests: ["lib/api.js"] }), "tests_invalid"],
@@ -604,6 +605,15 @@ describe('api', function () {
     expect(result.classification).toMatchObject({ classification: "survived_unverified", scope: "selected", reason: "full_suite_count_differs" });
     const noBaseline = Buffer.from(w.fixture.toString().replace(',"baseline":{"passing":2}', ""));
     expect(() => probe(w, ROUNDING, { full_suite: true, fixture_bytes: noBaseline })).toThrow(/baseline\.passing/);
+  });
+
+  it("runs a proposed expected behavior only when asked by name, and the run profile says so", () => {
+    const w = workspace();
+    const approved = probe(w, ROUNDING);
+    expect(readRun(w, approved, "run-profile.json")).not.toHaveProperty("oracle_status");
+    const proposed = probe(w, ROUNDING, { oracle: { ...w.oracle, approval: { status: "proposed" } }, allow_proposed_oracle: true });
+    expect(readRun(w, proposed, "run-profile.json")).toMatchObject({ oracle_status: { approval: "proposed", allowed_by: "--allow-proposed-oracle" } });
+    expect(readRun(w, proposed, "oracle.json")).toMatchObject({ approval: { status: "proposed" } });
   });
 
   it("names records by the hash of the file they are stored as, the same hash MANIFEST.json gives", () => {

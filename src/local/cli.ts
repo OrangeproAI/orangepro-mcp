@@ -169,7 +169,7 @@ Usage:
   opro changed-targets --base <sha> --merged <sha> [--range] [--limit 3] [--json]
     # read-only: maps the lines one merged change touched to exact functions and prints a target record for each selected one;
     # needs the graph, HEAD and a clean checkout at the merged commit; --range accepts a base that is not its first parent
-  opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <fixture-manifest.json> --tests <file>[,<file>…] --witness <file> [--full-suite] [--rationale <text>] [--json]
+  opro probe-fault --target-record <file> --fault <operator>@<byte> --oracle <file> --fixture <fixture-manifest.json> --tests <file>[,<file>…] --witness <file> [--full-suite] [--rationale <text>] [--allow-proposed-oracle] [--json]
     # one exact fault inside a bound target, run against the named existing tests on an original and a faulty copy,
     # every command inside the fixture's container (docker, network off); operators: rounding_floor_ceil, negation_removal;
     # needs an installed checkout; writes .orangepro/proof-runs/<run-id>/ and prints caught / missed / no claim
@@ -205,7 +205,7 @@ Usage:
   opro prove --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--target-file path] [--method name] [--replacement-mode return-json|promise-json] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--target-record file.json] [--preview] [--json]
     # runs the dynamic targeted-proof oracle and writes a metadata-only ledger certificate only when baseline-green → mutant assertion-fail closes
     # --target-record: a changed-target record, rebuilt from the file, git and the graph and refused on any difference
-    # --preview: for a JS method changed by its exact position, print the diff only (no test run, no ledger record; --test not needed)
+    # --preview: for a JS/TS function (always changed by its exact position), print the diff only (no test run, no ledger record; --test not needed)
   opro prove-loop --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--setup 'npm run build'] [--setup 'npm ci'] [--setup-timeout-ms 120000] [--source path] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--target-record file.json] [--json]
     # trusted-local wrapper: runs each --setup command in the source checkout, then \`opro prove\` (unchanged oracle + cert), then refreshes the behavior report; setup failure returns unrunnable (never Proven)
   opro recipe db-sqljs --target-symbol sym:file#Class.method --entity file#Entity --out orangepro_generated/<name>.sqljs.spec.ts [--source path] [--seed-field name] [--json]
@@ -874,7 +874,8 @@ async function main(): Promise<number> {
             full_suite: asBool(flags["full-suite"], false),
             source: typeof flags.source === "string" ? flags.source : undefined,
             rationale: typeof flags.rationale === "string" ? flags.rationale : proposedFault?.reason,
-            ...(proposedFault?.addon ? { addon: proposedFault.addon } : {})
+            ...(proposedFault?.addon ? { addon: proposedFault.addon } : {}),
+            allow_proposed_oracle: asBool(flags["allow-proposed-oracle"], false)
           },
           { clock: systemClock }
         );

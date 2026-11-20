@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { withBoundEcho } from "./support/boundEcho.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -199,7 +200,7 @@ function oracle(kind: OracleKind) {
 }
 
 function proofRunner(kind: OracleKind) {
-  return () => ({ exitCode: 0, stderr: "", stdout: oracle(kind) });
+  return (args: string[] = []) => ({ exitCode: 0, stderr: "", stdout: withBoundEcho(oracle(kind), args) });
 }
 
 function baseDeps(env: NodeJS.ProcessEnv, over: Partial<AutoProveDeps> = {}): AutoProveDeps {
@@ -1610,10 +1611,10 @@ describe("autoProve — bounded proof lane (0.2.47)", () => {
   it("a returned result resets the crash count (crashes must be consecutive)", async () => {
     const W = makeWorkspaceManyLinked(6);
     let call = 0;
-    const runner = vi.fn(() => {
+    const runner = vi.fn((args: string[]) => {
       call++;
       return call % 2 === 0
-        ? { exitCode: 0, stderr: "", stdout: oracle("non_killing") }
+        ? { exitCode: 0, stderr: "", stdout: withBoundEcho(oracle("non_killing"), args) }
         : { exitCode: 1, stderr: "TypeError: flaky", stdout: "" };
     });
     const res = await autoProve(W, { existingOnly: true }, baseDeps(NO_ENV, { dynamicProofRunner: runner }));
