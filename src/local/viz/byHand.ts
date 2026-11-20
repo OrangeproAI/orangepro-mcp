@@ -9,11 +9,14 @@
  *   not pass;
  * - functions proven: distinct functions with a proven attempt this run;
  * - tests found that don't catch a break: attempts on a test found in the repository whose mutant
- *   survived (never a time-out, a set-up failure or an inconclusive run).
+ *   survived after the test ran the function (never a time-out, a set-up failure, a test that never
+ *   ran the function, or a run where that could not be checked).
  *
  * A record without `test_source` is read as "found", so the line never credits work it cannot show.
  * Static-only runs run nothing: nothing counts as written and passing or as proven.
  */
+
+import { survivorKind } from "../proofReach.js";
 
 /** Minutes per item, by hand (owner, 16 Nov). */
 export const BY_HAND_MINUTES = { written: 10, drafts: 5, proven: 5, weak: 15 } as const;
@@ -25,6 +28,7 @@ export interface ByHandAttempt {
   test_source?: "written" | "found";
   classification: string;
   mutant_status?: string;
+  reach?: string;
   deduped?: boolean;
 }
 
@@ -52,7 +56,7 @@ export function byHandCounts(run: ByHandRun): NonNullable<ReportByHand["run"]> {
   const proven = run.staticOnly ? 0 : new Set(attempts.filter((a) => a.classification === "proven").map((a) => a.target_symbol)).size;
   const weak = new Set(
     attempts
-      .filter((a) => !isWritten(a) && a.classification === "non_killing" && a.mutant_status === "associated_survived")
+      .filter((a) => !isWritten(a) && a.classification === "non_killing" && survivorKind(a.mutant_status, a.reach) === "ran_but_missed")
       .map((a) => `${a.target_symbol}\u0000${a.test_path ?? ""}`)
   ).size;
   const minutes = written * BY_HAND_MINUTES.written + drafts * BY_HAND_MINUTES.drafts + proven * BY_HAND_MINUTES.proven + weak * BY_HAND_MINUTES.weak;

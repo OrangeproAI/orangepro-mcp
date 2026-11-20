@@ -78,7 +78,7 @@ export function renderCoverageReport(graph: LocalGraph, ledger: Ledger = emptyLe
   lines.push("");
   if (runtime) {
     lines.push(
-      `**${runtime.covered_symbols} of ${runtime.total_eligible_symbols} eligible symbols runtime-covered (${runtime.covered_pct}%)** — measured from local coverage-tool output, not name matching and not assertion-level proof.`
+      `**${runtime.covered_symbols} of ${runtime.total_eligible_symbols} eligible symbols run under tests (${runtime.covered_pct}%)** — measured from local coverage-tool output, not name matching and not assertion-level proof.`
     );
     lines.push("");
     lines.push("| language | covered / eligible | covered % | symbols with spans |");
@@ -117,7 +117,7 @@ export function renderCoverageReport(graph: LocalGraph, ledger: Ledger = emptyLe
     }
   } else {
     lines.push(
-      "No runtime coverage report was ingested. This report still shows dynamic Proven and static association diagnostics, but it does not claim actual executed coverage. Run `opro coverage .` for detected local coverage commands, or `opro analyze . --generate-coverage` where supported."
+      "No runtime coverage report was ingested. This report still shows Proven and Linked diagnostics, but it does not claim actual executed coverage. Run `opro coverage .` for detected local coverage commands, or `opro analyze . --generate-coverage` where supported."
     );
     lines.push("");
   }

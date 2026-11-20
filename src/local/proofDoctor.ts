@@ -17,6 +17,7 @@
  *   - Stale sidecar (graph re-analyzed / git moved since) ⇒ fail closed: reasons
  *     are labeled stale and the headline says re-run, never presented as current.
  */
+import { survivorKind } from "./proofReach.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { workspacePaths } from "./workspace.js";
@@ -44,6 +45,8 @@ export interface ProofAttemptRecord {
    *  a NON-ASSERTION failure (mutant crashed the test before any assertion).
    *  The two are opposite diagnoses with opposite remediations. */
   mutant_status?: string;
+  /** Whether the mutated function ran under the test; absent on records older than the marker. */
+  reach?: "ran" | "never_ran" | "unknown";
   category?: string;
   reason?: string;
   deduped?: boolean;
@@ -177,9 +180,33 @@ export const MUTANT_TIMEOUT_NOTE =
   "Ran past the time limit: the test did not finish on the mutated code, so it neither caught nor missed the fault. " +
   "Not proven. Run it on its own with a longer `--timeout-ms` to get a result.";
 
-export function nonKillingNoteFor(mutantStatus?: string): string {
+/** The test passed on the mutated copy because it never ran the function: nothing about its assertions. */
+export const NOT_EXERCISED_NOTE =
+  "Not exercised: this test never runs the function, so it could not catch a break in it. " +
+  "Link or write a test that calls the function. This says nothing about the strength of this test's assertions.";
+
+/** The test passed on the mutated copy, and whether it ran the function could not be checked. */
+export const REACH_UNKNOWN_NOTE =
+  "Reach unknown: the test passed on the mutated copy, but whether it runs the function could not be checked. " +
+  "Not proven, and not a finding about the test. Re-run the proof to record it.";
+
+export function nonKillingNoteFor(mutantStatus?: string, reach?: string): string {
   if (mutantStatus === "mutant_timed_out") return MUTANT_TIMEOUT_NOTE;
-  return mutantStatus === "associated_non_assertion_failure" ? NON_ASSERTION_NOTE : NON_KILLING_NOTE;
+  if (mutantStatus === "associated_non_assertion_failure") return NON_ASSERTION_NOTE;
+  const kind = survivorKind(mutantStatus, reach);
+  if (kind === "never_ran") return NOT_EXERCISED_NOTE;
+  if (kind === "cant_tell") return REACH_UNKNOWN_NOTE;
+  return NON_KILLING_NOTE;
+}
+
+/** The heading `opro doctor --proof` prints over one not-closed attempt. */
+export function nonKillingLabelFor(mutantStatus?: string, reach?: string): string {
+  if (mutantStatus === "mutant_timed_out") return "ran past the time limit";
+  if (mutantStatus === "associated_non_assertion_failure") return "mutant failed (non-assertion)";
+  const kind = survivorKind(mutantStatus, reach);
+  if (kind === "never_ran") return "not exercised";
+  if (kind === "cant_tell") return "reach unknown";
+  return "mutant survived";
 }
 
 export interface ProofDoctorBlocker {
@@ -210,7 +237,7 @@ export interface ProofDoctorResult {
   stale: boolean;
   headline: string;
   blockers: ProofDoctorBlocker[];
-  non_killing: Array<{ target_symbol: string; test_path?: string; mutant_status?: string; note: string }>;
+  non_killing: Array<{ target_symbol: string; test_path?: string; mutant_status?: string; reach?: string; label: string; note: string }>;
   generated_at: string | null;
 }
 
@@ -231,6 +258,7 @@ interface AutoProveLike {
     test_source?: "written" | "found";
     classification: "proven" | "non_killing" | "needs_setup" | "gen_failed";
     mutant_status?: string;
+    reach?: "ran" | "never_ran" | "unknown";
     reason?: string;
     category?: string;
     deduped?: boolean;
@@ -285,6 +313,7 @@ export function distillProofAttempts(
       ...(a.test_source ? { test_source: a.test_source } : {}),
       classification: a.classification,
       mutant_status: a.mutant_status,
+      ...(a.reach ? { reach: a.reach } : {}),
       category: a.category,
       reason: a.reason ? redactSecrets(a.reason) : undefined,
       deduped: a.deduped,
@@ -478,7 +507,7 @@ export function buildProofDoctor(
   rtm: RtmResult,
   attempts: ProofAttemptsFile | null,
   opts: ProofDoctorOptions = {},
-  ledger?: { records: Array<{ target_symbol: string; ts: string; dynamic_proof?: { mutant_status?: string } }> } | null
+  ledger?: { records: Array<{ target_symbol: string; ts: string; dynamic_proof?: { mutant_status?: string; reach?: string } }> } | null
 ): ProofDoctorResult {
   const io: PreflightIo = opts.io ?? { exists: existsSync, nodeVersion: process.version };
   const proven = rtm.summary.proven;
@@ -519,7 +548,17 @@ export function buildProofDoctor(
     if (seenSurvivors.has(key)) continue;
     seenSurvivors.add(key);
     const ms = mutantStatusFor(a);
-    non_killing.push({ target_symbol: a.target_symbol, test_path: a.test_path, mutant_status: ms, note: nonKillingNoteFor(ms) });
+    // Reach is read only from the attempt itself. A status recovered from the ledger carries none,
+    // so it reads "reach unknown", never as a miss.
+    const reach = a.mutant_status ? a.reach : undefined;
+    non_killing.push({
+      target_symbol: a.target_symbol,
+      test_path: a.test_path,
+      mutant_status: ms,
+      ...(reach ? { reach } : {}),
+      label: nonKillingLabelFor(ms, reach),
+      note: nonKillingNoteFor(ms, reach)
+    });
   }
 
   let status: ProofDoctorResult["status"];

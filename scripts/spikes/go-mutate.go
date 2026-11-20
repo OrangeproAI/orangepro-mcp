@@ -140,6 +140,12 @@ func main() {
 	}
 	// equivalent mode: leave target.Body untouched (semantically identical).
 
+	// Either way the body first records that it ran (see reachMarker).
+	if target.Body != nil {
+		target.Body.List = append([]ast.Stmt{reachMarker()}, target.Body.List...)
+		astFile.Decls = append([]ast.Decl{reachImport()}, astFile.Decls...)
+	}
+
 	var buf bytes.Buffer
 	cfg := printer.Config{Mode: printer.UseSpaces | printer.TabIndent, Tabwidth: 8}
 	if err := cfg.Fprint(&buf, fset, astFile); err != nil {
@@ -197,6 +203,53 @@ func recvBaseIdent(fd *ast.FuncDecl) *ast.Ident {
 	}
 	id, _ := t.(*ast.Ident)
 	return id
+}
+
+// The reach marker. A mutant that survives says "the test misses a break" only
+// when the test RAN the function. The mutated body therefore first appends one
+// line to the file named by ORANGEPRO_REACH_FILE, which the proof script sets
+// for the mutated run alone. The file is opened without O_CREATE, so an unset
+// or wrong path does nothing; no error is returned and nothing panics. A
+// failure leaves the file as it was, which is read as "reach unknown".
+//
+//	if f, err := oproReachOS.OpenFile(oproReachOS.Getenv("ORANGEPRO_REACH_FILE"), oproReachOS.O_APPEND|oproReachOS.O_WRONLY, 0); err == nil {
+//		f.WriteString("ran\n")
+//		f.Close()
+//	}
+const reachPkg = "oproReachOS"
+
+func reachSel(name string) ast.Expr {
+	return &ast.SelectorExpr{X: ast.NewIdent(reachPkg), Sel: ast.NewIdent(name)}
+}
+
+func reachImport() ast.Decl {
+	return &ast.GenDecl{
+		Tok:   token.IMPORT,
+		Specs: []ast.Spec{&ast.ImportSpec{Name: ast.NewIdent(reachPkg), Path: &ast.BasicLit{Kind: token.STRING, Value: `"os"`}}},
+	}
+}
+
+func reachMarker() ast.Stmt {
+	file, err := ast.NewIdent("oproReachFile"), ast.NewIdent("oproReachErr")
+	open := &ast.CallExpr{
+		Fun: reachSel("OpenFile"),
+		Args: []ast.Expr{
+			&ast.CallExpr{Fun: reachSel("Getenv"), Args: []ast.Expr{&ast.BasicLit{Kind: token.STRING, Value: `"ORANGEPRO_REACH_FILE"`}}},
+			&ast.BinaryExpr{X: reachSel("O_APPEND"), Op: token.OR, Y: reachSel("O_WRONLY")},
+			&ast.BasicLit{Kind: token.INT, Value: "0"},
+		},
+	}
+	call := func(name string, args ...ast.Expr) ast.Stmt {
+		return &ast.ExprStmt{X: &ast.CallExpr{Fun: &ast.SelectorExpr{X: ast.NewIdent(file.Name), Sel: ast.NewIdent(name)}, Args: args}}
+	}
+	return &ast.IfStmt{
+		Init: &ast.AssignStmt{Lhs: []ast.Expr{file, err}, Tok: token.DEFINE, Rhs: []ast.Expr{open}},
+		Cond: &ast.BinaryExpr{X: ast.NewIdent(err.Name), Op: token.EQL, Y: ast.NewIdent("nil")},
+		Body: &ast.BlockStmt{List: []ast.Stmt{
+			call("WriteString", &ast.BasicLit{Kind: token.STRING, Value: `"ran\n"`}),
+			call("Close"),
+		}},
+	}
 }
 
 // sentinelBody builds `{ return <zero>, <zero>, ... }` matching the function's

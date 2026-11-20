@@ -78,6 +78,22 @@ def returns_value(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
+# The mutated body first records that it ran, then returns the sentinel. It appends one line to the
+# file named by this environment variable, which the proof script sets for the mutated run alone.
+# `io.open` is used so a test that patches `builtins.open` does not hide it. It never raises: a
+# failure leaves the file as it was, which the proof script reads as "reach unknown".
+REACH_ENV = "ORANGEPRO_REACH_FILE"
+
+
+def reach_marker(indent: str) -> list[str]:
+    return [
+        f"{indent}try:\n",
+        f'{indent}    __import__("io").open(__import__("os").environ["{REACH_ENV}"], "a").write("ran\\n")\n',
+        f"{indent}except BaseException:\n",
+        f"{indent}    pass\n",
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True)
@@ -130,14 +146,14 @@ def main() -> None:
         if not match:
             fail("unsupported_inline_suite")
         body_indent = leading_ws(header_line) + "    "
-        lines[start - 1 : end] = [f"{match.group(1)}:\n", f"{body_indent}return {expression}\n"]
+        lines[start - 1 : end] = [f"{match.group(1)}:\n", *reach_marker(body_indent), f"{body_indent}return {expression}\n"]
     else:
         indent = leading_ws(lines[start - 1])
         header_indent = leading_ws(lines[fn.lineno - 1])
         if not indent or len(indent.replace("\t", "    ")) <= len(header_indent.replace("\t", "    ")):
             fail("unsupported_suite_indent")
         replacement = f"{indent}return {expression}\n"
-        lines[start - 1 : end] = [replacement]
+        lines[start - 1 : end] = [*reach_marker(indent), replacement]
 
     target.write_text("".join(lines), encoding="utf8")
     print(json.dumps({

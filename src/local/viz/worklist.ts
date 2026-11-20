@@ -1,4 +1,5 @@
 import type { GraphNode, LocalGraph } from "../graph/ontology.js";
+import { survivorKind } from "../proofReach.js";
 import type { Ledger, LedgerRecord } from "../ledger.js";
 import { targetFingerprint } from "../ledger.js";
 import type { RiskGap } from "../score/risk.js";
@@ -35,7 +36,7 @@ export const EVIDENCE_LABEL: Record<Evidence, string> = {
 export const FILE_LINK_EVIDENCE_LABEL = "Candidate link only, not confirmed";
 
 export interface ProofOutcome {
-  status: "proven" | "survived" | "non_assertion" | "unrunnable" | "timed_out";
+  status: "proven" | "survived" | "not_exercised" | "reach_unknown" | "non_assertion" | "unrunnable" | "timed_out";
   test?: string;
   reason?: string;
   /** The record was made against the function's current code. */
@@ -76,6 +77,14 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
   if (proof?.current && proof.status === "survived") {
     return { verb: "write", reason: `${proof.test ?? "The linked test"} runs it but does not catch a break.` };
   }
+  // The test passed on the broken copy without running the function: nothing about its assertions.
+  if (proof?.current && proof.status === "not_exercised") {
+    return { verb: "write", reason: `Not exercised: ${proof.test ?? "the linked test"} never runs it.` };
+  }
+  // Whether the test ran the function could not be checked: never "does not catch".
+  if (proof?.current && proof.status === "reach_unknown") {
+    return { verb: "prove", reason: `Reach unknown: could not check whether ${proof.test ?? "the linked test"} runs it. Prove it again to record that.` };
+  }
   if (proof?.current && proof.status === "non_assertion") {
     return { verb: "write", reason: `${proof.test ?? "The linked test"} fails when it breaks, but not at an assertion.` };
   }
@@ -99,7 +108,7 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
   }
   return { verb: "write", reason: NO_TEST_REASON };
 }
-const NO_TEST_REASON = "No test points here.";
+const NO_TEST_REASON = "No linked test.";
 
 // ── Test slots ──
 
@@ -357,9 +366,14 @@ export function latestProofOutcomes(graph: LocalGraph, ledger: Ledger): Map<stri
   const out = new Map<string, ProofOutcome>();
   for (const [sym, r] of latest) {
     const status = r.dynamic_proof?.mutant_status;
+    // A passed-on-the-mutant record counts as a miss only when it shows the function ran. A record
+    // older than the reach marker shows nothing, so it reads "reach unknown".
+    const kind = survivorKind(status, r.dynamic_proof?.reach);
     const mapped: ProofOutcome["status"] | undefined =
       status === "proven" ? "proven"
-        : status === "associated_survived" || status === "survived" ? "survived"
+        : kind === "ran_but_missed" ? "survived"
+        : kind === "never_ran" ? "not_exercised"
+        : kind === "cant_tell" ? "reach_unknown"
           : status === "associated_non_assertion_failure" ? "non_assertion"
             : status === "mutant_timed_out" ? "timed_out"
             : status === "unrunnable" ? "unrunnable"
@@ -474,7 +488,8 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
     const fileLink = links ? (pickTestFile(gap.file, links.map((l) => l.file)) ?? [...links].map((l) => l.file).sort()[0]) : undefined;
     if (fileLink && reason === NO_TEST_REASON) {
       const imports = links?.find((l) => l.file === fileLink)?.imports === true;
-      reason = `No test calls it. ${fileLink} ${imports ? "imports its file" : "is named after its file"}; read it first.`;
+      // A pointer to where to start reading, never a claim that the test runs the function.
+      reason = `No test calls it. Start with ${fileLink}: it ${imports ? "imports this file" : "matches this file's name"}.`;
     }
     const owner = gap.sink_owner ? nodes.get(gap.sink_owner)?.title : undefined;
     const store = gap.sink_callee ? storeLabel(gap.sink_callee, owner) : undefined;

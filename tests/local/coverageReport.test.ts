@@ -196,7 +196,7 @@ describe("renderCoverageReport (Phase 5.2)", () => {
     };
     const md = renderCoverageReport(g);
     expect(md).toContain("## Runtime coverage");
-    expect(md).toContain("7 of 10 eligible symbols runtime-covered (70%)");
+    expect(md).toContain("7 of 10 eligible symbols run under tests (70%)");
     expect(md).toContain("measured from local coverage-tool output, not name matching and not assertion-level proof");
     expect(md).toContain("| .orangepro/coverage/go-root.coverprofile | unclassified | unclassified | - | go-coverprofile | 1 | 2 |");
   });

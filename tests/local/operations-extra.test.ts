@@ -290,6 +290,36 @@ describe("operation-level coverage", () => {
     expect(changed.generation_runs).toEqual([]);
   });
 
+  // Item 46: --generate-limit 0 means no drafted test anywhere in the run, auto-prove's own lane included.
+  it("--generate-limit 0 keeps auto-prove to the repository's own tests, whatever the provider", async () => {
+    const { startProvesExistingTestsOnly } = await import("../../src/local/operations.js");
+    expect(startProvesExistingTestsOnly({ generateLimit: 0 }, true, false)).toBe(true);
+    expect(startProvesExistingTestsOnly({ generateLimit: 0 }, false, false)).toBe(true);
+    expect(startProvesExistingTestsOnly({ generateLimit: 0 }, true, true)).toBe(true);
+    // Unchanged: any other limit leaves the lane as it was, and --no-ai still closes it for a real provider.
+    expect(startProvesExistingTestsOnly({ generateLimit: 20 }, true, false)).toBe(false);
+    expect(startProvesExistingTestsOnly({}, true, false)).toBe(false);
+    expect(startProvesExistingTestsOnly({ ai: false }, true, false)).toBe(true);
+    expect(startProvesExistingTestsOnly({ ai: false }, false, false)).toBe(false);
+    expect(startProvesExistingTestsOnly({ ai: false }, true, true)).toBe(false);
+  });
+
+  it("opStart with --generate-limit 0 makes no drafting call in its own drafting step", async () => {
+    const root = temp();
+    opInit(root, deps);
+    scaffoldRiskTargets(root, 3);
+    const provider = new StartV5Provider();
+    const res = await opStart(
+      root,
+      { source: root, aiFlows: false, proofLimit: 5, generateLimit: 0, promptVersion: "v5" },
+      { ...deps, env: {}, aiProvider: provider }
+    );
+    expect(provider.planningCalls).toBe(0);
+    expect(provider.generationCalls).toBe(0);
+    expect(res.auto_prove.generated_files).toEqual([]);
+    expect(res.generation).toMatchObject({ generated: 0 });
+  }, 60_000);
+
   it("opStart with a provider writes generated tests into the behavior report independently of the proof budget", async () => {
     const root = temp();
     opInit(root, deps);

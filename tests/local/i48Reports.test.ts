@@ -27,15 +27,17 @@ function textOf(html: string): string {
 // Every kind of attempt one start run can hold, with the count each one should land in.
 const ATTEMPTS: ByHandAttempt[] = [
   { target_symbol: "f1", test_path: "orangepro_generated/f1.test.js", test_source: "written", classification: "proven" }, // written + proven
-  { target_symbol: "f2", test_path: "orangepro_generated/f2.test.js", test_source: "written", classification: "non_killing", mutant_status: "associated_survived" }, // written, never "found"
+  { target_symbol: "f2", test_path: "orangepro_generated/f2.test.js", test_source: "written", classification: "non_killing", mutant_status: "associated_survived", reach: "ran" }, // written, never "found"
   { target_symbol: "f3", test_path: "orangepro_generated/f3.test.js", test_source: "written", classification: "gen_failed" }, // a draft to finish
   { target_symbol: "f4", test_path: "orangepro_generated/f4.test.js", test_source: "written", classification: "needs_setup", category: "timeout" } as ByHandAttempt, // a draft to finish
   { target_symbol: "f5", test_path: "test/f5.test.js", test_source: "found", classification: "proven" }, // proven
-  { target_symbol: "f6", test_path: "test/f6.test.js", test_source: "found", classification: "non_killing", mutant_status: "associated_survived" }, // doesn't catch a break
-  { target_symbol: "f6", test_path: "test/f6.test.js", test_source: "found", classification: "non_killing", mutant_status: "associated_survived" }, // the same pair again: still one
+  { target_symbol: "f6", test_path: "test/f6.test.js", test_source: "found", classification: "non_killing", mutant_status: "associated_survived", reach: "ran" }, // doesn't catch a break
+  { target_symbol: "f6", test_path: "test/f6.test.js", test_source: "found", classification: "non_killing", mutant_status: "associated_survived", reach: "ran" }, // the same pair again: still one
   { target_symbol: "f9", test_path: "test/f9.test.js", test_source: "found", classification: "non_killing", mutant_status: "non_killing" }, // failed off its assertion: not confirmed
   { target_symbol: "f10", test_path: "test/f10.test.js", test_source: "found", classification: "needs_setup" }, // could not run: nothing
-  { target_symbol: "f7", test_path: "test/f7.test.js", classification: "non_killing", mutant_status: "associated_survived" }, // an old record: read as found
+  { target_symbol: "f7", test_path: "test/f7.test.js", classification: "non_killing", mutant_status: "associated_survived", reach: "ran" }, // an old record: read as found
+  { target_symbol: "f12", test_path: "test/f12.test.js", test_source: "found", classification: "non_killing", mutant_status: "associated_survived" }, // F4: no reach on record: can't tell, not weak
+  { target_symbol: "f13", test_path: "test/f13.test.js", test_source: "found", classification: "non_killing", mutant_status: "not_exercised", reach: "never_ran" }, // F4: never ran the function: not weak
   { target_symbol: "f8", test_path: "test/f8.test.js", classification: "proven" }, // an old record, proven
   { target_symbol: "f11", test_path: "", classification: "needs_setup", deduped: true } // never re-run: ignored
 ];
@@ -116,7 +118,7 @@ function fixtureRepo(): string {
 
 describe("item 48: the reports", () => {
   it("bumps both versions", () => {
-    expect(REPORT_DATA_VERSION).toBe(5);
+    expect(REPORT_DATA_VERSION).toBe(6);
     expect(REPORT_RENDERER_VERSION).toBe("r16.1");
   });
 

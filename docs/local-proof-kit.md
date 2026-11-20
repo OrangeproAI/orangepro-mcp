@@ -57,8 +57,8 @@ opro status                     # fresh / stale / missing + score + privacy
 opro doctor                     # smallest next source that improves test quality
 opro score                      # readiness score + breakdown + "why not higher"
 opro gaps --limit 10            # behaviors with weak/missing test evidence
-opro generate --target REQ-001 --framework playwright --limit 3   # default: A/B (prompt-only vs Local KG), scored + report
-opro generate --single --limit 3   # one arm only — persists the tests to the graph
+opro generate --target REQ-001 --framework playwright --limit 3   # one graph-grounded suite, saved to the graph
+opro generate --compare --limit 3  # also a prompt-only suite and a judge: scored side by side + report (about three times the model use)
 opro generate --base main       # PR-scoped: target only behaviors the diff vs main touches
 opro generate --pr 123          # advanced: checks out PR #123 (changes your working tree), re-analyzes, targets its diff
 opro generate --base main --background   # PR-scoped + detached; poll with `opro jobs`

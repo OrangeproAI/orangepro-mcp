@@ -471,19 +471,30 @@ function suggestedNextTest(node: GraphNode, file: string, status: RtmStatus): st
   return `Add a ${category} test that asserts this behavior.`;
 }
 
+/** The names `--status` takes, as the README writes them. */
+export const RTM_STATUS_NAMES = ["proven", "runs-under-tests", "linked", "unconfirmed", "no-test-found"] as const;
+
+/** An unknown `--status` name: refused, so a typo never shows every row as if it had matched. */
+export class RtmStatusError extends Error {
+  constructor(name: string) {
+    super(`Unknown --status "${name}". Use one of: ${RTM_STATUS_NAMES.join(", ")}.`);
+  }
+}
+
 function normalizeStatusFilter(statuses: string[] | undefined): Set<RtmStatus> | null {
   if (!statuses || statuses.length === 0) return null;
   const out = new Set<RtmStatus>();
   for (const raw of statuses) {
     // The README's names and the old ones both work: outside tools pass either.
     const s = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
-    if (s === "proven") out.add("Proven");
+    if (s === "proven" || s === "dynamically-proven" || s === "dynamic-proven") out.add("Proven");
     else if (s === "runtime" || s === "runtime-covered" || s === "runtimecovered" || s === "runs-under-tests") out.add("Runs under tests");
-    else if (s === "associated" || s === "associated-signal" || s === "linked") out.add("Linked");
+    else if (s === "associated" || s === "associated-signal" || s === "linked" || s === "statically-linked") out.add("Linked");
     else if (s === "candidate" || s === "candidate-signal" || s === "candidate-signal-(unconfirmed)" || s === "unconfirmed") out.add("Unconfirmed");
     else if (s === "no-link" || s === "nolink" || s === "none" || s === "no-integration-signal" || s === "no-test-found") out.add("No test found");
     else if (s === "reproven" || s === "reproven-this-run") out.add("Reproven (this run)");
     else if (s === "generated-unverifiable" || s === "unverifiable") out.add("Generated-unverifiable");
+    else throw new RtmStatusError(raw.trim());
   }
   return out.size > 0 ? out : null;
 }

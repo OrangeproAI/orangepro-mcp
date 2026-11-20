@@ -776,4 +776,15 @@ describe("item 9: the trace matrix uses the README's tier names in every format"
     expect(pick(["linked"]).length).toBeGreaterThan(0);
     expect(pick(["No test found"]).length).toBeGreaterThan(0);
   });
+
+  // Item 46: a name it does not know is refused in one line; it never shows every row.
+  it("--status refuses an unknown name and lists the valid ones", () => {
+    const g = graph();
+    const pick = (statuses: string[]) => buildRtm(g, emptyLedger(), { statuses }).rows.map((r) => r.behavior_id);
+    expect(() => pick(["provn"])).toThrow('Unknown --status "provn". Use one of: proven, runs-under-tests, linked, unconfirmed, no-test-found.');
+    expect(() => pick(["linked", "nonsense"])).toThrow(/Unknown --status "nonsense"/);
+    expect(pick(["Dynamically Proven"])).toEqual(pick(["proven"]));
+    expect(pick(["Statically Linked"])).toEqual(pick(["linked"]));
+    for (const name of ["proven", "runs-under-tests", "linked", "unconfirmed", "no-test-found"]) expect(() => pick([name])).not.toThrow();
+  });
 });

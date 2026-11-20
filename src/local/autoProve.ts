@@ -12,6 +12,7 @@
  *
  * No key ⇒ writes NO files, mints NO proof, returns explicit guidance.
  */
+import { notExercisedReason, type Reach, reachUnknownReason, survivorKind } from "./proofReach.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 
@@ -412,7 +413,7 @@ const EXISTING_LANE_MAX_WEAK_PER_SYMBOL = 3;
 // result. Three crashes in a row in one root stop further calls there instead of
 // walking every remaining linked target (large polyglot repos can queue 1,000+).
 const RUNNER_CRASH_LIMIT = 3;
-const RUNNER_CRASH_RE = /did not return JSON/;
+const RUNNER_CRASH_RE = /The proof could not start|did not return JSON/;
 // Out of disk space is machine-wide: every later sandbox copy fails the same way.
 const DISK_FULL_RE = /\bENOSPC\b|no space left on device/i;
 
@@ -524,6 +525,11 @@ export interface AutoProveAttempt {
   /** Oracle status for the attempted mutant, when available. */
   mutant_status?: string;
   /**
+   * Whether the mutated function ran under the test. A passed-on-the-mutant attempt without
+   * "ran" is never a miss: see proofReach.ts.
+   */
+  reach?: Reach;
+  /**
    * R-1: fine-grained baseline-red root cause when a baseline was red
    * (module_not_found / experimental_builtin / engine_mismatch / db_or_external /
    * logic_failure / unknown). Sanitized metadata only — never raw stderr.
@@ -546,8 +552,19 @@ export interface AutoProveAttempt {
   runner_fallback?: string[];
 }
 
-export function isRoastSurvivor(attempt: Pick<AutoProveAttempt, "classification" | "mutant_status">): boolean {
-  return attempt.classification === "non_killing" && attempt.mutant_status === "associated_survived";
+/** A test that ran the function and still passed on the mutant. Nothing else is a survivor. */
+export function isRoastSurvivor(attempt: Pick<AutoProveAttempt, "classification" | "mutant_status" | "reach">): boolean {
+  return attempt.classification === "non_killing" && survivorKind(attempt.mutant_status, attempt.reach) === "ran_but_missed";
+}
+
+/** A test that passed on the mutant because it never ran the function. */
+export function isNotExercised(attempt: Pick<AutoProveAttempt, "classification" | "mutant_status" | "reach">): boolean {
+  return attempt.classification === "non_killing" && survivorKind(attempt.mutant_status, attempt.reach) === "never_ran";
+}
+
+/** A test that passed on the mutant, where whether it ran the function could not be checked. */
+export function isReachUnknown(attempt: Pick<AutoProveAttempt, "classification" | "mutant_status" | "reach">): boolean {
+  return attempt.classification === "non_killing" && survivorKind(attempt.mutant_status, attempt.reach) === "cant_tell";
 }
 
 export interface AutoProveSkip {
@@ -733,7 +750,17 @@ function classifyProof(result: ProveLoopResult, ctx: ClassifyContext): ProofClas
     const classification: AutoProveClass = isNeedsSetupCategory(category) ? "needs_setup" : "non_killing";
     return { classification, reason: redactSecrets(reason), category };
   }
+  // A passed-on-the-mutant run reads three ways; only "ran" is about what the test asserts.
+  const kind = survivorKind(cert?.mutant_status, cert?.reach);
+  if (kind === "never_ran" || kind === "cant_tell") {
+    return { classification: "non_killing", reason: record.reason ?? (kind === "never_ran" ? notExercisedReason(dyn.oracle.method) : reachUnknownReason(dyn.oracle.method)) };
+  }
   return { classification: "non_killing", reason: record.reason ?? "Mutant survived; the test does not assert on the target's real behavior." };
+}
+
+function reachOf(result: ProveLoopResult): Reach | undefined {
+  if ("status" in result && result.status === "unrunnable") return undefined;
+  return (result as DynamicProofResult).record.dynamic_proof?.reach;
 }
 
 function mutantStatusOf(result: ProveLoopResult): string | undefined {
@@ -1302,6 +1329,7 @@ function proveExistingAssociatedTests(
       category,
       project_root: runnerRoot,
       mutant_status: mutantStatusOf(result),
+      ...(reachOf(result) ? { reach: reachOf(result) } : {}),
       ...proofDiagnosticsOf(result)
     };
     attempts.push(attempt);
@@ -1668,6 +1696,7 @@ export async function autoProve(root: string, opts: AutoProveOptions, deps: Auto
         category,
         project_root: projectRoot,
         mutant_status: mutantStatusOf(result),
+        ...(reachOf(result) ? { reach: reachOf(result) } : {}),
         ...proofDiagnosticsOf(result)
       };
       attempts.push(attempt);

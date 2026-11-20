@@ -1,8 +1,8 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
-import { dockerExecutor, WORK_OUT } from "./boundary.js";
+import { dockerExecutor, WORK_OUT, WORK_REPO } from "./boundary.js";
 import { applyAdditivePatch, gitAppliedBytes, parseAdditivePatch, parsesAs, readNewTest } from "./candidatePatch.js";
 import {
   ASSERTION_RECORD_VERSION,
@@ -135,6 +135,9 @@ export function runFolderOf(root: string, given: string, code: string): string {
   if (check.manifest.run_id !== basename(dir)) refuse(code, `${given}: its MANIFEST.json names another run (${check.manifest.run_id}).`);
   return dir;
 }
+
+/** Item 50: prints the SHA-256 of one file, run inside the container on the stage's own mounts. */
+const TARGET_HASH_SOURCE = "process.stdout.write(require('node:crypto').createHash('sha256').update(require('node:fs').readFileSync(process.argv[1])).digest('hex'))";
 
 /** A finished probe-fault run, read only after its manifest verifies, and only when its fault survived. */
 export function loadFaultRun(root: string, fromRun: string): FaultRun {
@@ -700,6 +703,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       candidate: { patch_sha256: assertion.candidate.patch_sha256, assertion_record_sha256: assertionSha, generation_request_sha256: requestSha }
     };
     writeFileAtomic(join(runDir, "run-profile.json"), recordBytes(profile));
+    const executor = deps.container ?? dockerExecutor();
     const { runStage, held } = createStageRunner({
       runDir,
       runId,
@@ -712,17 +716,50 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       mountsFor,
       targetRel: symbolTarget.file,
       faultSpan: plan.site.bytes,
-      executor: deps.container ?? dockerExecutor(),
+      executor,
       clock: deps.clock,
       stages,
       stageRefs
     });
-    const go = (stage: StageName, copy: "original" | "mutant", argv: string[], faultPresent?: boolean): boolean => held(runStage(stage, copy, argv, reportEnv, undefined, faultPresent));
-    // The faulty copy's target file is rewritten between stages: the original-text control, the restore, the fault-text control.
-    const targetInCopy = join(copyRoots.mutant, symbolTarget.file);
+    // Every stage runs on its own fresh copy, in a folder no container has mounted before. A file
+    // rewritten in a folder that an earlier container mounted can reach the next container half
+    // written (seen once, under load, as a source file cut off mid-line): a new folder cannot.
+    const freshCopy = (copy: "original" | "mutant"): string => {
+      const root = join(mkdtempSync(join(tmp, `stage-${copy}-`)), "repo");
+      cpSync(copyRoots[copy], root, { recursive: true, verbatimSymlinks: true });
+      copyRoots[copy] = root;
+      return root;
+    };
+    const go = (stage: StageName, copy: "original" | "mutant", argv: string[], faultPresent?: boolean): boolean => {
+      // A stage that follows a rewrite already has its new copy (see `put`).
+      if (copy !== "mutant" || !rewritten) freshCopy(copy);
+      rewritten = false;
+      return held(runStage(stage, copy, argv, reportEnv, undefined, faultPresent));
+    };
+    let rewritten = false;
+    // What the container itself reads at the target's path, hashed inside the boundary.
+    const seenInContainer = (): string | null => {
+      const seen = executor({
+        shape: fixture.shape,
+        mounts: mountsFor("mutant", mkdtempSync(join(tmp, "out-hash-"))),
+        env: {},
+        workdir: WORK_REPO,
+        command: ["node", "-e", TARGET_HASH_SOURCE, `${WORK_REPO}/${symbolTarget.file.split(sep).join("/")}`],
+        deadlineMs
+      });
+      const text = seen.exitCode === 0 ? seen.stdout.trim() : "";
+      return /^[0-9a-f]{64}$/.test(text) ? text : null;
+    };
+    // The faulty copy's target file is rewritten between stages: the fault-text control, the restore,
+    // the original-text control. Each rewrite goes into a new copy, and the stage runs only if the
+    // file holds the written bytes both on the host and as the container reads it.
+    let targetInCopy = join(copyRoots.mutant, symbolTarget.file);
     const put = (bytes: Buffer): boolean => {
+      targetInCopy = join(freshCopy("mutant"), symbolTarget.file);
+      rewritten = true;
       writeFileSync(targetInCopy, bytes);
-      return sha256Hex(readFileSync(targetInCopy)) === sha256Hex(bytes);
+      const want = sha256Hex(bytes);
+      return sha256Hex(readFileSync(targetInCopy)) === want && seenInContainer() === want;
     };
     const sequence = (): void => {
       if (!go("candidate_original", "original", fileArgv) || !cleanPass(stages.candidate_original, assertion)) return;

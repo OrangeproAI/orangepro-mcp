@@ -31,7 +31,7 @@ describe("verbFor: one verb per evidence state (R14 §1)", () => {
       reason: "TestRun runs it but does not catch a break."
     });
     expect(verbFor({ evidence: "linked", proof: { status: "non_assertion", current: true, test: "TestRun" } }).verb).toBe("write");
-    expect(verbFor({ evidence: "none" })).toEqual({ verb: "write", reason: "No test points here." });
+    expect(verbFor({ evidence: "none" })).toEqual({ verb: "write", reason: "No linked test." });
   });
 
   it("ignores a survived or failed proof made against older code", () => {

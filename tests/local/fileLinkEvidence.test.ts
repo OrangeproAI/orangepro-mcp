@@ -84,12 +84,12 @@ describe("a test linked to the whole file", () => {
     expect(rtm).toMatch(/\| Checkout\.chargeOrder \| sym:src\/billing\/charge\.ts#Checkout\.chargeOrder \|[^\n]*\| Unconfirmed \|/);
     expect(rtm).toMatch(/\| refundOrder \|[^\n]*\| No test found \|/);
 
-    expect(row("Checkout.chargeOrder")).toMatchObject({ evidence: "none", verb: "write", fileLink: "test/smoke.test.ts", reason: "No test calls it. test/smoke.test.ts imports its file; read it first." });
+    expect(row("Checkout.chargeOrder")).toMatchObject({ evidence: "none", verb: "write", fileLink: "test/smoke.test.ts", reason: "No test calls it. Start with test/smoke.test.ts: it imports this file." });
     expect(row("refundOrder")?.fileLink).toBeUndefined();
-    expect(row("refundOrder")?.reason).toBe("No test points here.");
+    expect(row("refundOrder")?.reason).toBe("No linked test.");
 
-    expect(cells.get("Checkout.chargeOrder")).toEqual({ evidence: "Candidate link only, not confirmed", todo: "Write: No test calls it. test/smoke.test.ts imports its file; read it first." });
-    expect(cells.get("refundOrder")).toEqual({ evidence: "No test found", todo: "Write: No test points here." });
+    expect(cells.get("Checkout.chargeOrder")).toEqual({ evidence: "Candidate link only, not confirmed", todo: "Write: No test calls it. Start with test/smoke.test.ts: it imports this file." });
+    expect(cells.get("refundOrder")).toEqual({ evidence: "No test found", todo: "Write: No linked test." });
 
     // Score and evidence counts do not move: the row only names the link.
     expect(model.counts.evidence.unconfirmed).toBe(1);
@@ -105,6 +105,6 @@ describe("a test linked to the whole file", () => {
     const gap = { id: "sym:pkg/task.go#Run", title: "Run", file: "pkg/task.go", risk_score: 10, detection_tier: "none", git_churn: 0, incoming_refs: 0 } as unknown as RiskGap;
     const [item] = buildWorklist(graph, { records: [] } as never, [gap], { provenIds: new Set(), churnWindowDays: 180, slotRows: 0 });
     expect(item?.fileLink).toBeUndefined();
-    expect(item?.reason).toBe("No test points here.");
+    expect(item?.reason).toBe("No linked test.");
   });
 });

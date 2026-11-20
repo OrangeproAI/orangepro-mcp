@@ -93,6 +93,8 @@ export interface TestCaseNodeInput {
   testNames: string[];
   provenance: Provenance;
   contentHash?: string;
+  /** The file sends HTTP requests (see analyze/httpTests.ts). Recorded only when true. */
+  sendsHttp?: boolean;
 }
 
 export function makeTestCaseNode(input: TestCaseNodeInput): GraphNode {
@@ -105,7 +107,8 @@ export function makeTestCaseNode(input: TestCaseNodeInput): GraphNode {
       layer_confidence: input.layerConfidence,
       layer_signals: input.layerSignals,
       file: input.testRel,
-      test_names: input.testNames
+      test_names: input.testNames,
+      ...(input.sendsHttp ? { sends_http: true } : {})
     },
     evidence_strength: "hard",
     review_status: "auto_detected",

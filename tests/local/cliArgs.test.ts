@@ -94,3 +94,36 @@ describe("collectSetupCommands", () => {
     expect(collectSetupCommands(["--setup", "--json"])).toEqual([]);
   });
 });
+
+// F1: `--flag=value` is `--flag value`, for every command.
+describe("parseArgs: --flag=value", () => {
+  it("reads every value flag both ways, to the same result", () => {
+    for (const flag of VALUE_FLAGS) {
+      expect(parseArgs([`--${flag}=x`]).flags, flag).toEqual(parseArgs([`--${flag}`, "x"]).flags);
+    }
+  });
+
+  it("keeps a value that holds =, spaces, or a leading --", () => {
+    expect(parseArgs(["--replacement=return null;"]).flags).toEqual({ replacement: "return null;" });
+    expect(parseArgs(["--test-env=KEY=a=b"]).flags).toEqual({ "test-env": "KEY=a=b" });
+    expect(parseArgs(["--base=--weird"]).flags).toEqual({ base: "--weird" });
+    expect(parseArgs(["--target=sym:src/a.ts#f", "--limit=2", "src"])).toEqual({ positionals: ["src"], flags: { target: "sym:src/a.ts#f", limit: "2" } });
+  });
+
+  it("never invents a flag named after the whole token", () => {
+    const { flags } = parseArgs(["--target=x", "--json"]);
+    expect(Object.keys(flags).sort()).toEqual(["json", "target"]);
+  });
+
+  it("reads =true and =false on a flag that takes no value", () => {
+    expect(parseArgs(["--json=true", "--no-ai=false", "--fresh="]).flags).toEqual({ json: true, "no-ai": false, fresh: true });
+  });
+
+  it("collects --setup=cmd the same as --setup cmd", () => {
+    expect(collectSetupCommands(['--setup=npm run build -- --flag="a b"'])).toEqual(collectSetupCommands(["--setup", 'npm run build -- --flag="a b"']));
+    expect(collectSetupCommands(["--setup=npx prisma generate", "--setup", "npm ci"])).toEqual([
+      { command: "npx", args: ["prisma", "generate"] },
+      { command: "npm", args: ["ci"] }
+    ]);
+  });
+});

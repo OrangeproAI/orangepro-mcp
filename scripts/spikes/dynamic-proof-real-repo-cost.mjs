@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const EXPECTED_STATUSES = new Set(["proven", "associated_survived", "associated_non_assertion_failure", "unrunnable"]);
+const EXPECTED_STATUSES = new Set(["proven", "associated_survived", "not_exercised", "reach_unknown", "associated_non_assertion_failure", "unrunnable"]);
 const RUNNERS = new Set(["auto", "vitest", "jest"]);
 const REPLACEMENT_MODES = new Set(["return-json", "promise-json"]);
 
@@ -399,6 +399,10 @@ function summarizeRepo(repo, cases) {
   const runnable = cases.filter(item => item.result?.baseline?.exitCode === 0);
   const proven = cases.filter(item => item.result?.status === "proven");
   const survived = cases.filter(item => item.result?.status === "associated_survived");
+  // A test that passed on the mutant without running the function, or where that could not be
+  // checked, is not a survivor.
+  const notExercised = cases.filter(item => item.result?.status === "not_exercised");
+  const reachUnknown = cases.filter(item => item.result?.status === "reach_unknown");
   const nonAssertion = cases.filter(item => item.result?.status === "associated_non_assertion_failure");
   const unrunnable = cases.filter(item => item.result?.status === "unrunnable" || !item.result);
   const falseProofs = cases.filter(item => item.expected && item.expected !== "proven" && item.result?.status === "proven");
@@ -421,6 +425,8 @@ function summarizeRepo(repo, cases) {
     proven: proven.length,
     falseProofCount: falseProofs.length,
     associatedSurvived: survived.length,
+    notExercised: notExercised.length,
+    reachUnknown: reachUnknown.length,
     associatedNonAssertionFailure: nonAssertion.length,
     unrunnable: unrunnable.length,
     runners: runnerCounts,

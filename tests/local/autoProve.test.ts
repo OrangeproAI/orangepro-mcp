@@ -63,15 +63,20 @@ afterEach(() => {
 });
 
 describe("isRoastSurvivor", () => {
-  const attempt = (classification: AutoProveAttempt["classification"], mutant_status?: string): AutoProveAttempt => ({
+  const attempt = (classification: AutoProveAttempt["classification"], mutant_status?: string, reach?: AutoProveAttempt["reach"]): AutoProveAttempt => ({
     target_symbol: TARGET,
     test_path: "service.test.ts",
     classification,
     mutant_status,
+    ...(reach ? { reach } : {}),
   });
 
   it("reports only real survived mutants, not crashes/refusals/baseline-red/proven attempts", () => {
-    expect(isRoastSurvivor(attempt("non_killing", "associated_survived"))).toBe(true);
+    expect(isRoastSurvivor(attempt("non_killing", "associated_survived", "ran"))).toBe(true);
+    // F4: a survivor is a test that RAN the function. No reach on record, or a test that never ran it, is not one.
+    expect(isRoastSurvivor(attempt("non_killing", "associated_survived"))).toBe(false);
+    expect(isRoastSurvivor(attempt("non_killing", "not_exercised", "never_ran"))).toBe(false);
+    expect(isRoastSurvivor(attempt("non_killing", "reach_unknown", "unknown"))).toBe(false);
     expect(isRoastSurvivor(attempt("non_killing", "associated_non_assertion_failure"))).toBe(false);
     expect(isRoastSurvivor(attempt("needs_setup", "unrunnable"))).toBe(false);
     expect(isRoastSurvivor(attempt("needs_setup", undefined))).toBe(false);
@@ -175,7 +180,7 @@ function oracle(kind: OracleKind) {
     return JSON.stringify({ ...base, status: "proven", proven: true, reason: "kill", baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 1, timedOut: false, assertionFailure: true } });
   }
   if (kind === "non_killing") {
-    return JSON.stringify({ ...base, status: "associated_survived", proven: false, reason: "survived", baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 0, timedOut: false, assertionFailure: false } });
+    return JSON.stringify({ ...base, status: "associated_survived", reach: "ran", proven: false, reason: "survived", baseline: { exitCode: 0, timedOut: false }, mutant: { exitCode: 0, timedOut: false, assertionFailure: false } });
   }
   if (kind === "baseline_timeout") {
     // The original code's run was killed by the limit: partial output that would otherwise read as a real failure.

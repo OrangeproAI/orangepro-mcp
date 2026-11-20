@@ -629,7 +629,7 @@ describe("Python hard proof", () => {
         to: "sym:app/service.py#Service.work",
         detector: "python_static_association",
         rule: "module_assigned_instance",
-        reason: "Exact static receiver origin and direct invocation; this is Association only, never dynamic Proven."
+        reason: "Exact static receiver origin and direct invocation; this is Association only, never Proven."
       }
     ]);
   });
@@ -842,7 +842,7 @@ describe("Python hard proof", () => {
       to: "sym:app/service.py#Worker.calculate",
       detector: "unique_method_name_import",
       rule: "unique_method_name_import",
-      reason: "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never dynamic Proven."
+      reason: "Unresolved receiver, one unique imported in-repo method owner, one direct invocation, and one direct pytest assertion; this is Association only, never Proven."
     }]);
   });
 
@@ -920,7 +920,7 @@ describe("Python association: stored results and pytest.raises (R11, 0.2.48)", (
       to: "sym:app/core.py#parse",
       detector: "python_static_association",
       rule: "stored_result_assert",
-      reason: "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never dynamic Proven."
+      reason: "Exact imported call whose stored result (written once) is checked by a later pytest assert; this is Association only, never Proven."
     }]);
   });
 

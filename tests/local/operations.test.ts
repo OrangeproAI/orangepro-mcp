@@ -850,6 +850,7 @@ describe("gap-fill ledger", () => {
         stderr: "",
         stdout: JSON.stringify({
           status: "associated_survived",
+          reach: "ran",
           proven: false,
           reason: "mutated target did not change the test outcome",
           runner: "vitest",
@@ -1397,6 +1398,7 @@ describe("gap-fill ledger", () => {
         stderr: "",
         stdout: JSON.stringify({
           status: "associated_survived",
+          reach: "ran",
           proven: false,
           runner: "pytest",
           test: "tests/test_app.py::test_answer",

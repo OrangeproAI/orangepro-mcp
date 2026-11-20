@@ -154,6 +154,12 @@ function armSignedReporter() {
   const crypto = require("node:crypto");
   const events = require("node:events");
   const apply = Reflect.apply;
+  // The three ways any function is invoked indirectly. The runner itself goes through them, so a
+  // test that replaces one can make the runner record a failing test as passed (seen on newer
+  // Node versions, where the runner keeps going). They are compared, never called, at every event:
+  // once one is seen changed, this run signs nothing.
+  const functionCall = Function.prototype.call;
+  const functionApply = Function.prototype.apply;
   const defineProperty = Object.defineProperty;
   const writeSync = fs.writeSync;
   const readSync = fs.readSync;
@@ -317,6 +323,7 @@ function armSignedReporter() {
           name,
           function (a, b) {
             try {
+              if (Function.prototype.call !== functionCall || Function.prototype.apply !== functionApply || Reflect.apply !== apply) broken = true;
               fn(a, b);
             } catch {
               broken = true;

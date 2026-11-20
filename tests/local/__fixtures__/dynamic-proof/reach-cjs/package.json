@@ -1,0 +1,1 @@
+{ "name": "reach-cjs", "private": true, "type": "commonjs", "devDependencies": { "mocha": "*" } }

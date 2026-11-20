@@ -33,6 +33,11 @@ export interface DynamicProofCertificate {
   runner?: string;
   test_path?: string;
   mutant_status?: string;
+  /**
+   * Whether the mutated function ran under the test ("ran" | "never_ran" | "unknown"). Absent
+   * on records written before the reach marker: those read as "unknown", never as a miss.
+   */
+  reach?: "ran" | "never_ran" | "unknown";
   /** Proof implementation identity; metadata only, never a substitute for a killed mutation. */
   oracle_version?: string;
   run_fingerprint?: string;

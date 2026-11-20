@@ -25,7 +25,7 @@ export function coverageRevealLine(summary: Pick<RtmSummary, "total" | "coverage
   if (summary.runtime_covered <= 0 || summary.total <= 0) return null;
   const pct = (n: number): number => Math.round((n / summary.total) * 100);
   return (
-    `Coverage vs proof: ${summary.runtime_covered}/${summary.total} behaviors are runtime-covered but not Proven ` +
+    `Coverage vs proof: ${summary.runtime_covered}/${summary.total} behaviors run under tests but are not Proven ` +
     `(${pct(summary.runtime_covered)}%) vs ${summary.coverage_confirmed}/${summary.total} Proven (${pct(summary.coverage_confirmed)}%) — ` +
     `coverage only proves execution; the unproven side may be unattempted, blocked, or covered by tests that never assert these behaviors.`
   );

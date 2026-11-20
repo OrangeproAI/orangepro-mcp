@@ -2,7 +2,7 @@
 // Python dynamic-proof mechanism. It proves only a targeted sentinel mutation killed
 // by the exact pytest assertion, and otherwise fails closed with redacted diagnostics.
 
-import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -354,6 +354,45 @@ function runCommand(plan, args, timeoutMs) {
   };
 }
 
+// ── Reach marker (see python-mutate.py) ────────────────────────────────────────────
+// A fresh, empty file for the mutated run, outside the copied project. null when it cannot be
+// made: reach is then unknown.
+const REACH_ENV = "ORANGEPRO_REACH_FILE";
+
+function createReachFile(parentDir) {
+  try {
+    const file = path.join(mkdtempSync(path.join(parentDir, "opro-reach-")), "reach.log");
+    writeFileSync(file, "");
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+// A test that empties the environment or fakes the file system can hide the marker; then an
+// empty file proves nothing.
+function testCanHideReach(testAbs) {
+  try {
+    const text = readFileSync(testAbs, "utf8");
+    return /clear\s*=\s*True|environ\.clear\(|os\.environ\s*=(?!=)|pyfakefs|\bfs\s*[:,)]|delenv\(/.test(text);
+  } catch {
+    return true;
+  }
+}
+
+// "ran" | "never_ran" | "unknown"
+function readReach(reachFile, testAbs) {
+  if (!reachFile) return "unknown";
+  try {
+    const text = readFileSync(reachFile, "utf8");
+    if (text.split("\n").includes("ran")) return "ran";
+    if (text !== "") return "unknown";
+    return testCanHideReach(testAbs) ? "unknown" : "never_ran";
+  } catch {
+    return "unknown";
+  }
+}
+
 function runPytest(plan, nodeid, timeoutMs, collectOnly = false) {
   return runCommand(plan, [...plan.args, "-q", ...(collectOnly ? ["--collect-only"] : []), nodeid, "--tb=short"], timeoutMs);
 }
@@ -540,14 +579,18 @@ function main() {
       return;
     }
 
-    const mutant = runPytest(plan, relativeTest, args.timeoutMs);
+    // The equivalent mode changes nothing, so it carries no marker: its reach is unknown.
+    const reachFile = mutation.changed === false ? null : createReachFile(tmp);
+    const mutant = runPytest(reachFile ? { ...plan, env: { ...plan.env, [REACH_ENV]: reachFile } } : plan, relativeTest, args.timeoutMs);
     const mutantClass = classifyPytest(mutant, relativeTest);
     const proven = mutantClass.kind === "assertionFailure";
     const survived = mutantClass.kind === "passed";
+    const reach = survived ? readReach(reachFile, path.join(copiedProjectRoot, relativeTest.split("::")[0])) : undefined;
     emit({
-      status: proven ? "proven" : survived ? "associated_survived" : "unrunnable",
+      status: proven ? "proven" : survived ? (reach === "ran" ? "associated_survived" : reach === "never_ran" ? "not_exercised" : "reach_unknown") : "unrunnable",
       proven,
-      reason: proven ? "mutant failed at a trusted pytest assertion" : survived ? "mutant survived" : mutant.timedOut ? "the mutated code ran past the time limit" : mutantClass.reason,
+      ...(reach ? { reach } : {}),
+      reason: proven ? "mutant failed at a trusted pytest assertion" : survived ? (reach === "ran" ? "mutant survived" : reach === "never_ran" ? `not exercised: this test never runs ${args.func}` : `reach unknown: could not check whether this test runs ${args.func}`) : mutant.timedOut ? "the mutated code ran past the time limit" : mutantClass.reason,
       runner: "pytest",
       timeoutMs: args.timeoutMs,
       replacementMode: args.mode,
