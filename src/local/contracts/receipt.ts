@@ -136,6 +136,8 @@ export interface RunProfile {
   runner: { name: "mocha" | "vitest" | "jest"; version: string };
   container: ContainerProfile;
   limits: { stage_deadline_ms: number };
+  /** Present only when the function's rank moved since its expected behavior was approved. */
+  approval_binding?: { approved_record_sha256: string; rank_at_approval: number | null; current_rank: number | null };
   /** Present only when the expected behavior was not approved and the run was asked for anyway. */
   oracle_status?: { approval: "proposed"; allowed_by: "--allow-proposed-oracle" };
   /** verify-test only: the candidate and its assertion record, frozen before any stage, so every stage file commits to them. */

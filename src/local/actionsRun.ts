@@ -20,6 +20,7 @@ import { applyAdditivePatch, parseAdditivePatch } from "./candidatePatch.js";
 import { allowedPaths, earlierAttempts, faultKeyOf, opTestBrief, opVerifyTest } from "./candidateTest.js";
 import { gitBytes, opChangedTargets, type GitBytes } from "./changedTargets.js";
 import { recordBytes, recordSha256, sha256Hex, writeFileAtomic } from "./contracts/io.js";
+import { approvalMatch } from "./contracts/approvalBinding.js";
 import type { TargetRecord } from "./contracts/targetRecord.js";
 import { opExportTests } from "./exportTests.js";
 import { opProbeFault, ProbeFaultRefusal, readFixture } from "./faultProbe.js";
@@ -456,7 +457,8 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
     result.changed_targets = changed.targets.map((target) => ({ symbol_id: target.identity.symbol_id, name: target.identity.name, file: target.identity.file, record_sha256: recordSha256(target) }));
     const wanted = result.profile.target;
     const record = changed.targets.find((target) => target.identity.symbol_id === wanted);
-    if (!record || recordSha256(record) !== result.profile.target_record_sha256) {
+    // The profile's approval holds for the function's exact bytes, wherever it ranks now.
+    if (!record || !approvalMatch(record, result.profile.target_record_sha256 as string)) {
       const names = changed.targets.map((target) => target.identity.name);
       end(
         "not_configured",

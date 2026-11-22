@@ -1,5 +1,29 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import ts from "typescript";
 import { resolveSpecifier } from "./confirm.js";
+
+/** A directory a specifier resolved to (`require('..')`): its package.json `main`, else its index file. */
+export function directoryEntry(dir: string): string | null {
+  try {
+    if (!statSync(dir).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const candidates: string[] = [];
+  try {
+    const main = (JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as { main?: unknown }).main;
+    if (typeof main === "string") candidates.push(main, `${main}.js`, path.join(main, "index.js"));
+  } catch {
+    // no package.json, or not JSON: fall through to the index files
+  }
+  candidates.push("index.js", "index.ts", "index.mjs", "index.cjs");
+  for (const c of candidates) {
+    const abs = path.resolve(dir, c);
+    if (existsSync(abs) && statSync(abs).isFile()) return abs;
+  }
+  return null;
+}
 
 /**
  * Static route linking (J4): a test that sends a request to an Express app's route, through
@@ -55,7 +79,7 @@ export interface RouteLinkResult {
 const VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head", "all"]);
 const JS_TS = /\.[cm]?[jt]sx?$/i;
 
-type Binding =
+export type Binding =
   | { kind: "module"; file: string | null; spec: string; name: "default" | "*" | string }
   | { kind: "local_fn"; name: string };
 
@@ -114,12 +138,12 @@ function requireSpec(node: ts.Node | undefined): string | null {
 }
 
 /** Import and require bindings of one file, plus its top-level function declarations. */
-function bindingsOf(sf: ts.SourceFile, fromAbs: string, repoRoot: string, ws: Map<string, string>, relOf: (abs: string) => string | null): Map<string, Binding> {
+export function bindingsOf(sf: ts.SourceFile, fromAbs: string, repoRoot: string, ws: Map<string, string>, relOf: (abs: string) => string | null): Map<string, Binding> {
   const out = new Map<string, Binding>();
   const resolve = (spec: string): string | null => {
     if (!spec.startsWith(".") && !spec.startsWith("/") && !spec.startsWith("@") && !/^[a-z]/i.test(spec)) return null;
     const abs = resolveSpecifier(spec, fromAbs, repoRoot, ws);
-    return abs ? relOf(abs) : null;
+    return abs ? relOf(abs) ?? relOf(directoryEntry(abs) ?? "") : null;
   };
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
