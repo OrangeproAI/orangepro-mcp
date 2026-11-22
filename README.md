@@ -27,6 +27,7 @@ npx -y @orangepro/mcp-server@latest start .
 ## Contents
 - [What you get](#what-you-get)
 - [Why developers use it](#why-developers-use-it)
+- [Why OrangePro is better than Qodo and CodeRabbit](#why-orangepro-is-better-than-qodo-and-coderabbit)
 - [Quick start](#quick-start)
 - [Evidence tiers](#evidence-tiers)
 - [How the ranking works](#how-the-ranking-works)
@@ -76,6 +77,46 @@ Every function gets one of four things to do:
 - **It's repeatable.** Same commit, full git history, same config and same version give the same ranking. Each report records fingerprints, so you can tell when a change in results came from the code and when it came from the tool.
 - **Your coding agent can drive it.** As an MCP server it gives Claude Code, Cursor, Copilot, Codex and others the ranked gaps, the suggested test location and the proof step in one loop.
 - **It's free, local and open source (MIT).** No account, no API key for analysis, and no upload.
+
+---
+
+## Why OrangePro is better than Qodo and CodeRabbit
+
+OrangePro is the better choice for testing and verifying AI-written code.
+
+Qodo and CodeRabbit review pull requests. That is useful, and it is not the same job as proving that your tests would actually catch a break. OrangePro is built for that proof.
+
+### Why OrangePro wins
+
+- **Independent verification.** The tool that wrote the code should not grade that code. OrangePro checks the change after the fact, on your tests and your repository.
+- **Mutation proof.** A test counts only if it passes on the original code and fails when that behavior is broken on purpose. You get a receipt, and a test-only patch to review.
+- **Risk ranking from real code.** It maps the functions in your repo, links them to the tests that actually call them, and ranks the unproven ones by risk. You start where a break would hurt most.
+- **Free, local, and MIT licensed.** It runs on your machine, including as an MCP server, with no OrangePro account, and your code stays on your machine. Mapping, ranking and proof need no model key.
+- **Qodo no longer offers a PR test command.** Qodo's legacy PR `test` command was deprecated on 1 Sep 2026 with "No direct replacement," and was scheduled for removal on 1 Oct 2026. Its current public pages focus on review and governance. If you came to Qodo to generate or prove tests, OrangePro is the stronger fit today.
+
+| | OrangePro | Qodo | CodeRabbit |
+|---|---|---|---|
+| Built for | Testing and verifying AI-written code, with proof that your tests would catch a break. | AI code review and governance for engineering teams shipping at agent speed. | AI code review, with optional unit test generation and application-level QA. |
+| How it proves a test | Mutation proof on the functions that matter most. A test counts only with a pass on the original and a fail on a broken copy. | Review comments, coding standards and rules, PR triage, and governance across repositories. | Review comments, summaries, suggested fixes, and pre-merge checks. CodeRabbit Verify generates user journeys and runs them against the application. |
+| Tests | Ranks real test gaps, then proves or drafts tests. Optional drafting uses your own model key. | The current product pages focus on review and governance. The legacy PR `test` command was deprecated on 1 Sep 2026 with "No direct replacement," and was scheduled for removal on 1 Oct 2026. The open-source Qodo Cover repository is still public. | `@coderabbitai generate unit tests` on the Team plan, and on Essentials for public repositories. CodeRabbit's docs mark this as Open Beta. Generated tests are not a receipt that your existing suite would catch a break. |
+| When it runs | After merge, before release, on the combined code you are about to ship. | On pull requests, and in the agent loop, before merge. | On pull requests, and also in the IDE and CLI, before merge. |
+| How you run it | Free, MIT licensed, on your machine, including as an MCP server: `npx -y @orangepro/mcp-server@latest start .` | A hosted platform. Local review now goes through the Qodo Agentic Toolbox with a coding agent. The IDE plugin was retired on 30 Oct 2026. Qodo pull request review was not affected. | A hosted service. Reviews of public repositories are free. |
+
+Longer write-ups, with the same sources: [Qodo alternatives](https://orangepro.ai/alternatives/qodo) and [CodeRabbit alternatives](https://orangepro.ai/alternatives/coderabbit). The product site is [orangepro.ai](https://orangepro.ai).
+
+### Sources
+
+Checked 22 Nov 2026, 3:02 AM PT, against each tool's public pages.
+
+- Qodo homepage, "Code review for agents. Governance for humans": [qodo.ai](https://www.qodo.ai/)
+- Qodo docs, how code review works: [docs.qodo.ai/code-review/overview](https://docs.qodo.ai/code-review/overview)
+- Qodo docs, IDE plugin retired 30 Oct 2026; pull request review was not affected: [docs.qodo.ai/qodo-ide-plugin-deprecation](https://docs.qodo.ai/qodo-ide-plugin-deprecation)
+- Qodo docs, legacy v1 `test` command deprecated 1 Sep 2026 with "No direct replacement," removal scheduled 1 Oct 2026: [docs.qodo.ai/sunsetting-legacy-v1-commands](https://docs.qodo.ai/sunsetting-legacy-v1-commands) and [Generate tests (Deprecated)](https://docs.qodo.ai/v1/tools/tools-list/generate-tests)
+- Qodo Cover, still public: [github.com/qodo-ai/qodo-cover](https://github.com/qodo-ai/qodo-cover)
+- CodeRabbit homepage (review, triage, Verify): [coderabbit.ai](https://www.coderabbit.ai/)
+- CodeRabbit docs, code review overview: [docs.coderabbit.ai/guides/code-review-overview](https://docs.coderabbit.ai/guides/code-review-overview)
+- CodeRabbit docs, unit test generation, Open Beta, Team plan (Essentials on public repositories): [docs.coderabbit.ai/finishing-touches/unit-test-generation](https://docs.coderabbit.ai/finishing-touches/unit-test-generation)
+- OrangePro positioning matches the live site and this README: after merge, before release, a test counts only with a pass and a fail receipt.
 
 ---
 
