@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, constants as fsConstants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -24,7 +24,8 @@ import { checkOracle, oracleDraftSha256, type Oracle } from "./contracts/oracle.
 import type { AddonProvenance } from "./pluginApi.js";
 import { EDIT_OPERATOR, editForTarget, FAULT_OPERATORS, faultRecordOf, parseFaultSpec, planEdit, planFault, type FaultEditInput, type FaultPlan, type FaultRecord } from "./contracts/faultRecord.js";
 import { locationEditArgs } from "./contracts/location.js";
-import { textControls } from "./candidateTest.js";
+import { installedRunner, MOCHA_ENTRY, MOCHA_NO_REPO_CONFIG, MOCHA_REPORTER_TARGET, insideRepoPath, runnerMounts, runnerPlanOf, syntaxArgv, testArgv, witnessArgv, witnessTarget, type RunnerPlan } from "./chainRunner.js";
+import { REACH_MARK_ENV, reachMarkedBytes, textControls } from "./candidateTest.js";
 import {
   CLASSIFICATION_VERSION,
   FAULT_CLASSIFIER_VERSION,
@@ -125,17 +126,13 @@ export interface ProbeFaultResult {
 }
 
 export const DEFAULT_STAGE_DEADLINE_MS = 300_000;
-export const REPORTER_TARGET = `${OPRO_DIR}/mocha-reporter.cjs`;
-const WITNESS_TARGET = `${OPRO_DIR}/witness.cjs`;
+export const REPORTER_TARGET = MOCHA_REPORTER_TARGET;
 export const WITNESS_STORED = "inputs/witness.cjs";
-export const MOCHA_ENTRY = "node_modules/mocha/bin/mocha.js";
-// Mocha would otherwise also read the repository's .mocharc* and package.json "mocha" key, which can add
-// files to the selection, skip some, or not run tests at all (dry-run). Only the profile's options apply.
-export const MOCHA_NO_REPO_CONFIG = ["--no-config", "--no-package"];
+export { MOCHA_ENTRY, MOCHA_NO_REPO_CONFIG, insideRepoPath };
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
 
 /**
- * How every Mocha stage reports (FP-4): the reporter signs one frame on stdout with a per-stage key it
+ * How every test stage reports (FP-4): the reporter signs one frame on stdout with a per-stage key it
  * reads from stdin when it loads, before any test file exists. Nothing is read from the output folder.
  */
 export const REPORT_ENV: Record<string, string> = { OPRO_DYNAMIC_PROOF_FRAME: "1" };
@@ -172,14 +169,12 @@ export interface FixtureProfile {
   prNumber: number | null;
   shape: ContainerShape;
   node: string | null;
+  /** The runner the fixture names, with the options a stage takes from it. */
+  runner: RunnerPlan;
+  /** The same plan under its first name, kept for a Mocha fixture's readers. */
   mocha: { options: string[]; operands: string[] };
   baselinePassing: number | null;
 }
-
-const VALUE_OPTIONS = new Set(["--require", "--ui", "--timeout"]);
-const FLAG_OPTIONS = new Set(["--check-leaks", "--exit"]);
-
-export const insideRepoPath = (value: string): boolean => !isAbsolute(value) && !value.startsWith("-") && !value.split(/[\\/]/).includes("..");
 
 /**
  * The repository's own Mocha options, from the fixture's full-suite command. Only options
@@ -194,35 +189,8 @@ export function mochaPlanOf(expanded: unknown): { options: string[]; operands: s
   if (!Array.isArray(expanded) || expanded[0] !== "mocha" || !expanded.every((part) => typeof part === "string")) {
     return refuse("the fixture's commands.full_suite_expanded must be a Mocha command line, starting with `mocha`.");
   }
-  const options: string[] = [];
-  const operands: string[] = [];
-  for (let i = 1; i < expanded.length; i++) {
-    const part = expanded[i] as string;
-    if (!part.startsWith("-")) {
-      if (!insideRepoPath(part)) refuse(`the test path ${part} is not inside the repository.`);
-      operands.push(part);
-      continue;
-    }
-    if (FLAG_OPTIONS.has(part)) {
-      options.push(part);
-      continue;
-    }
-    const value = expanded[i + 1];
-    if (part === "--reporter") {
-      if (typeof value !== "string") refuse("--reporter has no value.");
-      i++;
-      continue;
-    }
-    if (!VALUE_OPTIONS.has(part) || typeof value !== "string" || value.startsWith("-")) {
-      return refuse(`${part} is not an option a probe takes from the repository (allowed: --require, --ui, --timeout, --check-leaks, --exit).`);
-    }
-    if (part === "--require" && !insideRepoPath(value)) refuse(`--require ${value} is not inside the repository.`);
-    if (part === "--timeout" && !/^[1-9]\d*$/.test(value)) refuse(`--timeout ${value} is not a whole number of milliseconds.`);
-    if (part === "--ui" && !/^[a-z-]+$/.test(value)) refuse(`--ui ${value} is not a Mocha interface name.`);
-    options.push(part, value);
-    i++;
-  }
-  return { options, operands };
+  const plan = runnerPlanOf(expanded, refuse);
+  return { options: plan.options, operands: plan.operands };
 }
 
 export function readFixture(bytes: Buffer): FixtureProfile {
@@ -250,6 +218,9 @@ export function readFixture(bytes: Buffer): FixtureProfile {
   if (!Number.isInteger(limits.container_deadline_seconds) || limits.container_deadline_seconds < 1) refuse("limits.container_deadline_seconds must be a positive whole number.");
   const pr = manifest.source?.pr?.number;
   const passing = manifest.baseline?.passing;
+  const runner = runnerPlanOf(manifest.commands?.full_suite_expanded, (detail) => {
+    throw new ProbeFaultRefusal("profile_option_not_allowed", detail);
+  });
   return {
     mergedSha: merged,
     prNumber: Number.isInteger(pr) ? pr : null,
@@ -262,7 +233,8 @@ export function readFixture(bytes: Buffer): FixtureProfile {
       deadlineSeconds: limits.container_deadline_seconds
     },
     node: typeof env.node === "string" ? env.node : null,
-    mocha: mochaPlanOf(manifest.commands?.full_suite_expanded),
+    runner,
+    mocha: { options: runner.options, operands: runner.operands },
     baselinePassing: Number.isInteger(passing) && passing > 0 ? passing : null
   };
 }
@@ -505,7 +477,7 @@ function sameCounts(a: Map<string, number>, b: Map<string, number>): boolean {
   return a.size === b.size && [...a].every(([id, n]) => b.get(id) === n);
 }
 
-/** A Mocha stage that cannot be read as a clean account of what ran, or null when it can. */
+/** A test stage that cannot be read as a clean account of what ran, or null when it can. */
 function runIssue(stage: StageObservation | undefined): string | null {
   if (!stage) return "stage_missing";
   if (stage.timed_out) return "timeout";
@@ -513,22 +485,39 @@ function runIssue(stage: StageObservation | undefined): string | null {
   const t = stage.tests;
   if (!t || stage.report === null) return "runner_error";
   if (t.hook_failures > 0) return "hook_failure";
-  // The reporter's entries and Mocha's own totals must tell the same story.
+  // The reporter's entries and the runner's own totals must tell the same story.
   const totals = t.runner_totals;
   if (!totals || totals.passes !== t.passed || totals.failures !== t.failed + t.hook_failures || totals.pending !== t.pending) return "runner_totals_mismatch";
   return null;
 }
 
+/**
+ * Reach on a runner whose code is transformed before it runs (Vitest, Jest): the selected tests ran
+ * on a copy of the original whose fault site writes a marker file. It counts only when that stage gave
+ * the same clean account as the plain original; with no marker written, "not reached" needs a Node
+ * that could have written one.
+ */
+function reachFromMarkedCopy(original: StageObservation | undefined, marked: StageObservation | undefined): ClassifyOutput["reached_by_selected_tests"] {
+  if (!original?.tests || !marked?.tests || marked.fault_span_count === null || marked.fault_span_count === undefined) return "unknown";
+  if (runIssue(marked) !== null || marked.exit_code !== 0 || marked.boundary.failures.length > 0 || !marked.stopped) return "unknown";
+  const same = marked.tests.failed === 0 && marked.tests.passed === original.tests.passed && marked.tests.executed === original.tests.executed && marked.tests.pending === original.tests.pending;
+  if (!same) return "unknown";
+  if (marked.fault_span_count > 0) return "reached";
+  const node = /^v(\d+)\.(\d+)\./.exec(String((marked.boundary.report as { node?: unknown } | null)?.node ?? ""));
+  const canMark = node !== null && (Number(node[1]) > 22 || (Number(node[1]) === 22 && Number(node[2]) >= 3));
+  return canMark ? "not_reached" : "unknown";
+}
+
 /** Computed from the stage files, in the order the pre-registration fixes (section G). */
 export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const { stages } = input;
-  const original = stages.original_selected;
+  const original = stages.original_selected ?? stages.original_suite;
   const witnessOriginal = stages.witness_original;
   const witnessRepeat = stages.witness_original_repeat;
   const witnessFault = stages.witness_fault;
   const unknownDifference = { status: "unknown" as const, original: witnessOriginal?.output ?? null, fault: witnessFault?.output ?? null };
   const reached: ClassifyOutput["reached_by_selected_tests"] =
-    original?.fault_span_count === null || original?.fault_span_count === undefined ? "unknown" : original.fault_span_count > 0 ? "reached" : "not_reached";
+    original?.fault_span_count === null || original?.fault_span_count === undefined ? reachFromMarkedCopy(original, stages.reach_marked) : original.fault_span_count > 0 ? "reached" : "not_reached";
   const result = (classification: FaultClass, reason: string | null, extra: Partial<ClassifyOutput> = {}): ClassifyOutput => ({
     classification,
     scope: null,
@@ -543,6 +532,8 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   if (!input.checkout_unchanged) return result("blocked", "checkout_modified");
   if (ran.some((stage) => !stage.stopped)) return result("blocked", "container_not_stopped");
   if (ran.some((stage) => stage.boundary.failures.length > 0)) return result("blocked", "boundary_check_failed");
+  // A fault that is not a program is never run: say so, rather than that the tests did not run.
+  if (!input.parses) return result("invalid_mutation", "does_not_parse");
   const originalIssue = runIssue(original);
   if (originalIssue === "stage_missing") return result("blocked", "original_not_run");
   if (originalIssue) return result("inconclusive", `original_${originalIssue}`);
@@ -573,7 +564,7 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const difference = { status: same ? ("same" as const) : ("differs" as const), original: witnessOriginal!.output, fault: witnessFault!.output };
   if (same) return result("inconclusive", "no_behavioral_difference", { behavioral_difference: difference });
   // 4./5. the selected tests on the fault
-  const fault = stages.fault_selected;
+  const fault = stages.fault_selected ?? stages.fault_suite;
   const faultIssue = runIssue(fault);
   if (faultIssue) return result("inconclusive", `fault_${faultIssue}`, { behavioral_difference: difference });
   const f = fault!.tests!;
@@ -671,10 +662,6 @@ export function statementFor(
 }
 
 // ── the operation ────────────────────────────────────────────────────────────────
-
-function reporterPath(): string {
-  return resolve(dirname(dynamicProofSpikePath()), "dynamic-proof-mocha-reporter.cjs");
-}
 
 function fileRef(runDir: string, rel: string, bytes: Buffer): FileRef {
   writeFileAtomic(join(runDir, rel), bytes);
@@ -800,14 +787,12 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
 
   // The installed dependencies: a real folder of the checkout, never a link to somewhere else on this machine.
   const nodeModules = join(sourceRoot, "node_modules");
-  const mochaPackage = join(nodeModules, "mocha", "package.json");
   if (!existsSync(nodeModules) || !lstatSync(nodeModules).isDirectory() || !realInside(sourceRoot, nodeModules)) {
     throw new ProbeFaultRefusal("not_installed", `${sourceRoot} has no node_modules folder of its own: install the fixture first (inside the boundary).`);
   }
-  if (!existsSync(join(sourceRoot, MOCHA_ENTRY)) || !existsSync(mochaPackage)) {
-    throw new ProbeFaultRefusal("not_installed", `${sourceRoot} has no node_modules/mocha: install the fixture first (inside the boundary).`);
-  }
-  const mochaVersion = String((JSON.parse(readFileSync(mochaPackage, "utf8")) as { version?: unknown }).version ?? "unknown");
+  const installed = installedRunner(sourceRoot, fixture.runner);
+  if ("problem" in installed) throw new ProbeFaultRefusal("not_installed", installed.problem);
+  const runnerVersion = installed.version;
   const statusBefore = trackedStatus(sourceRoot);
 
   // ── the run folder: inputs and the fault, before any copy or run ──
@@ -832,10 +817,9 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   writeFileAtomic(join(runDir, "fault-record.json"), recordBytes(faultRecord));
   const faultRecordSha = recordSha256(faultRecord);
 
-  const mochaHead = ["node", MOCHA_ENTRY, ...MOCHA_NO_REPO_CONFIG, ...fixture.mocha.options, "--reporter", REPORTER_TARGET];
-  const selectedArgv = wholeSuiteOnly ? [...mochaHead, ...fixture.mocha.operands] : [...mochaHead, ...tests.map((test) => test.path)];
+  const selectedArgv = testArgv(fixture.runner, wholeSuiteOnly ? null : tests.map((test) => test.path));
   // With no selected file the run above is the whole suite already; it is not run a second time.
-  const fullArgv = opts.full_suite && !wholeSuiteOnly ? [...mochaHead, ...fixture.mocha.operands] : null;
+  const fullArgv = opts.full_suite && !wholeSuiteOnly ? testArgv(fixture.runner, null) : null;
   const deadlineMs = Math.min(deps.stageDeadlineMs ?? DEFAULT_STAGE_DEADLINE_MS, fixture.shape.deadlineSeconds * 1000);
   const changedBy = fixture.prNumber !== null ? `PR #${fixture.prNumber}` : `the change ${record.selection.base_commit.slice(0, 12)}..${record.identity.merged_commit.slice(0, 12)}`;
   const statementCtx = {
@@ -864,8 +848,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       ...(wholeSuiteOnly ? { whole_suite_only: true } : {}),
       baseline_passing: fixture.baselinePassing
     });
-    statementCtx.selectedCount = stages.original_selected?.tests?.executed ?? 0;
-    statementCtx.fullCount = (wholeSuiteOnly ? stages.fault_selected : stages.fault_full_suite)?.tests?.executed ?? null;
+    statementCtx.selectedCount = (stages.original_selected ?? stages.original_suite)?.tests?.executed ?? 0;
+    statementCtx.fullCount = (wholeSuiteOnly ? stages.fault_suite : stages.fault_full_suite)?.tests?.executed ?? null;
     const classification: Classification = {
       version: CLASSIFICATION_VERSION,
       classifier_version: FAULT_CLASSIFIER_VERSION,
@@ -902,9 +886,20 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       tmp,
       mustHold: tests
     });
-    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), join(runDir, WITNESS_STORED));
+    // Mocha runs the files as they are, so V8 coverage of the original names the fault's bytes. Vitest and
+    // Jest transform a file before it runs: there a marked copy of the original says whether the site ran.
+    const byCoverage = fixture.runner.name === "mocha";
+    if (!byCoverage) {
+      const marked = reachMarkedBytes(symbolTarget.file, fileBytes, plan.site.bytes.start, plan.site.bytes.end);
+      if (marked) {
+        copyRoots.marked = join(tmp, "copy-marked");
+        cpSync(copyRoots.original, copyRoots.marked, { recursive: true });
+        writeFileSync(join(copyRoots.marked, symbolTarget.file), marked);
+      }
+    }
+    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), join(runDir, WITNESS_STORED), fixture.runner);
     const reportEnv = REPORT_ENV;
-    const coverageEnv = { NODE_V8_COVERAGE: `${WORK_OUT}/coverage` };
+    const coverageEnv: Record<string, string> = byCoverage ? { NODE_V8_COVERAGE: `${WORK_OUT}/coverage` } : {};
 
     const profile: RunProfile = {
       version: RUN_PROFILE_VERSION,
@@ -937,7 +932,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       selected_tests: tests,
       selected_argv: selectedArgv,
       full_suite_argv: fullArgv,
-      runner: { name: "mocha", version: mochaVersion },
+      runner: { name: fixture.runner.name, version: runnerVersion },
       container: containerProfile(fixture, mountsFor, { ...reportEnv, ...coverageEnv }),
       limits: { stage_deadline_ms: deadlineMs },
       // Only an unapproved run carries this, so an approved run's profile keeps its bytes.
@@ -963,16 +958,17 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     });
     const { runStage, held } = runner;
 
-    const original = runStage("original_selected", "original", selectedArgv, { ...reportEnv, ...coverageEnv }, fileBytes);
+    const original = runStage(wholeSuiteOnly ? "original_suite" : "original_selected", "original", selectedArgv, { ...reportEnv, ...coverageEnv }, byCoverage ? fileBytes : undefined);
     if (!held(original) || original.timed_out || !original.tests || original.tests.failed > 0 || original.tests.hook_failures > 0 || original.exit_code !== 0 || original.tests.executed === 0 || original.tests.pending > 0) {
       return finish(true);
     }
-    const syntax = runStage("fault_syntax", "mutant", ["node", "--check", symbolTarget.file.split(sep).join("/")], {});
+    if (copyRoots.marked && !held(runStage("reach_marked", "marked", selectedArgv, { ...reportEnv, [REACH_MARK_ENV]: `${WORK_OUT}/${REACH_MARK_FILE}` }, undefined, false, true))) return finish(true);
+    const syntax = runStage("fault_syntax", "mutant", syntaxArgv(fixture.runner, symbolTarget.file.split(sep).join("/")), {});
     if (!held(syntax) || syntax.exit_code !== 0) return finish(true);
     for (const [stage, copy] of [["witness_original", "original"], ["witness_original_repeat", "original"], ["witness_fault", "mutant"]] as const) {
-      if (!held(runStage(stage, copy, ["node", WITNESS_TARGET], {}))) return finish(true);
+      if (!held(runStage(stage, copy, witnessArgv(fixture.runner), {}))) return finish(true);
     }
-    if (!held(runStage("fault_selected", "mutant", selectedArgv, reportEnv))) return finish(true);
+    if (!held(runStage(wholeSuiteOnly ? "fault_suite" : "fault_selected", "mutant", selectedArgv, reportEnv))) return finish(true);
     if (fullArgv) {
       if (held(runStage("original_full_suite", "original", fullArgv, reportEnv))) runStage("fault_full_suite", "mutant", fullArgv, reportEnv);
     }
@@ -984,7 +980,9 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
 
 // ── shared with verify-test (A3): the copies, the mounts and one stage ───────────
 
-export type CopyRoots = { original: string; mutant: string };
+export type CopyRoots = { original: string; mutant: string; marked?: string };
+/** The marker a `reach_marked` stage looks for in its output folder. */
+const REACH_MARK_FILE = "reach-mark";
 
 /**
  * The original and the faulty copy, made by the proof script from the commit's own files
@@ -1056,13 +1054,13 @@ export function prepareFaultCopies(args: {
 }
 
 /** The mounts of every stage: a copy, the installed dependencies, a fresh output folder, the reporter, and the witness when there is one. */
-export function makeMountsFor(copyRoots: CopyRoots, nodeModulesReal: string, witnessFile: string | null): (copy: "original" | "mutant", out: string) => ContainerMount[] {
+export function makeMountsFor(copyRoots: CopyRoots, nodeModulesReal: string, witnessFile: string | null, plan: RunnerPlan): (copy: "original" | "mutant" | "marked", out: string) => ContainerMount[] {
   return (copy, out) => [
-    { source: copyRoots[copy], target: WORK_REPO, readonly: true, role: `<${copy}>` },
+    { source: copyRoots[copy] ?? copyRoots.original, target: WORK_REPO, readonly: true, role: `<${copy}>` },
     { source: nodeModulesReal, target: `${WORK_REPO}/node_modules`, readonly: true, role: "<node_modules>" },
     { source: out, target: WORK_OUT, readonly: false, role: "<out>" },
-    { source: reporterPath(), target: REPORTER_TARGET, readonly: true, role: "<reporter>" },
-    ...(witnessFile ? [{ source: witnessFile, target: WITNESS_TARGET, readonly: true, role: "<witness>" }] : [])
+    ...runnerMounts(plan).map((mount) => ({ ...mount, readonly: true })),
+    ...(witnessFile ? [{ source: witnessFile, target: witnessTarget(plan), readonly: true, role: "<witness>" }] : [])
   ];
 }
 
@@ -1103,13 +1101,13 @@ export interface StageRunnerContext {
 }
 
 export function createStageRunner(ctx: StageRunnerContext): {
-  runStage: (stage: StageName, copy: "original" | "mutant", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent?: boolean) => StageObservation;
+  runStage: (stage: StageName, copy: "original" | "mutant" | "marked", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent?: boolean, reachMark?: boolean) => StageObservation;
   held: (stage: StageObservation) => boolean;
 } {
   const { runDir, runId, fixture, deadlineMs, tmp, copyRoots, mountsFor, executor } = ctx;
   /** One stage: the boundary probe in the stage's own shape, then, only if it holds, the stage's command. */
   // `faultPresent` says whether the target bytes in the copy hold the fault; by default, in the faulty copy only.
-  const runStage = (stage: StageName, copy: "original" | "mutant", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent = copy === "mutant"): StageObservation => {
+  const runStage = (stage: StageName, copy: "original" | "mutant" | "marked", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent = copy === "mutant", reachMark = false): StageObservation => {
     // The probe and the stage each get a new, never-used output folder. A folder deleted and made again at
     // the same path is not the same folder to Docker Desktop's file sharing: the next container sees the
     // deleted one, and every write to it fails.
@@ -1120,7 +1118,7 @@ export function createStageRunner(ctx: StageRunnerContext): {
     const reportKey = framed ? randomBytes(32) : null;
     const request: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, out), env, workdir: WORK_REPO, command, deadlineMs, ...(reportKey ? { input: `${reportKey.toString("hex")}\n` } : {}) };
     const probeRequest: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, probeOut), env, workdir: WORK_REPO, command, deadlineMs };
-    const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy], ctx.targetRel)));
+    const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy] ?? copyRoots.original, ctx.targetRel)));
     const startedAt = ctx.clock();
     const probe = executor(boundaryProbeRequest(probeRequest));
     const probeReport = probe.exitCode === 0 ? lastJsonLine(probe.stdout) : null;
@@ -1185,6 +1183,16 @@ export function createStageRunner(ctx: StageRunnerContext): {
         coverage = fileRef(runDir, `coverage/${stage}.json`, recordBytes({ url, scripts: kept }));
       }
     }
+    if (run && reachMark) {
+      // The marker is an empty regular file the wrapped expression wrote; anything else there is not it.
+      let mark: ReturnType<typeof lstatSync> | null = null;
+      try {
+        mark = lstatSync(join(out, REACH_MARK_FILE));
+      } catch {
+        mark = null;
+      }
+      spanCount = mark === null ? 0 : mark.isFile() && mark.size === 0 ? 1 : null;
+    }
     const observation: StageObservation = {
       version: STAGE_OBSERVATION_VERSION,
       stage,
@@ -1207,7 +1215,7 @@ export function createStageRunner(ctx: StageRunnerContext): {
       timed_out: run?.timedOut ?? false,
       tests: observedTests,
       output: run && !framed ? lastJsonLine(run.stdout) : null,
-      fault_span_count: coverageTarget ? spanCount : null,
+      fault_span_count: coverageTarget || reachMark ? spanCount : null,
       stdout,
       stderr,
       report,

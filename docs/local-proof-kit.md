@@ -331,7 +331,31 @@ that describes how the repository runs its tests and in which container, and the
   `invalid_mutation`, `inconclusive` or `blocked` with a reason. A run in which no test executed,
   a test was skipped, or a different set of tests ran is never a survivor.
 - Everything is written to `.orangepro/proof-runs/<run-id>/`, with `MANIFEST.json` last. The
-  checkout is not changed. It needs Docker and an installed checkout (`node_modules/mocha`).
+  checkout is not changed. It needs Docker and an installed checkout (the fixture's test runner in `node_modules`).
+
+  **Which test runner.** The first word of the fixture's `commands.full_suite_expanded` names it:
+  `mocha`, `vitest` (versions 4 and 5) or `jest` (version 30). Anything else is refused by name, and
+  so is a runner that is named but not installed.
+  - Mocha runs with the fixture's options only, never the repository's own `.mocharc`.
+  - Vitest and Jest load the repository's own config, since their projects do not run without it. Over
+    it the stage forces: one try per test, no stop at the first failure, no coverage, an empty run
+    fails, OrangePro's reporter is the only one, and every test file runs in a process other than the
+    reporter's. On Vitest a focused test (`.only`) fails the run; on Jest it leaves the other tests
+    skipped, which the result reports as no claim. A fixture may pass a config path, a project name
+    and a test folder inside the repository; any other option is refused.
+  - On a Vitest project the faulty file's syntax check and the witness go through the project's own
+    Vite, so TypeScript source loads as it does under test; the witness is then an ES module
+    (`.mjs`). A TypeScript target under Jest gets no witness answer and ends inconclusive.
+  - "Fault line run by the selected tests": on Mocha, from V8 coverage of the original. Vitest and
+    Jest transform a file before it runs, so there one more stage (`reach_marked`) runs the selected
+    tests on a copy of the original whose fault site writes an empty marker file when it runs.
+  - A new test is one added `it(…)` call (on Vitest and Jest, `it(…)` or `test(…)`), a statement of
+    its own. A new row in a table of cases is refused, and so are `.each`, `.todo`, `.fails`,
+    `.skipIf`, `.retry` and the runner's helper object (`vi`, `jest`) on the added lines.
+  - Known limits: Jest reports a failing `beforeAll` as a failure of each test under it, not as a
+    hook failure, and does not report an error thrown after a test has finished.
+  - A run with no `--tests` and `--full-suite` names its two test stages `original_suite` and
+    `fault_suite`.
 
 When the existing tests missed the fault, two more commands close the gap with one new test.
 `opro test-brief --from-run <run>` checks that run against its manifest and refuses unless its

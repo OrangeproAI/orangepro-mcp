@@ -22,7 +22,8 @@ import { gitBytes, opChangedTargets, type GitBytes } from "./changedTargets.js";
 import { recordBytes, recordSha256, sha256Hex, writeFileAtomic } from "./contracts/io.js";
 import type { TargetRecord } from "./contracts/targetRecord.js";
 import { opExportTests } from "./exportTests.js";
-import { MOCHA_ENTRY, opProbeFault, ProbeFaultRefusal, readFixture } from "./faultProbe.js";
+import { opProbeFault, ProbeFaultRefusal, readFixture } from "./faultProbe.js";
+import { runnerDisplayName, runnerEntryExists } from "./chainRunner.js";
 import { opAnalyze, opBehaviorCoverageHtml, ProofRefusalError } from "./operations.js";
 import { redactSecrets } from "./util/redact.js";
 import type { Clock } from "./util/time.js";
@@ -556,9 +557,11 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
     if (command.length < 2 || command[0] !== "npm" || command[1] !== "ci" || !command.slice(2).every((arg) => typeof arg === "string" && /^--[a-z-]+(=[\w.-]+)?$/.test(arg))) {
       throw new ProfileError("the fixture's commands.install must be npm ci with flags only.");
     }
+    // The runner the fixture names is what "installed" means.
+    const plan = readFixture(loaded.manifest).runner;
     const record: InstallRecord = { ran: false, skipped: null, command: command as string[], lockfile: null, boundary_checks: [], exit_code: null, timed_out: false, duration_ms: 0, log: null };
     result.install = record;
-    if (existsSync(join(repo, "node_modules")) && lstatSync(join(repo, "node_modules")).isDirectory() && existsSync(join(repo, MOCHA_ENTRY))) {
+    if (existsSync(join(repo, "node_modules")) && lstatSync(join(repo, "node_modules")).isDirectory() && runnerEntryExists(repo, plan)) {
       record.skipped = "already_installed";
       return false;
     }
@@ -602,9 +605,9 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
     record.log = "install/install.log";
     writeFileAtomic(join(out, "install", "install.log"), logText(run));
     if (record.lockfile) record.lockfile.unchanged_by_install = existsSync(join(repo, record.lockfile.path)) && sha256Hex(readFileSync(join(repo, record.lockfile.path))) === record.lockfile.sha256;
-    if (run.timedOut || run.exitCode !== 0 || !run.stopped || !existsSync(join(repo, MOCHA_ENTRY))) {
+    if (run.timedOut || run.exitCode !== 0 || !run.stopped || !runnerEntryExists(repo, plan)) {
       if (deadlinePassed(deadlineAt)) return true;
-      end("blocked", "install_failed", `the install inside the boundary ${run.timedOut ? "timed out" : `exited ${run.exitCode}`}${existsSync(join(repo, MOCHA_ENTRY)) ? "" : ", and Mocha is not installed"}; see install/install.log.`);
+      end("blocked", "install_failed", `the install inside the boundary ${run.timedOut ? "timed out" : `exited ${run.exitCode}`}${runnerEntryExists(repo, plan) ? "" : `, and ${runnerDisplayName(plan.name)} is not installed`}; see install/install.log.`);
       return true;
     }
     if (record.lockfile && !record.lockfile.unchanged_by_install) {
