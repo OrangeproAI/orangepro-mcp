@@ -796,8 +796,8 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     writeFileAtomic(join(runDir, "candidate.patch"), opts.candidate_bytes);
     writeFileAtomic(join(runDir, "assertion-record.json"), recordBytes(assertion));
     const assertionSha = recordSha256(assertion);
-    const fileArgv = testArgv(fixture.runner, [applied.path]);
-    const fullArgv = testArgv(fixture.runner, null);
+    const fileArgv = testArgv(fixture.runner, [applied.path], runnerVersion);
+    const fullArgv = testArgv(fixture.runner, null, runnerVersion);
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
     const reportEnv = REPORT_ENV;
 

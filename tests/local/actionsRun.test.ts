@@ -246,6 +246,70 @@ describe("opro actions-run — the post-merge step", { timeout: 300_000 }, () =>
     expect(readFileSync(path.join(w2.repo, "package-lock.json"), "utf8")).toBe("{}\n");
   });
 
+  it("installs with pnpm or yarn through corepack at the pinned version, and stops when the install leaves more than node_modules", () => {
+    const setup = (install: string[], dependencies: Record<string, unknown>, lockName: string) => {
+      const w = workspace(undefined, { gitignore: "node_modules\n" });
+      const { base, merged } = commits(w);
+      rmSync(path.join(w.repo, "node_modules"), { recursive: true, force: true });
+      const manifest = JSON.parse(w.fixture.toString());
+      manifest.dependencies = dependencies;
+      manifest.commands.install = install;
+      void lockName;
+      return { w, base, merged, profile: profileFor(w, {}, { "fixture-manifest.json": Buffer.from(JSON.stringify(manifest)) }) };
+    };
+    const host = hostExecutor();
+    const installer = (w: { repo: string }, seen: Array<{ argv: string[]; env: Record<string, string> }>, after: () => void = () => {}): ContainerExecutor => (request) => {
+      if (request.command[0] === "corepack") {
+        seen.push({ argv: request.command, env: request.env });
+        mkdirSync(path.join(w.repo, "node_modules"), { recursive: true });
+        symlinkSync(mochaPackage, path.join(w.repo, "node_modules", "mocha"), "dir");
+        after();
+        return { exitCode: 0, signal: null, timedOut: false, stdout: "Done", stderr: "", durationMs: 5, dockerArgv: ["docker", "run", "<double>"], stopped: true };
+      }
+      return host(request);
+    };
+
+    // pnpm, version named by the fixture because this repository pins none.
+    const a = setup(["pnpm", "install", "--frozen-lockfile"], { package_manager: "pnpm@10.33.2" }, "pnpm-lock.yaml");
+    const seenA: Array<{ argv: string[]; env: Record<string, string> }> = [];
+    const ra = run(a.w, a.profile, pushEvent(a.base, a.merged), { container: installer(a.w, seenA) });
+    expect([ra.status, ra.reason]).toEqual(["verified_gap", null]);
+    expect(seenA).toEqual([{ argv: ["corepack", "pnpm@10.33.2", "install", "--frozen-lockfile", "--store-dir", "/tmp/opro-pnpm-store"], env: { COREPACK_HOME: "/tmp/opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" } }]);
+    expect(ra.install!.manager).toEqual({ name: "pnpm", version: "10.33.2", version_from: "fixture", argv: seenA[0]!.argv, lockfile: "pnpm-lock.yaml" });
+
+    // No version anywhere, an install that could change the lockfile, and a lockfile name of another manager: refused, nothing run.
+    for (const [install, dependencies, message] of [
+      [["pnpm", "install", "--frozen-lockfile"], {}, /no pnpm version is pinned/],
+      [["pnpm", "install"], { package_manager: "pnpm@10.33.2" }, /must carry --frozen-lockfile/],
+      [["yarn", "install", "--immutable"], { package_manager: "yarn@4.17.1", lockfile: "pnpm-lock.yaml" }, /yarn installs from yarn.lock/],
+      [["bun", "install"], {}, /starts with `bun`/]
+    ] as Array<[string[], Record<string, unknown>, RegExp]>) {
+      const b = setup(install, dependencies, "");
+      const seen: Array<{ argv: string[]; env: Record<string, string> }> = [];
+      const rb = run(b.w, b.profile, pushEvent(b.base, b.merged), { container: installer(b.w, seen) });
+      expect(rb.status).toBe("blocked");
+      expect(rb.detail).toMatch(message);
+      expect(seen).toEqual([]);
+    }
+
+    // An install that changes a file the repository tracks (a lifecycle script, say) is not trusted.
+    const c = setup(["yarn", "install", "--immutable"], { package_manager: "yarn@4.17.1" }, "yarn.lock");
+    const rc = run(c.w, c.profile, pushEvent(c.base, c.merged), { container: installer(c.w, [], () => writeFileSync(path.join(c.w.repo, "package.json"), `${readFileSync(path.join(c.w.repo, "package.json"), "utf8")}\n`)) });
+    expect([rc.status, rc.reason]).toEqual(["blocked", "install_failed"]);
+    expect(rc.detail).toMatch(/changed files the repository tracks/);
+
+    // An install that leaves no node_modules at the root (yarn's Plug'n'Play layout) is named as not supported.
+    const d = setup(["yarn", "install", "--immutable"], { package_manager: "yarn@4.17.1" }, "yarn.lock");
+    const pnp: ContainerExecutor = (request) => {
+      if (request.command[0] !== "corepack") return host(request);
+      writeFileSync(path.join(d.w.repo, ".pnp.cjs"), "");
+      return { exitCode: 0, signal: null, timedOut: false, stdout: "Done", stderr: "", durationMs: 5, dockerArgv: ["docker", "run", "<double>"], stopped: true };
+    };
+    const rd = run(d.w, d.profile, pushEvent(d.base, d.merged), { container: pnp });
+    expect([rd.status, rd.reason]).toEqual(["blocked", "install_failed"]);
+    expect(rd.detail).toMatch(/no node_modules folder at the package root \(yarn's Plug'n'Play layout\)/);
+  });
+
   it("fetches the pinned image by its digest when the machine has none, and blocks when it cannot", () => {
     const w = workspace();
     const { base, merged } = commits(w);

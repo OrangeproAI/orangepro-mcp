@@ -821,9 +821,9 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   writeFileAtomic(join(runDir, "fault-record.json"), recordBytes(faultRecord));
   const faultRecordSha = recordSha256(faultRecord);
 
-  const selectedArgv = testArgv(fixture.runner, wholeSuiteOnly ? null : tests.map((test) => test.path));
+  const selectedArgv = testArgv(fixture.runner, wholeSuiteOnly ? null : tests.map((test) => test.path), runnerVersion);
   // With no selected file the run above is the whole suite already; it is not run a second time.
-  const fullArgv = opts.full_suite && !wholeSuiteOnly ? testArgv(fixture.runner, null) : null;
+  const fullArgv = opts.full_suite && !wholeSuiteOnly ? testArgv(fixture.runner, null, runnerVersion) : null;
   const deadlineMs = Math.min(deps.stageDeadlineMs ?? DEFAULT_STAGE_DEADLINE_MS, fixture.shape.deadlineSeconds * 1000);
   const changedBy = fixture.prNumber !== null ? `PR #${fixture.prNumber}` : `the change ${record.selection.base_commit.slice(0, 12)}..${record.identity.merged_commit.slice(0, 12)}`;
   const statementCtx = {

@@ -188,9 +188,9 @@ export const runnerEntryExists = (sourceRoot: string, plan: RunnerPlan): boolean
  * A test stage's command. `files` are the selected test files; null is the whole suite as the fixture
  * names it. Vitest and Jest load the repository's own config; the options after it are forced over it:
  * one try per test, no stop at the first failure, a focused test fails the run instead of narrowing it,
- * an empty run fails, and OrangePro's reporter is the only one.
+ * an empty run fails, and OrangePro's reporter is the only one. `version` is the installed runner's.
  */
-export function testArgv(plan: RunnerPlan, files: string[] | null): string[] {
+export function testArgv(plan: RunnerPlan, files: string[] | null, version?: string): string[] {
   const paths = files ?? plan.operands;
   switch (plan.name) {
     case "mocha":
@@ -214,7 +214,9 @@ export function testArgv(plan: RunnerPlan, files: string[] | null): string[] {
         "0",
         "--allowOnly=false",
         "--passWithNoTests=false",
-        "--coverage.enabled=false"
+        "--coverage.enabled=false",
+        // Vitest 5 keeps a cache of transformed modules under node_modules, which a stage mounts read-only.
+        ...(Number(String(version ?? "").split(".")[0]) >= 5 ? ["--fsModuleCachePath", "/tmp/opro-vitest-cache"] : [])
       ];
     case "jest":
       return [
