@@ -38,7 +38,12 @@ export const STAGE_NAMES = [
   "fresh_full_suite",
   "fresh_full_suite_with_patch",
   "fresh_fault_full_suite_with_patch",
-  "fresh_restored_test_file"
+  "fresh_restored_test_file",
+  // A whole-suite-only fault run (no selected file): the suite on the original and on the fault.
+  "original_suite",
+  "fault_suite",
+  // Vitest and Jest: the selected tests on a copy of the original whose fault site writes a marker when it runs.
+  "reach_marked"
 ] as const;
 export type StageName = (typeof STAGE_NAMES)[number];
 
@@ -128,7 +133,7 @@ export interface RunProfile {
   selected_argv: string[];
   /** The command for the whole suite, when it was asked for. */
   full_suite_argv: string[] | null;
-  runner: { name: "mocha"; version: string };
+  runner: { name: "mocha" | "vitest" | "jest"; version: string };
   container: ContainerProfile;
   limits: { stage_deadline_ms: number };
   /** Present only when the expected behavior was not approved and the run was asked for anyway. */
@@ -172,7 +177,7 @@ export interface StageObservation {
   run_profile_sha256: string;
   /** The fault record, when the copy's target bytes hold the fault; null on the original, after the restore, and on the original-text control. */
   fault_record_sha256: string | null;
-  copy: "original" | "mutant";
+  copy: "original" | "mutant" | "marked";
   /** sha256 of the target file in the copy, read just before the stage ran. */
   copy_target_sha256: string;
   /** The command inside the container. */

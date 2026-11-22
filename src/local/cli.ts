@@ -174,11 +174,12 @@ Usage:
   opro probe-fault --target-record <file> (--fault <operator>@<byte> | --fault-edit <file.json>) --oracle <file> --fixture <fixture-manifest.json> (--tests <file>[,<file>…] | --full-suite) --witness <file> [--full-suite] [--max-candidates <n>] [--accept-supplied-approvals] [--rationale <text>] [--allow-proposed-oracle] [--json]
     # one exact fault inside a bound target, run against the named existing tests on an original and a faulty copy,
     # every command inside the fixture's container (docker, network off); operators: rounding_floor_ceil, negation_removal;
-    # needs an installed checkout; writes .orangepro/proof-runs/<run-id>/ and prints caught / missed / no claim
+    # the fixture names the test runner (mocha, vitest 4 or 5, jest 30), which must be installed in the checkout;
+    # writes .orangepro/proof-runs/<run-id>/ and prints caught / missed / no claim
   opro test-brief --from-run <probe-fault run folder> [--add-to <test file>] [--source <checkout>] [--json]
     # for a fault the existing tests missed: writes brief.md and generation-request.json for a coding agent to write one test
   opro verify-test --from-run <probe-fault run folder> --brief <test-brief run folder> --candidate <patch> --assertion <assertion-record.json> [--source <checkout>] [--json]
-    # the new test, as a patch that only adds one it(…) call, on the original, the same fault, two text controls, restored,
+    # the new test, as a patch that only adds one it(…) call (or test(…) on Vitest and Jest), on the original, the same fault, two text controls, restored,
     # and the whole suite, inside the container; the result field decides (the exit code is 0 for every result)
   opro draft-test --from-run <probe-fault run folder> --brief <test-brief run folder> [--provider anthropic|openai|ollama] [--model <id>] [--source <checkout>] [--json]
     # sends the brief's generation-request.json, and nothing else, to your model with your key (from this command's environment only;

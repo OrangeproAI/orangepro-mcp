@@ -82,7 +82,7 @@ export interface VerificationReceipt {
     container_image: string;
     container_node: string | null;
     host: { node: string; platform: string };
-    runner: { name: "mocha"; version: string };
+    runner: { name: "mocha" | "vitest" | "jest"; version: string };
     installed_tree_sha256: string | null;
     run_profiles: Array<{ run_id: string; sha256: string }>;
   };

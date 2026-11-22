@@ -27,8 +27,6 @@ import {
   frameLocation,
   insideRepoPath,
   makeMountsFor,
-  MOCHA_ENTRY,
-  MOCHA_NO_REPO_CONFIG,
   NOT_AN_ASSERTION_ERRORS,
   prepareFaultCopies,
   ProbeFaultRefusal,
@@ -36,11 +34,11 @@ import {
   realInside,
   REPORT_ENV,
   REPORT_TAMPERED,
-  REPORTER_TARGET,
   trackedStatus,
   treeHashes,
   type ProbeFaultDeps
 } from "./faultProbe.js";
+import { installedRunner, testArgv } from "./chainRunner.js";
 import { resolveTargetSymbol } from "./ledger.js";
 import { defaultDynamicProofRunner, ProofRefusalError, proofPreflight } from "./operations.js";
 import { toWorkspaceRel } from "./reprove/paths.js";
@@ -145,9 +143,12 @@ export function loadFaultRun(root: string, fromRun: string): FaultRun {
   const check = verifyRunFolder(dir);
   if (!check.ok) return refuse("fault_run_invalid", `${fromRun}: ${check.message}`);
   const files = new Set(check.manifest.files.map((file) => file.path));
-  for (const need of ["classification.json", "target-record.json", "oracle.json", "fault-record.json", "run-profile.json", "diagnostic-fault.patch", "fixture-manifest.json", "stages/original_selected.json"]) {
+  for (const need of ["classification.json", "target-record.json", "oracle.json", "fault-record.json", "run-profile.json", "diagnostic-fault.patch", "fixture-manifest.json"]) {
     if (!files.has(need)) refuse("fault_run_invalid", `${fromRun} is not a probe-fault run: it has no ${need}.`);
   }
+  // A whole-suite-only run names its two test stages after the suite.
+  const originalStage = files.has("stages/original_selected.json") ? "original_selected" : "original_suite";
+  if (!files.has(`stages/${originalStage}.json`)) refuse("fault_run_invalid", `${fromRun} is not a probe-fault run: it has no stages/original_selected.json.`);
   const classification = readJson(join(dir, "classification.json")) as Classification;
   if (classification.classification !== "survived_unverified") {
     refuse("no_gap", `the fault in ${fromRun} was not missed by the existing tests (${classification.classification}${classification.reason ? `, ${classification.reason}` : ""}): there is no gap for a new test to close.`);
@@ -166,7 +167,7 @@ export function loadFaultRun(root: string, fromRun: string): FaultRun {
   const oracleCheck = checkOracle(readJson(join(dir, "oracle.json")));
   if (!oracleCheck.ok) refuse("fault_run_invalid", oracleCheck.message);
   const counts: Record<string, StageCounts> = {};
-  for (const stage of ["original_selected", "fault_selected", "original_full_suite", "fault_full_suite"]) {
+  for (const stage of ["original_selected", "fault_selected", "original_suite", "fault_suite", "original_full_suite", "fault_full_suite"]) {
     if (!files.has(`stages/${stage}.json`)) continue;
     const t = (readJson(join(dir, "stages", `${stage}.json`)) as StageObservation).tests;
     if (t) counts[stage] = { executed: t.executed, passed: t.passed, failed: t.failed, pending: t.pending };
@@ -196,7 +197,7 @@ export function loadFaultRun(root: string, fromRun: string): FaultRun {
     diff: readFileSync(join(dir, "diagnostic-fault.patch"), "utf8"),
     fixtureBytes: readFileSync(join(dir, "fixture-manifest.json")),
     counts,
-    originalSelected: (readJson(join(dir, "stages", "original_selected.json")) as StageObservation).tests?.observed ?? []
+    originalSelected: (readJson(join(dir, "stages", `${originalStage}.json`)) as StageObservation).tests?.observed ?? []
   };
 }
 
@@ -246,19 +247,25 @@ export function selectedFiles(run: FaultRun, sourceRoot: string, addTo?: string 
   });
 }
 
-const RULES = (run: FaultRun, hosts: string[]): string[] => [
-  "Write exactly one new test: one it(…) call, added to one of the selected test files. Do not change, move or remove any existing line: the patch only adds lines.",
-  `Put everything the test needs inside that one it(…) call, next to the tests it belongs with (${hosts.join(", ")}), in the same style as its neighbours.`,
+const RULES = (run: FaultRun, hosts: string[]): string[] => {
+  const runner = run.profile.runner.name;
+  const call = runner === "mocha" ? "it(…)" : "it(…) or test(…)";
+  const control = runner === "mocha" ? ".only, .skip or .retries" : `.only, .skip, .todo, .each, .for, .concurrent, .fails, .skipIf, .runIf, .retry or .repeats, and never ${runner === "vitest" ? "vi" : "jest"} (no mocks, spies or fake timers)`;
+  return [
+  `Write exactly one new test: one ${call} call, added to one of the selected test files. Do not change, move or remove any existing line: the patch only adds lines.`,
+  `Write it as a call of its own, a statement beside its neighbours. A new row in a table of cases that an existing test loops over is not a new test, and verify-test refuses it.`,
+  `Put everything the test needs inside that one ${call} call, next to the tests it belongs with (${hosts.join(", ")}), in the same style as its neighbours.`,
   "Go through the public entry point the oracle names, as the neighbouring tests do. Use only modules the file already loads.",
   "Assert the oracle's expected result. Never assert what the faulty code returns, and never read the code's own text: the fault is shown so you know what must be caught, not as an expected value.",
-  `Change only what the test declares itself, and only direct members, one level and named in the code (local.name or local['name']), of a local it makes itself: an object or array literal, a function or class, Object.create(…), new Object() with no argument, or new of a built-in such as Error, Date, Map, Set, Array, URL or a typed array. Values from other calls (an app from express(), a handler's req or res) and anything from outside the test are read-only to it: never replace, stub or assign to ${run.record.identity.name}, anything it is defined on, or anything it uses. Never write, define or give an object the members stack, stackTraceLimit, prepareStackTrace, captureStackTrace or __proto__. Never use .only, .skip or .retries.`,
+  `Change only what the test declares itself, and only direct members, one level and named in the code (local.name or local['name']), of a local it makes itself: an object or array literal, a function or class, Object.create(…), new Object() with no argument, or new of a built-in such as Error, Date, Map, Set, Array, URL or a typed array. Values from other calls (an app from express(), a handler's req or res) and anything from outside the test are read-only to it: never replace, stub or assign to ${run.record.identity.name}, anything it is defined on, or anything it uses. Never write, define or give an object the members stack, stackTraceLimit, prepareStackTrace, captureStackTrace or __proto__. Never use ${control}.`,
   "Do not use process, globalThis, global, module, exports, eval, Function, Reflect or Proxy; require other than require('…') of a module the file already loads; this inside a nested function; a with statement; or the members constructor, caller, callee, __proto__, __defineGetter__, __defineSetter__, __lookupGetter__, __lookupSetter__, captureStackTrace or prepareStackTrace. A test of the behavior does not need them, and verify-test refuses them.",
   "Keep the test plain: a title like its neighbours', no tool name and no generated-by comment in the code. Attribution goes in the assertion record.",
   "Write assertion-record.json from the template: the one assertion call inside the new test whose failure must catch the fault, the line its called name is on (put that call on a line of its own, without other statements), that line's text, what it checks, and the sha256 of your patch and of the file after it.",
-  "The full title is the suite titles and the test's own, joined by single spaces, as Mocha reports it (see full_title_example).",
+  `The full title is the suite titles and the test's own, joined by single spaces, as ${runner === "mocha" ? "Mocha reports it" : "the stage's report names it"} (see full_title_example).`,
   "The record is frozen before any stage runs; a changed candidate needs a new record and counts as a new attempt, and a repair keeps the first attempt's declared assertion and condition.",
   "Leave the checkout unchanged: make the patch, then restore the file (for example git diff > candidate.patch, then git checkout -- <file>)."
-];
+  ];
+};
 
 /** The generation request for a fault run and a checkout. test-brief writes it; verify-test rebuilds it and requires the same bytes. */
 function buildGenerationRequest(run: FaultRun, sourceRoot: string, addTo?: string | null): GenerationRequest {
@@ -336,6 +343,8 @@ function briefMarkdown(request: GenerationRequest, faultRunRel: string, briefRun
   const countWords: Record<string, string> = {
     original_selected: "Selected tests, original",
     fault_selected: "Selected tests, with the fault",
+    original_suite: "Whole suite, original",
+    fault_suite: "Whole suite, with the fault",
     original_full_suite: "Whole suite, original",
     fault_full_suite: "Whole suite, with the fault"
   };
@@ -543,6 +552,48 @@ function editControls(path: string, original: Buffer, fault: Buffer, start: numb
   return null;
 }
 
+/** The variable that names the marker file in a `reach_marked` stage. */
+export const REACH_MARK_ENV = "OPRO_REACH_MARK";
+// Written so that it can never throw where there is no marker to write: without a process object,
+// or on a Node that has no getBuiltinModule, it does nothing.
+const REACH_MARK = `globalThis.process?.getBuiltinModule?.("node:fs")?.writeFileSync?.(globalThis.process.env.${REACH_MARK_ENV}, "")`;
+
+/**
+ * The original file with the smallest expression that holds [start, end) wrapped so that running it
+ * writes an empty marker file first: `((marker), (expression))`. The same places the text control may
+ * wrap, and the same shape check: apart from the wrap, the file parses exactly as before. Null when no
+ * such expression exists, so reach stays unknown.
+ */
+export function reachMarkedBytes(path: string, original: Buffer, start: number, end: number): Buffer | null {
+  const text = original.toString("utf8");
+  const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+  const charStart = original.subarray(0, start).toString("utf8").length;
+  const charEnd = original.subarray(0, end).toString("utf8").length;
+  const holders: ts.Node[] = [];
+  const descend = (node: ts.Node): void => {
+    ts.forEachChild(node, (child) => {
+      if (child.getStart(source) <= charStart && charEnd <= child.end) {
+        holders.unshift(child);
+        descend(child);
+      }
+    });
+  };
+  descend(source);
+  const byte = (charIndex: number): number => Buffer.byteLength(text.slice(0, charIndex), "utf8");
+  for (const node of holders) {
+    if (ts.isBlock(node) || (node.kind >= ts.SyntaxKind.FirstStatement && node.kind <= ts.SyntaxKind.LastStatement)) break;
+    if (!standsInConditional(node)) continue;
+    const from = byte(node.getStart(source));
+    const to = byte(node.end);
+    const wrapped = Buffer.from(`((${REACH_MARK}), (${original.subarray(from, to).toString("utf8")}))`, "utf8");
+    const marked = Buffer.concat([original.subarray(0, from), wrapped, original.subarray(to)]);
+    if (!parsesAs(path, marked.toString("utf8"))) continue;
+    if (!sameShape(path, original, from, to, marked, from + wrapped.length)) continue;
+    return marked;
+  }
+  return null;
+}
+
 /**
  * Whether putting this node inside `(… ? … : …)` keeps what it does. Not when it is written to, deleted,
  * or called as a method (the call would lose its `this`), and not in the middle of an optional chain.
@@ -669,7 +720,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   if (!byGit || !byGit.equals(applied.bytes)) {
     refuse("candidate_invalid", `git applies this patch ${byGit ? "differently" : "not at all"}, so it would not deliver the bytes that are verified; make it with git diff against the commit's ${applied.path}.`);
   }
-  const newTest = readNewTest({ path: applied.path, patched: applied.bytes, original: target!.bytes, added: applied.added });
+  const newTest = readNewTest({ path: applied.path, patched: applied.bytes, original: target!.bytes, added: applied.added, runner: run.profile.runner.name });
   const declaredFiles = assertion.candidate.files;
   if (declaredFiles.length !== 1 || declaredFiles[0]!.path !== applied.path || declaredFiles[0]!.sha256_after !== afterSha) {
     refuse("assertion_invalid", `the assertion record's files are not the one file as this patch leaves it (${applied.path}, sha256 ${afterSha}).`);
@@ -678,7 +729,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   const declaredLine = assertion.assertion.line;
   const declaredColumns = [...(newTest.assertionPositions.get(declaredLine) ?? [])];
   if (declaredLine < newTest.start || declaredLine > newTest.end || declaredColumns.length === 0) {
-    refuse("assertion_invalid", `line ${declaredLine} is not where an assertion call inside the new it(…) call (lines ${newTest.start}–${newTest.end}) names its check.`);
+    refuse("assertion_invalid", `line ${declaredLine} is not where an assertion call inside the new test (lines ${newTest.start}–${newTest.end}) names its check.`);
   }
   const patchedLines = applied.bytes.toString("utf8").split("\n");
   if (norm(patchedLines[declaredLine - 1]!.replace(/\r$/, "")) !== norm(assertion.assertion.text)) refuse("assertion_invalid", `line ${declaredLine} does not read as the record says.`);
@@ -712,11 +763,9 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
   const fixture = asThisCommand(() => readFixture(run.fixtureBytes));
   if (fixture.baselinePassing === null) refuse("fault_run_invalid", "the fixture records no baseline count, so the whole suite with the new test cannot be checked.");
   const nodeModules = join(sourceRoot, "node_modules");
-  const mochaPackage = join(nodeModules, "mocha", "package.json");
-  if (!existsSync(join(sourceRoot, MOCHA_ENTRY)) || !existsSync(mochaPackage) || !lstatSync(nodeModules).isDirectory() || !realInside(sourceRoot, nodeModules)) {
-    refuse("not_installed", `${sourceRoot} has no installed Mocha of its own: install the fixture first (inside the boundary).`);
-  }
-  const mochaVersion = String((readJson(mochaPackage) as { version?: unknown }).version ?? "unknown");
+  const installed = existsSync(nodeModules) && lstatSync(nodeModules).isDirectory() && realInside(sourceRoot, nodeModules) ? installedRunner(sourceRoot, fixture.runner) : { problem: `${sourceRoot} has no node_modules folder of its own: install the fixture first (inside the boundary).` };
+  if ("problem" in installed) refuse("not_installed", installed.problem);
+  const runnerVersion = "version" in installed ? installed.version : "unknown";
   const statusBefore = trackedStatus(sourceRoot);
 
   // ── the run folder: the brief, the candidate and its assertion record are frozen here, before any copy runs ──
@@ -747,9 +796,8 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     writeFileAtomic(join(runDir, "candidate.patch"), opts.candidate_bytes);
     writeFileAtomic(join(runDir, "assertion-record.json"), recordBytes(assertion));
     const assertionSha = recordSha256(assertion);
-    const mochaHead = ["node", MOCHA_ENTRY, ...MOCHA_NO_REPO_CONFIG, ...fixture.mocha.options, "--reporter", REPORTER_TARGET];
-    const fileArgv = [...mochaHead, applied.path];
-    const fullArgv = [...mochaHead, ...fixture.mocha.operands];
+    const fileArgv = testArgv(fixture.runner, [applied.path]);
+    const fullArgv = testArgv(fixture.runner, null);
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
     const reportEnv = REPORT_ENV;
 
@@ -774,7 +822,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       const changed = [...new Set([...before.keys(), ...after.keys()])].filter((path) => before.get(path) !== after.get(path));
       if (changed.length !== 1 || changed[0] !== applied.path || after.get(applied.path) !== afterSha) refuse("candidate_invalid", `a copy is not as the patch leaves it (${changed.join(", ") || "nothing changed"}).`);
     }
-    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), null);
+    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), null, fixture.runner);
     const profile: RunProfile = {
       version: RUN_PROFILE_VERSION,
       run_id: runId,
@@ -789,7 +837,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       selected_tests: [{ path: applied.path, sha256: afterSha }],
       selected_argv: fileArgv,
       full_suite_argv: fullArgv,
-      runner: { name: "mocha", version: mochaVersion },
+      runner: { name: fixture.runner.name, version: runnerVersion },
       container: containerProfile(fixture, mountsFor, reportEnv),
       limits: { stage_deadline_ms: deadlineMs },
       candidate: { patch_sha256: assertion.candidate.patch_sha256, assertion_record_sha256: assertionSha, generation_request_sha256: requestSha }

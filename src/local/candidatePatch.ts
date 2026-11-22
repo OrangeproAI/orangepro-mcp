@@ -206,6 +206,10 @@ const OFF_LIMITS_MEMBERS = new Set(["__proto__", "constructor", "caller", "calle
 const WRITE_FORBIDDEN = new Set(["stack", "stackTraceLimit", "prepareStackTrace", "captureStackTrace", "__proto__"]);
 // Calls that change how the runner treats a test.
 const RUNNER_CONTROL = new Set(["only", "skip", "retries"]);
+// The same for a Vitest or Jest file: forms that focus, skip, repeat or multiply a test, or change how its failure counts.
+const RUNNER_CONTROL_CONFIGURED = new Set([...RUNNER_CONTROL, "todo", "each", "for", "concurrent", "sequential", "fails", "failing", "skipIf", "runIf", "retry", "repeats", "extend"]);
+// The runner's own helper objects: mocks, spies and fake timers stand in for the behavior a test is about.
+const RUNNER_HELPERS: Record<string, string> = { vitest: "vi", jest: "jest" };
 const OBJECT_WRITERS = new Set(["assign", "defineProperty", "defineProperties", "setPrototypeOf"]);
 // Built-in constructors whose `new` always makes a new object.
 const SAFE_CONSTRUCTORS = new Set([
@@ -367,7 +371,12 @@ function assertionNameNode(call: ts.CallExpression, bound: Set<string>): ts.Node
  * load, no name through which a test reaches its runner or the module system, and no change to
  * anything the test did not make itself. Names are resolved by scope.
  */
-export function readNewTest(args: { path: string; patched: Buffer; original: Buffer; added: AppliedPatch["added"] }): NewTest {
+export function readNewTest(args: { path: string; patched: Buffer; original: Buffer; added: AppliedPatch["added"]; runner?: "mocha" | "vitest" | "jest" }): NewTest {
+  const runner = args.runner ?? "mocha";
+  const testCalls = runner === "mocha" ? ["it"] : ["it", "test"];
+  const callWords = testCalls.map((name) => `${name}(…)`).join(" or ");
+  const control = runner === "mocha" ? RUNNER_CONTROL : RUNNER_CONTROL_CONFIGURED;
+  const helper = RUNNER_HELPERS[runner] ?? null;
   const text = args.patched.toString("utf8");
   if (/\r(?!\n)|\u2028|\u2029/.test(text)) {
     refuse("candidate_invalid", `${args.path} holds a line break other than \\n or \\r\\n (a lone carriage return, U+2028 or U+2029), so its line numbers cannot be bound to the runner's.`);
@@ -389,14 +398,16 @@ export function readNewTest(args: { path: string; patched: Buffer; original: Buf
   const newCalls: ts.CallExpression[] = [];
   const scan = (node: ts.Node): void => {
     if (startsOnAddedLine(node)) {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "it") newCalls.push(node);
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && testCalls.includes(node.expression.text)) newCalls.push(node);
       const member = ts.isPropertyAccessExpression(node) ? node.name.text : ts.isElementAccessExpression(node) ? constantName(node.argumentExpression) : null;
-      if (member !== null && RUNNER_CONTROL.has(member)) refuse("candidate_invalid", `the patch uses .${member} (${where(node)}).`);
+      if (member !== null && control.has(member)) refuse("candidate_invalid", `the patch uses .${member} (${where(node)}).`);
+      if (helper !== null && ts.isIdentifier(node) && node.text === helper && isReference(node)) refuse("candidate_invalid", `the patch uses ${helper} (${where(node)}): a new test may not mock, spy or fake time.`);
     }
     ts.forEachChild(node, scan);
   };
   scan(src);
-  if (newCalls.length !== 1) refuse("candidate_invalid", `the patch adds ${newCalls.length} it(…) calls; it must add exactly one.`);
+  if (newCalls.length === 0) refuse("candidate_invalid", `the patch adds no ${callWords} call; it must add exactly one, as a call of its own (a new row in a table of cases that an existing test loops over is not a new test).`);
+  if (newCalls.length !== 1) refuse("candidate_invalid", `the patch adds ${newCalls.length} ${callWords} calls; it must add exactly one.`);
   const call = newCalls[0]!;
   // A statement of its own, wholly new: it cannot take over a chained call of an existing statement.
   const statement = call.parent;
@@ -404,7 +415,7 @@ export function readNewTest(args: { path: string; patched: Buffer; original: Buf
   const start = lineOf(statement.getStart(src));
   const end = lineOf(statement.getEnd());
   for (let line = start; line <= end; line++) {
-    if (!addedLines.has(line)) refuse("candidate_invalid", `the new it(…) call takes in line ${line}, which was already in ${args.path}.`);
+    if (!addedLines.has(line)) refuse("candidate_invalid", `the new ${callWords} call takes in line ${line}, which was already in ${args.path}.`);
   }
   // Blank added lines only right beside the new statement; nothing else outside it.
   const byLine = new Map(args.added.map((entry) => [entry.line, entry.text]));
@@ -413,7 +424,7 @@ export function readNewTest(args: { path: string; patched: Buffer; original: Buf
   let after = end + 1;
   while (byLine.has(after) && byLine.get(after)!.trim() === "") after++;
   const outside = args.added.find((entry) => entry.line <= before || entry.line >= after);
-  if (outside) refuse("candidate_invalid", `${args.path}:${outside.line} is added outside the new it(…) call; everything the test needs goes inside it.`);
+  if (outside) refuse("candidate_invalid", `${args.path}:${outside.line} is added outside the new ${callWords} call; everything the test needs goes inside it.`);
 
   // Where it sits: never inside another test or hook; its full title from the suites around it.
   const titles: Array<string | null> = [stringValue(call.arguments[0])];

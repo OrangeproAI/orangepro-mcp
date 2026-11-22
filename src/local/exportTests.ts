@@ -29,18 +29,16 @@ import {
   createStageRunner,
   frameLocation,
   makeMountsFor,
-  MOCHA_ENTRY,
-  MOCHA_NO_REPO_CONFIG,
   prepareFaultCopies,
   ProbeFaultRefusal,
   readFixture,
   realInside,
   REPORT_ENV,
-  REPORTER_TARGET,
   trackedStatus,
   treeHashes,
   type ProbeFaultDeps
 } from "./faultProbe.js";
+import { installedRunner, testArgv } from "./chainRunner.js";
 import { resolveTargetSymbol } from "./ledger.js";
 import { defaultDynamicProofRunner, ProofRefusalError, proofPreflight } from "./operations.js";
 import { toWorkspaceRel } from "./reprove/paths.js";
@@ -220,8 +218,8 @@ export function computeRows(input: {
   const row = (name: ProofRow, met: boolean, reason: string, stages: StageRef[]): ProofRowResult => ({ row: name, meaning: PROOF_ROW_MEANING[name], met, reason: met ? null : reason, stages });
 
   const a = fresh.stages.fresh_full_suite;
-  const b = fault.stages.original_selected;
-  const c = fault.stages.fault_selected;
+  const b = fault.stages.original_selected ?? fault.stages.original_suite;
+  const c = fault.stages.fault_selected ?? fault.stages.fault_suite;
   const cls = fault.run.classification;
   const verified = verify.recomputed === "verified_gap";
   const g = fresh.stages.fresh_full_suite_with_patch;
@@ -230,12 +228,12 @@ export function computeRows(input: {
   const hFailed = h?.tests?.observed.filter((test) => test.state === "failed") ?? [];
   return [
     row("A", clean(a) && a!.tests!.passed === input.baseline && a!.copy_target_sha256 === input.originalSha, "the existing whole suite did not pass on the fresh original with the fixture's count", refsOf(fresh.runId, fresh.refs, ["fresh_full_suite"])),
-    row("B", clean(b), "the selected tests did not pass cleanly on the original", refsOf(fault.run.runId, fault.refs, ["original_selected"])),
+    row("B", clean(b), "the selected tests did not pass cleanly on the original", refsOf(fault.run.runId, fault.refs, ["original_selected", "original_suite"])),
     row(
       "C",
       cls.classification === "survived_unverified" && clean(c) && c!.tests!.passed === b?.tests?.passed && fault.run.faultRecord.validity.parse === "ok" && cls.reached_by_selected_tests === "reached" && cls.behavioral_difference.status === "differs",
       "the selected tests' survival of a valid, reached fault with a behavioral difference is not shown",
-      refsOf(fault.run.runId, fault.refs, ["fault_selected", "witness_original", "witness_fault", "original_full_suite", "fault_full_suite"])
+      refsOf(fault.run.runId, fault.refs, ["fault_selected", "fault_suite", "reach_marked", "witness_original", "witness_fault", "original_full_suite", "fault_full_suite"])
     ),
     row("D", verified, `the verify run's stages do not show it (${verify.recomputed})`, refsOf(verify.run.runId, verify.run.stageRefs, ["candidate_original", "candidate_original_repeat"])),
     row("E", verified, `the verify run's stages do not show it (${verify.recomputed})`, refsOf(verify.run.runId, verify.run.stageRefs, ["candidate_fault", "candidate_fault_repeat", "fault_full_suite_with_candidate", "candidate_fault_text_control"])),
@@ -306,10 +304,6 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     refuse("stale_checkout", `the checkout's ${testPath} is not as the fault run selected it; restore it with git checkout -- ${testPath}.`);
   }
   const nodeModules = join(sourceRoot, "node_modules");
-  const mochaPackage = join(nodeModules, "mocha", "package.json");
-  if (!existsSync(join(sourceRoot, MOCHA_ENTRY)) || !existsSync(mochaPackage) || !lstatSync(nodeModules).isDirectory() || !realInside(sourceRoot, nodeModules)) {
-    refuse("not_installed", `${sourceRoot} has no installed Mocha of its own: install the fixture first (inside the boundary).`);
-  }
 
   // ── orangepro-tests.patch: rebuilt from the verified bytes, one allowed test file, added lines only, the same under git ──
   const originalTest = readFileSync(testAbs);
@@ -318,7 +312,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   if (sha256Hex(verifiedTest) !== verify.assertion.candidate.files[0]?.sha256_after) refuse("patch_invalid", "the verify run's candidate no longer gives the bytes it verified.");
   // The columns where the declared assertion call names its check, read as verify-test read them.
   const declaredLine = verify.assertion.assertion.line;
-  const declaredColumns = [...(asExport(() => readNewTest({ path: testPath, patched: verifiedTest, original: originalTest, added: verifiedApplied.added })).assertionPositions.get(declaredLine) ?? [])];
+  const declaredColumns = [...(asExport(() => readNewTest({ path: testPath, patched: verifiedTest, original: originalTest, added: verifiedApplied.added , runner: run.profile.runner.name })).assertionPositions.get(declaredLine) ?? [])];
   if (declaredColumns.length === 0) refuse("run_invalid", `line ${declaredLine} of the verified test is not where an assertion call names its check.`);
   const allowed = asExport(() => allowedPaths(run.fixtureBytes));
   if (!allowed.patterns.some((p) => globMatches(p, testPath)) || allowed.never.some((p) => globMatches(p, testPath))) refuse("patch_invalid", `${testPath} is not a test file the fixture allows a patch to touch.`);
@@ -350,6 +344,9 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   const controls = textControls(run.record.identity.file, fileBytes, plan.mutated, plan);
   if (!controls) return refuse("run_invalid", `the fault ${run.faultRecord.operator.id} has no text controls, so its verify run cannot have been verified.`);
   const fixture = asExport(() => readFixture(run.fixtureBytes));
+  const installed = existsSync(nodeModules) && lstatSync(nodeModules).isDirectory() && realInside(sourceRoot, nodeModules) ? installedRunner(sourceRoot, fixture.runner) : { problem: `${sourceRoot} has no node_modules folder of its own: install the fixture first (inside the boundary).` };
+  if ("problem" in installed) refuse("not_installed", installed.problem);
+  const runnerVersion = "version" in installed ? installed.version : "unknown";
   if (fixture.baselinePassing === null) refuse("run_invalid", "the fixture records no baseline count.");
   const recomputed = classifyCandidate({
     stages: verify.stages,
@@ -373,7 +370,6 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     faultRunScope: run.classification.scope
   }).result;
   if (recomputed !== verify.verdict.result) refuse("run_invalid", `the verify run's result (${verify.verdict.result}) does not follow from its own stage files (${recomputed}).`);
-  const mochaVersion = String((readJson(mochaPackage) as { version?: unknown }).version ?? "unknown");
   const statusBefore = trackedStatus(sourceRoot);
 
   // ── the export run: the patches first, then the fresh replay ──
@@ -389,15 +385,14 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     writeFileAtomic(join(runDir, "fault-run.json"), recordBytes({ kind: "export_tests", fault_run: { run_id: run.runId, manifest_sha256: run.manifestSha }, verify_run: { run_id: verify.runId, manifest_sha256: verify.manifestSha }, brief_run: verify.tag.brief_run }));
     writeFileAtomic(join(runDir, "orangepro-tests.patch"), testsPatch);
     writeFileAtomic(join(runDir, "diagnostic-fault.patch"), faultPatch);
-    const mochaHead = ["node", MOCHA_ENTRY, ...MOCHA_NO_REPO_CONFIG, ...fixture.mocha.options, "--reporter", REPORTER_TARGET];
-    const fileArgv = [...mochaHead, testPath];
-    const fullArgv = [...mochaHead, ...fixture.mocha.operands];
+    const fileArgv = testArgv(fixture.runner, [testPath]);
+    const fullArgv = testArgv(fixture.runner, null);
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
     const reportEnv = REPORT_ENV;
     const copyRoots = asExport(() =>
       prepareFaultCopies({ runner: deps.dynamicProofRunner ?? defaultDynamicProofRunner, sourceRoot, targetRel: symbolTarget.file, method: symbolTarget.method, targetAbs: tsjs.targetAbs, bound, plan, tmp, mustHold: run.profile.selected_tests })
     );
-    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), null);
+    const mountsFor = makeMountsFor(copyRoots, realpathSync(nodeModules), null, fixture.runner);
     const profile: RunProfile = {
       version: RUN_PROFILE_VERSION,
       run_id: runId,
@@ -412,7 +407,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
       selected_tests: [{ path: testPath, sha256: sha256Hex(verifiedTest) }],
       selected_argv: fileArgv,
       full_suite_argv: fullArgv,
-      runner: { name: "mocha", version: mochaVersion },
+      runner: { name: fixture.runner.name, version: runnerVersion },
       container: containerProfile(fixture, mountsFor, reportEnv),
       limits: { stage_deadline_ms: deadlineMs },
       candidate: { patch_sha256: sha256Hex(testsPatch), assertion_record_sha256: verify.verdict.assertion_record_sha256, generation_request_sha256: verify.verdict.generation_request_sha256 }
@@ -497,7 +492,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
       container_image: fixture.shape.image,
       container_node: typeof (firstFresh?.boundary.report as { node?: unknown } | null)?.node === "string" ? ((firstFresh!.boundary.report as { node: string }).node) : null,
       host: { node: process.version, platform: `${process.platform}-${process.arch}` },
-      runner: { name: "mocha", version: mochaVersion },
+      runner: { name: fixture.runner.name, version: runnerVersion },
       installed_tree_sha256: installedTree,
       run_profiles: [
         { run_id: run.runId, sha256: sha256Hex(readFileSync(join(run.dir, "run-profile.json"))) },
