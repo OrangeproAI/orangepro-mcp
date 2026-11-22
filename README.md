@@ -91,7 +91,7 @@ Qodo and CodeRabbit review pull requests. That is useful, and it is not the same
 - **Independent verification.** The tool that wrote the code should not grade that code. OrangePro checks the change after the fact, on your tests and your repository.
 - **Mutation proof.** A test counts only if it passes on the original code and fails when that behavior is broken on purpose. You get a receipt, and a test-only patch to review.
 - **Risk ranking from real code.** It maps the functions in your repo, links them to the tests that actually call them, and ranks the unproven ones by risk. You start where a break would hurt most.
-- **Free, local, and MIT licensed.** It runs on your machine, including as an MCP server, with no OrangePro account and no source upload. Mapping, ranking and proof need no model key.
+- **Free, local, and MIT licensed.** It runs on your machine, including as an MCP server, with no OrangePro account, and your code stays on your machine. Mapping, ranking and proof need no model key.
 - **Qodo no longer offers a PR test command.** Qodo's legacy PR `test` command was deprecated on 1 Sep 2026 with "No direct replacement," and was scheduled for removal on 1 Oct 2026. Its current public pages focus on review and governance. If you came to Qodo to generate or prove tests, OrangePro is the stronger fit today.
 
 | | OrangePro | Qodo | CodeRabbit |
