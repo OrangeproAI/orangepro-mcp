@@ -5,7 +5,7 @@
 //   optional: --config <path inside the repository>
 // Vite is taken from the repository's node_modules, never from OrangePro. Nothing is written to the
 // repository: the config is processed in memory and Vite's cache goes to the temporary folder.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -34,8 +34,8 @@ function esmEntry(pkg) {
   return typeof at === "string" ? at : (pkg.module ?? pkg.main ?? "index.js");
 }
 
-function findPackage(name) {
-  for (let dir = root; ; dir = dirname(dir)) {
+function findPackage(name, from = root) {
+  for (let dir = from; ; dir = dirname(dir)) {
     const candidate = join(dir, "node_modules", name, "package.json");
     if (existsSync(candidate)) return candidate;
     if (dirname(dir) === dir) return null;
@@ -44,8 +44,11 @@ function findPackage(name) {
 
 let vite;
 try {
-  const pkgPath = findPackage("vite");
-  if (!pkgPath) throw new Error("node_modules/vite is not installed");
+  // Vite as Vitest itself resolves it: from Vitest's own place first (a strict layout such as pnpm's keeps
+  // Vitest's dependencies beside it, not at the root), then from the repository's root.
+  const vitestPkg = findPackage("vitest");
+  const pkgPath = (vitestPkg ? findPackage("vite", dirname(realpathSync(vitestPkg))) : null) ?? findPackage("vite");
+  if (!pkgPath) throw new Error("vite is not installed beside this repository's Vitest");
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   vite = await import(pathToFileURL(resolve(dirname(pkgPath), esmEntry(pkg))).href);
 } catch (error) {

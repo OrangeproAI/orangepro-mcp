@@ -385,8 +385,8 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     writeFileAtomic(join(runDir, "fault-run.json"), recordBytes({ kind: "export_tests", fault_run: { run_id: run.runId, manifest_sha256: run.manifestSha }, verify_run: { run_id: verify.runId, manifest_sha256: verify.manifestSha }, brief_run: verify.tag.brief_run }));
     writeFileAtomic(join(runDir, "orangepro-tests.patch"), testsPatch);
     writeFileAtomic(join(runDir, "diagnostic-fault.patch"), faultPatch);
-    const fileArgv = testArgv(fixture.runner, [testPath]);
-    const fullArgv = testArgv(fixture.runner, null);
+    const fileArgv = testArgv(fixture.runner, [testPath], runnerVersion);
+    const fullArgv = testArgv(fixture.runner, null, runnerVersion);
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
     const reportEnv = REPORT_ENV;
     const copyRoots = asExport(() =>

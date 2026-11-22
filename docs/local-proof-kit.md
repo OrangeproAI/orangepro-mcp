@@ -342,7 +342,8 @@ that describes how the repository runs its tests and in which container, and the
   - Vitest and Jest load the repository's own config, since their projects do not run without it. Over
     it the stage forces: one try per test, no stop at the first failure, no coverage, an empty run
     fails, OrangePro's reporter is the only one, and every test file runs in a process other than the
-    reporter's. On Vitest a focused test (`.only`) fails the run; on Jest it leaves the other tests
+    reporter's. Vitest 5's cache of transformed modules is kept in the container's `/tmp`, since a
+    stage mounts `node_modules` read-only. On Vitest a focused test (`.only`) fails the run; on Jest it leaves the other tests
     skipped, which the result reports as no claim. A fixture may pass a config path, a project name
     and a test folder inside the repository; any other option is refused.
   - On a Vitest project the faulty file's syntax check and the witness go through the project's own
@@ -491,6 +492,21 @@ follows the runner (`linux/amd64` on GitHub's runners), with the same image dige
 does not have the image fetches it by that digest first. It writes
 `result.json`, the job summary and the run folders for upload, and exits 0 for every outcome
 except an internal error. It opens no pull request.
+
+**Which package manager.** The first word of the fixture's `commands.install` names it, and only a
+frozen install is run: `npm ci`, `pnpm install --frozen-lockfile`, or `yarn install --immutable`
+(`--frozen-lockfile` for yarn 1), each with plain flags only. A command that could change the
+lockfile, or any other manager, is refused by name before anything runs.
+- pnpm and yarn run through corepack inside the container at the version the repository's own
+  `packageManager` field pins. A repository that pins none needs the fixture to name one
+  (`dependencies.package_manager`, like `pnpm@10.33.2`); with neither, the run is refused.
+- Corepack's cache and the manager's store and cache are in the container's `/tmp`. The checkout
+  gets `node_modules` and nothing else: a lockfile the install changed, or any tracked file it
+  changed (a lifecycle script, say), stops the run as `install_failed`.
+- An install that leaves no `node_modules` at the package root (yarn's Plug'n'Play layout) is not
+  supported and stops the same way.
+- The result's `install.manager` records the manager, its version, where the version came from, and
+  the command that ran.
 
 **Delivering a draft test PR (opt-in).** `opro install-github-action … --deliver draft-pr` adds a second job,
 `deliver`. It is the only job with `contents: write` and `pull-requests: write`, and it checks out nothing and runs

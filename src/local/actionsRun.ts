@@ -23,8 +23,9 @@ import { recordBytes, recordSha256, sha256Hex, writeFileAtomic } from "./contrac
 import { approvalMatch } from "./contracts/approvalBinding.js";
 import type { TargetRecord } from "./contracts/targetRecord.js";
 import { opExportTests } from "./exportTests.js";
-import { opProbeFault, ProbeFaultRefusal, readFixture } from "./faultProbe.js";
+import { opProbeFault, ProbeFaultRefusal, readFixture, trackedStatus } from "./faultProbe.js";
 import { runnerDisplayName, runnerEntryExists } from "./chainRunner.js";
+import { installPlanOf, InstallPlanError } from "./chainInstall.js";
 import { opAnalyze, opBehaviorCoverageHtml, ProofRefusalError } from "./operations.js";
 import { redactSecrets } from "./util/redact.js";
 import type { Clock } from "./util/time.js";
@@ -101,6 +102,8 @@ export interface InstallRecord {
   /** Why it did not run: the checkout already had its test runner installed. */
   skipped: "already_installed" | null;
   command: string[];
+  /** The package manager that ran, its version when it is pinned, and what was run in the container. */
+  manager: { name: "npm" | "pnpm" | "yarn"; version: string | null; version_from: "packageManager" | "fixture" | "image"; argv: string[]; lockfile: string };
   lockfile: { path: string; sha256: string; added: boolean; unchanged_by_install: boolean | null } | null;
   boundary_checks: Array<{ shape: "test" | "install"; held: boolean; failures: string[] }>;
   exit_code: number | null;
@@ -554,21 +557,36 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
 
   /** The install stage. Returns true when the run stops here. */
   function installStage(loaded: LoadedProfile, shape: ContainerRequest["shape"], executor: ContainerExecutor, deadlineAt: number): boolean {
-    const raw = JSON.parse(loaded.manifest.toString("utf8")) as { dependencies?: { lockfile?: unknown; lockfile_sha256?: unknown }; commands?: { install?: unknown } };
-    const command = Array.isArray(raw.commands?.install) ? raw.commands.install : ["npm", "ci", "--no-audit", "--no-fund"];
-    if (command.length < 2 || command[0] !== "npm" || command[1] !== "ci" || !command.slice(2).every((arg) => typeof arg === "string" && /^--[a-z-]+(=[\w.-]+)?$/.test(arg))) {
-      throw new ProfileError("the fixture's commands.install must be npm ci with flags only.");
+    const raw = JSON.parse(loaded.manifest.toString("utf8")) as { dependencies?: { lockfile?: unknown; lockfile_sha256?: unknown; package_manager?: unknown }; commands?: { install?: unknown } };
+    // The repository's own packageManager field pins the manager's version; a repository without one needs the fixture to.
+    let ownManager: string | null = null;
+    try {
+      const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { packageManager?: unknown };
+      ownManager = typeof pkg.packageManager === "string" ? pkg.packageManager : null;
+    } catch {
+      ownManager = null;
+    }
+    let install: ReturnType<typeof installPlanOf>;
+    try {
+      install = installPlanOf(raw.commands?.install, { packageManagerField: ownManager, fixtureManager: typeof raw.dependencies?.package_manager === "string" ? raw.dependencies.package_manager : null });
+    } catch (error) {
+      if (error instanceof InstallPlanError) throw new ProfileError(error.message);
+      throw error;
+    }
+    const command = install.fixture_command;
+    if (typeof raw.dependencies?.lockfile === "string" && raw.dependencies.lockfile !== install.lockfile) {
+      throw new ProfileError(`the fixture's dependencies.lockfile is ${raw.dependencies.lockfile}, and ${install.manager} installs from ${install.lockfile}.`);
     }
     // The runner the fixture names is what "installed" means.
     const plan = readFixture(loaded.manifest).runner;
-    const record: InstallRecord = { ran: false, skipped: null, command: command as string[], lockfile: null, boundary_checks: [], exit_code: null, timed_out: false, duration_ms: 0, log: null };
+    const record: InstallRecord = { ran: false, skipped: null, command, manager: { name: install.manager, version: install.version, version_from: install.version_from, argv: install.argv, lockfile: install.lockfile }, lockfile: null, boundary_checks: [], exit_code: null, timed_out: false, duration_ms: 0, log: null };
     result.install = record;
     if (existsSync(join(repo, "node_modules")) && lstatSync(join(repo, "node_modules")).isDirectory() && runnerEntryExists(repo, plan)) {
       record.skipped = "already_installed";
       return false;
     }
     if (loaded.lockfile) {
-      const name = typeof raw.dependencies?.lockfile === "string" ? raw.dependencies.lockfile : "package-lock.json";
+      const name = install.lockfile;
       if (!/^[\w.-]+$/.test(name)) throw new ProfileError("the fixture's dependencies.lockfile must be a file name at the package root.");
       const sha = sha256Hex(loaded.lockfile);
       if (raw.dependencies?.lockfile_sha256 !== sha) throw new ProfileError(`the profile's lockfile is not the one the fixture manifest names (sha256 ${sha}).`);
@@ -599,7 +617,8 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
         return true;
       }
     }
-    const run = executor({ ...base, deadlineMs: shape.deadlineSeconds * 1000, mounts: [{ source: repo, target: WORK_REPO, readonly: false, role: "<checkout>" }], network: "bridge", command: command as string[] });
+    const trackedBefore = trackedStatus(repo);
+    const run = executor({ ...base, env: install.env, deadlineMs: shape.deadlineSeconds * 1000, mounts: [{ source: repo, target: WORK_REPO, readonly: false, role: "<checkout>" }], network: "bridge", command: install.argv });
     record.ran = true;
     record.exit_code = run.exitCode;
     record.timed_out = run.timedOut;
@@ -607,6 +626,11 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
     record.log = "install/install.log";
     writeFileAtomic(join(out, "install", "install.log"), logText(run));
     if (record.lockfile) record.lockfile.unchanged_by_install = existsSync(join(repo, record.lockfile.path)) && sha256Hex(readFileSync(join(repo, record.lockfile.path))) === record.lockfile.sha256;
+    const installedHere = existsSync(join(repo, "node_modules")) && lstatSync(join(repo, "node_modules")).isDirectory();
+    if (!run.timedOut && run.exitCode === 0 && run.stopped && !installedHere) {
+      end("blocked", "install_failed", `the install left no node_modules folder at the package root${existsSync(join(repo, ".pnp.cjs")) ? " (yarn's Plug'n'Play layout)" : ""}: that layout is not supported.`);
+      return true;
+    }
     if (run.timedOut || run.exitCode !== 0 || !run.stopped || !runnerEntryExists(repo, plan)) {
       if (deadlinePassed(deadlineAt)) return true;
       end("blocked", "install_failed", `the install inside the boundary ${run.timedOut ? "timed out" : `exited ${run.exitCode}`}${runnerEntryExists(repo, plan) ? "" : `, and ${runnerDisplayName(plan.name)} is not installed`}; see install/install.log.`);
@@ -614,6 +638,11 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
     }
     if (record.lockfile && !record.lockfile.unchanged_by_install) {
       end("blocked", "install_failed", "the install changed the frozen lockfile; nothing installed from it is trusted.");
+      return true;
+    }
+    // An install adds node_modules and nothing else: a tracked file changed by a lifecycle script, or by the manager, stops here.
+    if (trackedStatus(repo) !== trackedBefore) {
+      end("blocked", "install_failed", "the install changed files the repository tracks; nothing installed that way is trusted.");
       return true;
     }
     return false;
