@@ -406,6 +406,14 @@ export interface AnalysisMeta {
   };
   /** Static confirmation outcome (Phase 4): hard TESTED_BY/COVERS edges found by the TypeChecker confirmer. */
   confirmed_coverage?: ConfirmedCoverageMeta;
+  /** Receiver typing (J4): factories found, links through re-exports and factory members, handler-name candidates. */
+  receiver_links?: {
+    factories: number;
+    reexport_calls: number;
+    factory_member_links: number;
+    handler_name_candidates: number;
+    handler_name_ambiguous: number;
+  };
   /** Static route links (J4): supertest requests matched to a traced app's routes. Counts only; the links are hard edges with `route_link`. */
   route_links?: {
     routes: number;

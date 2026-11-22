@@ -20,9 +20,9 @@ import { byHandCounts, type ByHandRun, type ReportByHand } from "./byHand.js";
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 7;
+export const REPORT_DATA_VERSION = 8;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r17.1";
+export const REPORT_RENDERER_VERSION = "r18.1";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
@@ -410,6 +410,7 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
         { k: "Coverage", v: coverageFiles.length ? `${coverageFiles.join(", ")}: ${n(evidence.runtime)} functions executed` : "None found. Run your tests with coverage to add this evidence." },
         { k: "Tests", v: testsInput(data.scan.tests.total, links) },
         ...(graph.analysis?.route_links ? [{ k: "Route links", v: routeLinksText(graph.analysis.route_links) }] : []),
+        ...(graph.analysis?.receiver_links ? [{ k: "Receiver links", v: receiverLinksText(graph.analysis.receiver_links) }] : []),
         ...(input.addon ? [{ k: "Add-on", v: `${input.addon.name} ${input.addon.version} proposed: ${input.addon.used.join(", ")}. Its answers are proposals; OrangePro's own runs decide every result.` }] : [])
       ],
       counted: [
@@ -548,4 +549,14 @@ function routeLinksText(r: NonNullable<NonNullable<LocalGraph["analysis"]>["rout
   const unread = r.unknown_routes + r.unknown_mounts;
   if (unread) parts.push(`${n(unread)} ${unread === 1 ? "route or mount is" : "routes or mounts are"} built at run time and could not be read`);
   return `${parts.join(". ")}.`;
+}
+
+/** Run details: what receiver typing (J4) found. Links are Linked evidence; handler-name matches are Unconfirmed. */
+function receiverLinksText(r: NonNullable<NonNullable<LocalGraph["analysis"]>["receiver_links"]>): string {
+  const parts = [
+    `${n(r.reexport_calls)} test calls through a re-export file and ${n(r.factory_member_links)} calls on a value a factory built (${plural(r.factories, "factory", "factories")}) linked`,
+    `${n(r.handler_name_candidates)} calls inside handlers matched by name only (Unconfirmed)`
+  ];
+  if (r.handler_name_ambiguous) parts.push(`${n(r.handler_name_ambiguous)} handler calls matched more than one object of that name and were left out`);
+  return `${parts.join("; ")}.`;
 }

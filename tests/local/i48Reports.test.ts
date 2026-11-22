@@ -118,8 +118,8 @@ function fixtureRepo(): string {
 
 describe("item 48: the reports", () => {
   it("bumps both versions", () => {
-    expect(REPORT_DATA_VERSION).toBe(7);
-    expect(REPORT_RENDERER_VERSION).toBe("r17.1");
+    expect(REPORT_DATA_VERSION).toBe(8);
+    expect(REPORT_RENDERER_VERSION).toBe("r18.1");
   });
 
   it("summary: the platform card comes right after the top functions, with the link from the one constant", () => {

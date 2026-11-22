@@ -302,6 +302,7 @@ Optional. Put it in `.orangepro/config.json` in the repository, or in `~/.orange
 - **Java proof** needs Maven (Surefire) and JUnit 5. Gradle and JUnit 4 projects are mapped and linked, but not proven yet.
 - **Not traced yet,** so tested code can show as Unconfirmed: calls through Go test-suite methods and helper constructors, dependency injection that is wired at runtime, reflection, and calls made over HTTP or RPC.
 - **Route links (JavaScript and TypeScript, Express):** a supertest request (`request(app).get('/users/1')`) to an app the test imports from the repository links the test to the function the matching route runs. A named handler links to itself. An inline handler links to the counted functions it calls directly, one call deep. Exactly one route must match. The row says how the link was made ("reaches it via route GET /users/:id (app.js:12)"). It is a link, not proof. Routes and mounts built at run time, apps a test builds itself, and other HTTP clients are not linked; Run details counts them.
+- **Links through what a library hands out (JavaScript and TypeScript):** a call through a package's re-export file links to the function it re-exports. A call on a value from a function that copies a module's exported object onto what it returns links to that object's method, and the row says how ("via app = createApplication() (members of lib/application.js)"). A call on a handler's parameter, matched to an exported object of the same name, is **Unconfirmed**: the step in between runs in code the map does not read.
 
 ---
 

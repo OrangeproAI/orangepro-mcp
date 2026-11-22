@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { approvalMatch } from "../../src/local/contracts/approvalBinding.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -614,6 +615,54 @@ describe('api', function () {
     const proposed = probe(w, ROUNDING, { oracle: { ...w.oracle, approval: { status: "proposed" } }, allow_proposed_oracle: true });
     expect(readRun(w, proposed, "run-profile.json")).toMatchObject({ oracle_status: { approval: "proposed", allowed_by: "--allow-proposed-oracle" } });
     expect(readRun(w, proposed, "oracle.json")).toMatchObject({ approval: { status: "proposed" } });
+  });
+
+  it("an approval survives a change of rank, and the run names both ranks", () => {
+    const w = workspace();
+    const rank = w.record.selection.rank as number;
+    const approvedAt = rank + 3;
+    const approvedRecord = { ...w.record, selection: { ...w.record.selection, rank: approvedAt } };
+    const result = probe(w, ROUNDING, { oracle: { ...w.oracle, target_record_sha256: recordSha256(approvedRecord) } });
+    expect(result.classification.classification).not.toBe("blocked");
+    expect(readRun(w, result, "run-profile.json")).toMatchObject({
+      approval_binding: { approved_record_sha256: recordSha256(approvedRecord), rank_at_approval: approvedAt, current_rank: rank }
+    });
+    // The fault is the same fault: its record names the approved target record.
+    expect(readRun(w, result, "fault-record.json")).toMatchObject({ target_record_sha256: recordSha256(approvedRecord) });
+    // With the rank unchanged the profile carries nothing new.
+    expect(readRun(w, probe(w, ROUNDING), "run-profile.json")).not.toHaveProperty("approval_binding");
+  });
+
+  it.each([
+    ["the function's bytes", (r: TargetRecord) => ({ ...r, identity: { ...r.identity, function_sha256: "a".repeat(64) } })],
+    ["the file's bytes", (r: TargetRecord) => ({ ...r, identity: { ...r.identity, file_sha256: "b".repeat(64) } })],
+    ["the commit", (r: TargetRecord) => ({ ...r, identity: { ...r.identity, merged_commit: "c".repeat(40) } })],
+    ["the function's bytes and the rank together", (r: TargetRecord) => ({ ...r, identity: { ...r.identity, function_sha256: "d".repeat(64) }, selection: { ...r.selection, rank: 5 } })]
+  ] as const)("an approved expected behavior is refused once %s changed", (_label, approvedOn) => {
+    const w = workspace();
+    const before = readdirSync(path.join(w.repo, ".orangepro"));
+    let error: unknown;
+    try {
+      probe(w, ROUNDING, { oracle: { ...w.oracle, target_record_sha256: recordSha256(approvedOn(w.record as TargetRecord)) } });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ProbeFaultRefusal);
+    expect((error as ProbeFaultRefusal).code).toBe("oracle_mismatch");
+    expect(readdirSync(path.join(w.repo, ".orangepro"))).toEqual(before);
+  });
+
+  it("an approval is refused after a real edit of the function body", () => {
+    const w = workspace();
+    const abs = path.join(w.repo, w.record.identity.file);
+    const original = readFileSync(abs);
+    const at = w.record.identity.body!.bytes.start + 1;
+    const edited = Buffer.concat([original.subarray(0, at), Buffer.from(" /* changed */ "), original.subarray(at)]);
+    const after = describeTarget(edited, w.record.identity.name);
+    if (!after.ok) throw new Error("fixture error");
+    expect(after.target.function_sha256).not.toBe(w.record.identity.function_sha256);
+    const current = { ...w.record, identity: { ...w.record.identity, ...after.target } } as TargetRecord;
+    expect(approvalMatch(current, w.oracle.target_record_sha256)).toBeNull();
   });
 
   it("names records by the hash of the file they are stored as, the same hash MANIFEST.json gives", () => {

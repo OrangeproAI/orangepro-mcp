@@ -305,6 +305,8 @@ return type or type parameter written with braces, or an unbalanced brace inside
 regex or comment in the body. Changes proposed by other components use the same location
 format (`src/local/contracts/location.ts`).
 
+An approved expected behavior holds for the function's exact bytes. If the function's code, its file or the commit changes, the approval no longer applies. If only the function's place in the ranking moves, it still applies, and the receipt records both the rank at approval and the current rank.
+
 `opro probe-fault` asks one narrow question about one target: do the named existing tests
 notice one small, valid fault inside it? It takes a target record, a fault written as
 `<operator>@<byte offset>` (two operators exist: `rounding_floor_ceil`, which swaps

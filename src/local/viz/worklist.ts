@@ -1,4 +1,5 @@
 import type { GraphNode, LocalGraph } from "../graph/ontology.js";
+import { RECEIVER_CANDIDATE_REASON_PREFIX } from "../analyze/receiverTyping.js";
 import { survivorKind } from "../proofReach.js";
 import type { Ledger, LedgerRecord } from "../ledger.js";
 import { targetFingerprint } from "../ledger.js";
@@ -62,6 +63,8 @@ export interface VerbInput {
   linkedTest?: string;
   /** How that test reaches it when it does not call it itself (a route link). */
   linkedVia?: string;
+  /** Why the read-first test is a candidate, when it is a handler-name match. */
+  readFirstVia?: string;
   /** The test that proved it (Done). */
   provenTest?: string;
 }
@@ -105,7 +108,9 @@ export function verbFor(input: VerbInput): { verb: Verb; reason: string } {
     return {
       verb: "check",
       reason: input.readFirst
-        ? `Read ${input.readFirst} first: a test there may cover it, but no call was traced.`
+        ? input.readFirstVia
+          ? `Read ${input.readFirst} first: ${input.readFirstVia}.`
+          : `Read ${input.readFirst} first: a test there may cover it, but no call was traced.`
         : "A test name points here, but no call was traced."
     };
   }
@@ -216,6 +221,8 @@ export interface WorkItem {
   linkedTest?: string;
   /** How the linked test reaches it, when through a route rather than a call (J4). */
   linkedVia?: string;
+  /** Why the read-first test is a candidate, when it is a handler-name match (J4). */
+  readFirstVia?: string;
   /** The last proof's mutated run hit the time limit: the row's reason says so, and nothing replaces it. */
   proofTimedOut?: true;
   /** JS/TS "No test found" rows only: a test file linked to the function's file, not to the function. */
@@ -292,8 +299,18 @@ export interface TestPointer {
   via?: string;
 }
 
+/** A handler-name candidate's sentence: the function the test registers calls it, matched by name. */
+function handlerNameVia(reason: string): string | undefined {
+  const m = /^Handler parameter (\S+): a function the test registers on (\S+) \(from (\S+)\) calls (\S+)\./.exec(reason);
+  return m ? `a function it registers on ${m[2]} (from ${m[3]}) calls ${m[1]}.${m[4]!.split(".").pop()}, but ${m[1]} comes through code the map does not read, so this is a match by name` : undefined;
+}
+
 /** The sentence part that says how a route link was made. */
 export function routeLinkVia(props: unknown): string | undefined {
+  const rt = (props as { receiver_link?: { kind?: unknown; value?: unknown; factory?: unknown; owner_file?: unknown } } | undefined)?.receiver_link;
+  if (rt && rt.kind === "factory_member" && typeof rt.value === "string" && typeof rt.factory === "string" && typeof rt.owner_file === "string") {
+    return `via ${rt.value} = ${rt.factory}() (members of ${rt.owner_file})`;
+  }
   const r = (props as { route_link?: { method?: unknown; path?: unknown; via?: unknown; site?: unknown } } | undefined)?.route_link;
   if (!r || typeof r.method !== "string" || typeof r.path !== "string" || typeof r.site !== "string") return undefined;
   return r.via === "inline" ? `via inline handler at ${r.site} (route ${r.method} ${r.path})` : `via route ${r.method} ${r.path} (${r.site})`;
@@ -317,16 +334,22 @@ export function testPointers(graph: LocalGraph): { linked: Map<string, TestPoint
   for (const e of graph.edges) {
     if (e.evidence_strength !== "hard" || (e.relationship_type !== "TESTED_BY" && e.relationship_type !== "COVERS")) continue;
     const via = routeLinkVia(e.properties);
-    if (kinds.get(e.from_external_id) === "CodeSymbol") add(linked, e.from_external_id, testFileOf(e.to_external_id), 1, via);
-    if (kinds.get(e.to_external_id) === "CodeSymbol") add(linked, e.to_external_id, testFileOf(e.from_external_id), 1, via);
+    // Among tests that reach a function through a factory value, the one named after it comes first
+    // (`app.render` → `test/app.render.js`), so the proof and the "Add to" pointer use it.
+    const named = (sym: string, test: string | undefined): number =>
+      (e.properties as { receiver_link?: unknown } | undefined)?.receiver_link && test && test.split("/").pop()!.includes(sym.slice(sym.lastIndexOf("#") + 1)) ? 1.01 : 1;
+    if (kinds.get(e.from_external_id) === "CodeSymbol") add(linked, e.from_external_id, testFileOf(e.to_external_id), named(e.from_external_id, testFileOf(e.to_external_id)), via);
+    if (kinds.get(e.to_external_id) === "CodeSymbol") add(linked, e.to_external_id, testFileOf(e.from_external_id), named(e.to_external_id, testFileOf(e.from_external_id)), via);
   }
   const candidate = new Map<string, TestPointer[]>();
   for (const e of graph.candidate_edges ?? []) {
     if (e.review_status === "ai_suggested") continue;
     if (e.relationship_type !== "MAY_BE_TESTED_BY" && e.relationship_type !== "MAY_COVER") continue;
     const c = typeof e.confidence === "number" ? e.confidence : 0;
-    if (kinds.get(e.from_external_id) === "CodeSymbol") add(candidate, e.from_external_id, testFileOf(e.to_external_id), c);
-    if (kinds.get(e.to_external_id) === "CodeSymbol") add(candidate, e.to_external_id, testFileOf(e.from_external_id), c);
+    // A handler-name match says what it is; other candidates keep the plain "no call was traced".
+    const cvia = e.reason.startsWith(`${RECEIVER_CANDIDATE_REASON_PREFIX} `) ? handlerNameVia(e.reason) : undefined;
+    if (kinds.get(e.from_external_id) === "CodeSymbol") add(candidate, e.from_external_id, testFileOf(e.to_external_id), c, cvia);
+    if (kinds.get(e.to_external_id) === "CodeSymbol") add(candidate, e.to_external_id, testFileOf(e.from_external_id), c, cvia);
   }
   const files = new Set<string>();
   for (const n of graph.nodes) {
@@ -492,6 +515,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       : undefined;
     const linkedTest = pickTestFile(gap.file, pointers.linked.get(gap.id));
     const linkedVia = linkedTest ? pointers.linked.get(gap.id)?.find((p) => p.file === linkedTest)?.via : undefined;
+    const readFirstVia = readFirst ? pointers.candidate.get(gap.id)?.find((p) => p.file === readFirst)?.via : undefined;
     // A new test goes in the function's own test file when it exists, else next to the
     // test that already reaches it, else where the language's convention puts it.
     const addTo = own && pointers.files.has(own) ? own : linkedTest ?? readFirst ?? own;
@@ -500,6 +524,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       evidence,
       ...(proof ? { proof } : {}),
       ...(readFirst ? { readFirst } : {}),
+      ...(readFirstVia ? { readFirstVia } : {}),
       ...(linkedTest ? { linkedTest } : {}),
       ...(linkedVia ? { linkedVia } : {}),
       ...(opts.provenTests?.get(gap.id) ? { provenTest: opts.provenTests.get(gap.id) } : {})
@@ -529,6 +554,7 @@ export function buildWorklist(graph: LocalGraph, ledger: Ledger, ranked: readonl
       verb,
       reason,
       ...(readFirst ? { readFirst } : {}),
+      ...(readFirstVia ? { readFirstVia } : {}),
       ...(linkedTest ? { linkedTest } : {}),
       ...(linkedVia ? { linkedVia } : {}),
       ...(fileLink ? { fileLink } : {}),

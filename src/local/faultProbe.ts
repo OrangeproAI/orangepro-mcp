@@ -19,6 +19,7 @@ import {
   type ContainerRequest,
   type ContainerShape
 } from "./boundary.js";
+import { approvalMatch } from "./contracts/approvalBinding.js";
 import { canonicalJson, newRunId, recordBytes, recordSha256, sha256Hex, writeFileAtomic, writeRunManifest } from "./contracts/io.js";
 import { checkOracle, oracleDraftSha256, type Oracle } from "./contracts/oracle.js";
 import type { AddonProvenance } from "./pluginApi.js";
@@ -743,8 +744,10 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   if (!oracleCheck.ok) throw new ProbeFaultRefusal("oracle_invalid", oracleCheck.message);
   const oracle: Oracle = oracleCheck.oracle;
   const recordSha = recordSha256(record);
-  if (oracle.target_record_sha256 !== recordSha || oracle.symbol_id !== record.identity.symbol_id) {
-    throw new ProbeFaultRefusal("oracle_mismatch", `the oracle is for another target (record sha256 ${oracle.target_record_sha256}, this record is ${recordSha}).`);
+  // The approval holds for this function's exact bytes, wherever it ranks now.
+  const approved = oracle.symbol_id === record.identity.symbol_id ? approvalMatch(record, oracle.target_record_sha256) : null;
+  if (!approved) {
+    throw new ProbeFaultRefusal("oracle_mismatch", `the oracle is for another target, or for other bytes of this function (record sha256 ${oracle.target_record_sha256}, this record is ${recordSha}).`);
   }
   if (sha256Hex(opts.witness_bytes) !== oracle.witness.sha256) throw new ProbeFaultRefusal("witness_mismatch", "the witness script is not the one the oracle names (sha256 differs).");
   // A fault is judged against an expected behavior a person approved. A proposed one runs only when asked
@@ -805,7 +808,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   writeFileAtomic(join(runDir, WITNESS_STORED), opts.witness_bytes);
   writeFileAtomic(join(runDir, "fixture-manifest.json"), opts.fixture_bytes);
   const faultRecord = faultRecordOf(plan, {
-    target_record_sha256: recordSha,
+    // The record the expected behavior was approved on: a change of rank alone leaves the fault the same fault.
+    target_record_sha256: oracle.target_record_sha256,
     oracle_sha256: recordSha256(oracle),
     symbol_id: record.identity.symbol_id,
     file: record.identity.file,
@@ -926,6 +930,10 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       source_pr: fixture.prNumber,
       merged_commit: record.identity.merged_commit,
       target_record_sha256: recordSha,
+      // Only a run whose rank moved since the approval carries this, so any other profile keeps its bytes.
+      ...(approved.rank_at_approval !== approved.current_rank
+        ? { approval_binding: { approved_record_sha256: oracle.target_record_sha256, rank_at_approval: approved.rank_at_approval, current_rank: approved.current_rank } }
+        : {}),
       oracle_sha256: recordSha256(oracle),
       fault_record_sha256: faultRecordSha,
       witness_sha256: oracle.witness.sha256,

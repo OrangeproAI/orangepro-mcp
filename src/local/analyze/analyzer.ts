@@ -78,6 +78,8 @@ function extractionBackend(language: string): string {
 import { ResolverCache } from "../resolve/resolverCache.js";
 import { repoRootOf, resolveSpecifier, workspacePackages, runConfirmer, type ConfirmCandidate } from "./confirm.js";
 import { computeRouteLinks, type RouteLinkCounts } from "./routeLinks.js";
+import { reexportSpecifiers } from "./reexports.js";
+import { computeReceiverLinks, RECEIVER_CANDIDATE_REASON_PREFIX, type ReceiverCounts } from "./receiverTyping.js";
 
 const DETECTOR = "repo_analyzer";
 // Global ceiling on extracted code symbols. A SINGLE counter shared across the walk,
@@ -3082,12 +3084,17 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           if (!spec) continue;
           const resolvedAbs = resolveSpecifier(spec, tf.abs, pairRoot, wsPkgs);
           if (!resolvedAbs) continue;
-          const implRel = relByAbs.get(resolvedAbs);
-          if (!implRel || !eligibleSymbolsByFile.has(implRel)) continue;
-          const key = `${tf.rel}|${implRel}`;
-          if (seenPair.has(key)) continue;
-          seenPair.add(key);
-          candidates.push({ testRel: tf.rel, testAbs: tf.abs, implRel, implAbs: resolvedAbs });
+          // A file that only re-exports another module (`module.exports = require('./lib/x')`,
+          // `export * from './x'`) is followed to that module, up to three hops, so a test that imports a
+          // package's entry file is paired with the file that defines what it calls.
+          for (const implAbs of followReexports(resolvedAbs, pairRoot, wsPkgs)) {
+            const implRel = relByAbs.get(implAbs);
+            if (!implRel || !eligibleSymbolsByFile.has(implRel)) continue;
+            const key = `${tf.rel}|${implRel}`;
+            if (seenPair.has(key)) continue;
+            seenPair.add(key);
+            candidates.push({ testRel: tf.rel, testAbs: tf.abs, implRel, implAbs });
+          }
         }
       }
     }
@@ -3237,6 +3244,78 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       warnings.push(`Route linking skipped: ${msg.slice(0, 160)}.`);
+    }
+  }
+  // ---- Receiver typing (J4): calls through a re-export file and members of a value a factory built from
+  // another module's exported object are Linked; calls on a handler's parameters, matched by name only, are
+  // candidates (Unconfirmed), because the step to those parameters runs in code the map does not read.
+  let receiverCounts: ReceiverCounts | undefined;
+  if (readContent && eligibleSymbolsByFile.size > 0 && resolveFiles.some((f) => f.role === "test")) {
+    try {
+      const rtRoot = repoRootOf(root);
+      const counted = new Set<string>();
+      for (const [rel, names] of eligibleSymbolsByFile) for (const name of names) counted.add(`sym:${rel}#${name}`);
+      const result = computeReceiverLinks({
+        files: resolveFiles,
+        symbols: counted,
+        repoRoot: rtRoot,
+        wsPkgs: workspacePackages(rtRoot),
+        read: (abs) => {
+          try {
+            return readFileSync(abs, "utf8");
+          } catch {
+            return null;
+          }
+        }
+      });
+      const hardPairs = new Set(
+        edges.filter((e) => e.evidence_strength === "hard" && e.relationship_type === "TESTED_BY").map((e) => `${e.to_external_id}|${e.from_external_id}`)
+      );
+      let linksAdded = 0;
+      for (const link of result.links) {
+        const testId = `test:${link.testRel}`;
+        if (hardPairs.has(`${testId}|${link.symId}`)) continue;
+        hardPairs.add(`${testId}|${link.symId}`);
+        linksAdded++;
+        edges.push(
+          ...makeProofEdges({
+            testRel: link.testRel,
+            symId: link.symId,
+            provenance: prov(link.testRel, hashString(`${link.symId}:receiver:${link.kind}`)),
+            lastVerified: scanStartMs,
+            properties:
+              link.kind === "factory_member"
+                ? { receiver_link: { kind: link.kind, value: link.value, factory: link.factory, owner_file: link.ownerFile } }
+                : { receiver_link: { kind: link.kind } }
+          })
+        );
+      }
+      const candidatePairs = new Set(candidate_edges.filter((e) => e.relationship_type === "MAY_BE_TESTED_BY").map((e) => `${e.from_external_id}|${e.to_external_id}`));
+      let candidatesAdded = 0;
+      for (const c of result.candidates) {
+        const testId = `test:${c.testRel}`;
+        if (hardPairs.has(`${testId}|${c.symId}`) || candidatePairs.has(`${c.symId}|${testId}`)) continue;
+        candidatePairs.add(`${c.symId}|${testId}`);
+        candidatesAdded++;
+        candidate_edges.push(
+          makeCandidateEdge({
+            from_external_id: c.symId,
+            to_external_id: testId,
+            relationship_type: "MAY_BE_TESTED_BY",
+            evidence_strength: "candidate",
+            reason: `${RECEIVER_CANDIDATE_REASON_PREFIX} ${c.param}: a function the test registers on ${c.value} (from ${c.factory}) calls ${c.symId.slice(c.symId.lastIndexOf("#") + 1)}. The step from ${c.value} to ${c.param} runs in code the map does not read, so the match is by name only.`,
+            // Read first the test named after the function (`res.cookie` → `res.cookie.js`) when there is one.
+            confidence: path.basename(c.testRel).includes(c.symId.slice(c.symId.lastIndexOf("#") + 1)) ? 0.55 : 0.5,
+            provenance: prov(c.testRel, hashString(`${c.symId}:receiver:handler_name`))
+          })
+        );
+      }
+      receiverCounts = { ...result.counts, factory_member_links: result.links.filter((l) => l.kind === "factory_member").length, reexport_calls: result.links.filter((l) => l.kind === "reexport_call").length };
+      receiverCounts = { ...receiverCounts, handler_name_candidates: candidatesAdded };
+      void linksAdded;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warnings.push(`Receiver typing skipped: ${msg.slice(0, 160)}.`);
     }
   }
   const nonTsHardProofAttempted = goProofAttempted + javaProofAttempted + pythonProofAttempted;
@@ -3516,6 +3595,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       : {}),
     ...(confirmedCoverage ? { confirmed_coverage: confirmedCoverage } : {}),
     ...(routeLinkCounts && (routeLinkCounts.routes > 0 || routeLinkCounts.requests > 0) ? { route_links: routeLinkCounts } : {}),
+    ...(receiverCounts && receiverCounts.factories + receiverCounts.reexport_calls + receiverCounts.handler_name_candidates > 0 ? { receiver_links: receiverCounts } : {}),
     ...(runtimeCoverage ? { runtime_coverage: runtimeCoverage } : {}),
     ...(resolverMetrics
       ? {
@@ -3538,4 +3618,31 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   };
 
   return { nodes, edges, candidate_edges, sources: [source], warnings, file_entries, analysis };
+}
+
+/** The file itself, then the modules it only re-exports, followed up to three hops (cycles stop). */
+function followReexports(startAbs: string, repoRoot: string, wsPkgs: Map<string, string>): string[] {
+  const out: string[] = [startAbs];
+  const seen = new Set<string>([startAbs]);
+  let frontier = [startAbs];
+  for (let hop = 0; hop < 3 && frontier.length > 0; hop++) {
+    const next: string[] = [];
+    for (const abs of frontier) {
+      let text: string;
+      try {
+        text = readFileSync(abs, "utf8");
+      } catch {
+        continue;
+      }
+      for (const spec of reexportSpecifiers(text)) {
+        const target = resolveSpecifier(spec, abs, repoRoot, wsPkgs);
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
+        out.push(target);
+        next.push(target);
+      }
+    }
+    frontier = next;
+  }
+  return out;
 }

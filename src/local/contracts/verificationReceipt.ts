@@ -93,6 +93,9 @@ export interface VerificationReceipt {
     function_sha256: string;
     changed_hunks: unknown;
     rank: unknown;
+    /** Where the function ranked when its expected behavior was approved, and where it ranks in this run. */
+    rank_at_approval: number | null;
+    current_rank: number | null;
     oracle_sha256: string;
     oracle_approval: unknown;
     assisted: boolean;

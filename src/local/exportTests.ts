@@ -507,6 +507,8 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
       function_sha256: run.record.identity.function_sha256,
       changed_hunks: run.record.selection.blocks,
       rank: run.record.selection.rank,
+      rank_at_approval: run.profile.approval_binding ? run.profile.approval_binding.rank_at_approval : run.record.selection.rank,
+      current_rank: run.record.selection.rank,
       oracle_sha256: run.profile.oracle_sha256,
       oracle_approval: run.oracle.approval,
       assisted: run.oracle.assisted.flag
