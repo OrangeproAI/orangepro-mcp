@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { BUILD_HINT } from "./proofReach.js";
 import { modelUsageLine } from "./modelUsage.js";
 import { parseArgs, collectSetupCommands } from "./cliArgs.js";
 import {
@@ -209,8 +210,10 @@ Usage:
     # runs the dynamic targeted-proof oracle and writes a metadata-only ledger certificate only when baseline-green → mutant assertion-fail closes
     # --target-record: a changed-target record, rebuilt from the file, git and the graph and refused on any difference
     # --preview: for a JS/TS function (always changed by its exact position), print the diff only (no test run, no ledger record; --test not needed)
-  opro prove-loop --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--setup 'npm run build'] [--setup 'npm ci'] [--setup-timeout-ms 120000] [--source path] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--target-record file.json] [--json]
+  opro prove-loop --target-symbol sym:file#Symbol --test path --replacement 'return ...;' [--setup 'npm run build'] [--setup 'npm ci'] [--setup-timeout-ms 120000] [--build 'npm run build'] [--build-timeout-ms 300000] [--source path] [--runner auto|vitest|jest|mocha|pytest] [--link-node-modules] [--target-record file.json] [--json]
     # trusted-local wrapper: runs each --setup command in the source checkout, then \`opro prove\` (unchanged oracle + cert), then refreshes the behavior report; setup failure returns unrunnable (never Proven)
+    # --build (also on \`opro prove\`; or proof.build in .orangepro/config.json): plain words, run in each isolated copy after the fault and before the test,
+    # for tests that import built files (TS/JS); a build that fails or runs past its limit is unrunnable, with the reason
   opro recipe db-sqljs --target-symbol sym:file#Class.method --entity file#Entity --out orangepro_generated/<name>.sqljs.spec.ts [--source path] [--seed-field name] [--json]
     # writes a REAL NestJS+TypeORM sqljs integration spec (in-memory) + setup profile; makes a DB-backed baseline runnable so \`opro prove-loop\` can close Proven. Never mocks the target.
   opro stats [--json]
@@ -1239,6 +1242,9 @@ async function main(): Promise<number> {
         vitest_config: typeof flags["vitest-config"] === "string" ? flags["vitest-config"] : undefined,
         jest_config: typeof flags["jest-config"] === "string" ? flags["jest-config"] : undefined,
         test_env: asList(flags["test-env"]),
+        // The repository's build as plain words, run in each isolated copy after the fault (nothing goes through a shell).
+        ...(typeof flags.build === "string" && flags.build.trim() !== "" ? { build: flags.build.trim().split(/\s+/) } : {}),
+        build_timeout_ms: numericFlag(flags["build-timeout-ms"]),
         run_id: typeof flags["run-id"] === "string" ? flags["run-id"] : undefined,
         ...(targetRecord !== undefined ? { target_record: targetRecord } : {})
       };
@@ -1266,6 +1272,7 @@ async function main(): Promise<number> {
         out(`  status:      ${res.record.status}`);
         out(`  closed:      ${res.record.closed}`);
         out(`  oracle:      ${res.oracle.status}${res.oracle.reason ? ` (${res.oracle.reason})` : ""}`);
+        if ((res.oracle as { reach?: string }).reach === "never_ran" && typeof flags.build !== "string") out(`  hint:        ${BUILD_HINT}`);
         out(`  test:        ${res.record.dynamic_proof?.test_path ?? "unknown"}`);
         out(`  runner:      ${res.record.dynamic_proof?.runner ?? "unknown"}`);
         out(`  ledger:      ${res.ledger_path}`);
@@ -1316,6 +1323,9 @@ async function main(): Promise<number> {
         vitest_config: typeof flags["vitest-config"] === "string" ? flags["vitest-config"] : undefined,
         jest_config: typeof flags["jest-config"] === "string" ? flags["jest-config"] : undefined,
         test_env: asList(flags["test-env"]),
+        // The repository's build as plain words, run in each isolated copy after the fault (nothing goes through a shell).
+        ...(typeof flags.build === "string" && flags.build.trim() !== "" ? { build: flags.build.trim().split(/\s+/) } : {}),
+        build_timeout_ms: numericFlag(flags["build-timeout-ms"]),
         run_id: typeof flags["run-id"] === "string" ? flags["run-id"] : undefined,
         setup_commands: collectSetupCommands(rest),
         setup_timeout_ms: numericFlag(flags["setup-timeout-ms"]),
@@ -1342,6 +1352,7 @@ async function main(): Promise<number> {
         out(`  status:      ${res.record.status}`);
         out(`  closed:      ${res.record.closed}`);
         out(`  oracle:      ${res.oracle.status}${res.oracle.reason ? ` (${res.oracle.reason})` : ""}`);
+        if ((res.oracle as { reach?: string }).reach === "never_ran" && typeof flags.build !== "string") out(`  hint:        ${BUILD_HINT}`);
         out(`  test:        ${res.record.dynamic_proof?.test_path ?? "unknown"}`);
         out(`  runner:      ${res.record.dynamic_proof?.runner ?? "unknown"}`);
         out(`  ledger:      ${res.ledger_path}`);

@@ -421,7 +421,8 @@ describe("opProbeFault — what a run concludes, and when it makes no claim", { 
 
   it.each([
     ["no test executed", { "test/api.test.js": "describe('api', function () {});\n" }, "inconclusive", "no_tests_executed", "rounding_floor_ceil"],
-    ["a selected test skipped", { "test/api.test.js": PASSING_TESTS.replace("it('returns null", "it.skip('returns null") }, "inconclusive", "selected_test_pending", "rounding_floor_ceil"],
+    // A test that runs on the original and is skipped on the fault did not run there: no claim.
+    ["a selected test skipped on the fault only", { "test/api.test.js": PASSING_TESTS.replace("it('converts whole seconds'", "(api.seconds(1500) === 1 ? it : it.skip)('converts whole seconds'") }, "inconclusive", "selected_test_pending", "rounding_floor_ceil"],
     ["a failing before hook", { "test/api.test.js": PASSING_TESTS.replace("describe('api.seconds', function () {", "describe('api.seconds', function () {\n  before(function () { throw new Error('setup broke'); });") }, "inconclusive", "original_hook_failure", "rounding_floor_ceil"],
     ["a red original", { "test/api.test.js": PASSING_TESTS.replace("api.seconds(2000), 2", "api.seconds(2000), 3") }, "blocked", "red_baseline", "rounding_floor_ceil"],
     [

@@ -39,6 +39,7 @@ import {
   type ProbeFaultDeps
 } from "./faultProbe.js";
 import { installedRunner, testArgv } from "./chainRunner.js";
+import { BUILD_FAILED, BUILD_TIMEOUT, stageBuildOf } from "./faultProbe.js";
 import { resolveTargetSymbol } from "./ledger.js";
 import { defaultDynamicProofRunner, ProofRefusalError, proofPreflight } from "./operations.js";
 import { toWorkspaceRel } from "./reprove/paths.js";
@@ -800,6 +801,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     const fullArgv = testArgv(fixture.runner, null, runnerVersion);
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
     const reportEnv = REPORT_ENV;
+    const build = asThisCommand(() => stageBuildOf(fixture, sourceRoot, deadlineMs));
 
     const copyRoots = asThisCommand(() =>
       prepareFaultCopies({
@@ -815,7 +817,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       })
     );
     // The patched test file goes into both copies as OrangePro built it; each copy then differs from before in that file only.
-    for (const copy of Object.values(copyRoots)) {
+    for (const copy of [copyRoots.original, copyRoots.mutant]) {
       const before = treeHashes(copy, new Set());
       writeFileSync(join(copy, applied.path), applied.bytes);
       const after = treeHashes(copy, new Set());
@@ -839,12 +841,14 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
       full_suite_argv: fullArgv,
       runner: { name: fixture.runner.name, version: runnerVersion },
       container: containerProfile(fixture, mountsFor, reportEnv),
-      limits: { stage_deadline_ms: deadlineMs },
+      limits: { stage_deadline_ms: deadlineMs, ...(build ? { build_deadline_ms: build.deadlineMs } : {}) },
+      ...(build ? { build: { fixture_command: build.fixture_command, argv: build.argv } } : {}),
       candidate: { patch_sha256: assertion.candidate.patch_sha256, assertion_record_sha256: assertionSha, generation_request_sha256: requestSha }
     };
     writeFileAtomic(join(runDir, "run-profile.json"), recordBytes(profile));
     const executor = deps.container ?? dockerExecutor();
-    const { runStage, held } = createStageRunner({
+    const { runStage, held, copied } = createStageRunner({
+      build,
       runDir,
       runId,
       profileSha: recordSha256(profile),
@@ -867,6 +871,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     const freshCopy = (copy: "original" | "mutant"): string => {
       const root = join(mkdtempSync(join(tmp, `stage-${copy}-`)), "repo");
       cpSync(copyRoots[copy], root, { recursive: true, verbatimSymlinks: true });
+      copied(copyRoots[copy], root);
       copyRoots[copy] = root;
       return root;
     };
@@ -939,6 +944,7 @@ export function opVerifyTest(root: string, opts: VerifyTestOptions, deps: ProbeF
     assertion,
     baseline: fixture.baselinePassing!,
     priorIds: run.originalSelected.filter((test) => test.file === applied.path).map((test) => `${test.file}\u0000${test.full_title}`),
+    priorSkippedIds: run.originalSelected.filter((test) => test.file === applied.path && test.state === "pending").map((test) => `${test.file}\u0000${test.full_title}`),
     expectedTargetSha,
     copyWriteFailed,
     checkoutUnchanged,
@@ -1001,6 +1007,9 @@ export function issueOf(stage: StageObservation | undefined): string | null {
   if (!stage.stopped) return "container_not_stopped";
   if (stage.timed_out) return "timeout";
   if (stage.output_problems.some((problem) => problem.startsWith(REPORT_TAMPERED))) return REPORT_TAMPERED;
+  // The repository's build did not finish in this stage's copy, so the stage did not run.
+  const buildProblem = stage.output_problems.find((problem) => problem.startsWith("build_"));
+  if (buildProblem) return buildProblem.startsWith(BUILD_TIMEOUT) ? BUILD_TIMEOUT : BUILD_FAILED;
   const t = stage.tests;
   if (!t || stage.report === null) return "runner_error";
   if (t.hook_failures > 0) return "hook_failure";
@@ -1031,6 +1040,8 @@ export function classifyCandidate(input: {
   assertion: AssertionRecord;
   baseline: number;
   priorIds: string[];
+  /** Of those, the tests the repository itself skips in that file: the same ones must be skipped in every stage. */
+  priorSkippedIds?: string[];
   /** The target file's sha256 each stage must have run on. */
   expectedTargetSha: Partial<Record<StageName, string>>;
   /** A rewrite of the faulty copy's target file that could not be confirmed, if any. */
@@ -1062,20 +1073,28 @@ export function classifyCandidate(input: {
   for (const stage of Object.values(stages)) {
     const issue = issueOf(stage);
     if (issue === "boundary_check_failed" || issue === "container_not_stopped") return out("blocked", issue);
+    // The repository's build did not finish in a copy: its stage did not run, and nothing is claimed.
+    if (issue === BUILD_FAILED || issue === BUILD_TIMEOUT) return out("blocked", issue);
   }
   for (const [name, stage] of Object.entries(stages)) {
-    if (stage && stage.copy_target_sha256 !== input.expectedTargetSha[name as StageName]) return out("inconclusive", "stage_copy_mismatch");
+    // A build ran in the copy of the stage it is named for, on the same target bytes.
+    const expected = input.expectedTargetSha[(name.startsWith("build_") ? name.slice("build_".length) : name) as StageName];
+    if (stage && stage.copy_target_sha256 !== expected) return out("inconclusive", "stage_copy_mismatch");
   }
   const ids = (stage: StageObservation | undefined): string => (stage?.tests?.observed ?? []).map((test) => `${test.file}\u0000${test.full_title}`).sort().join("\n");
   const expectedIds = [...input.priorIds, `${assertion.test.file}\u0000${title}`].sort().join("\n");
+  // The file's own skipped tests, as the fault run saw them: allowed, and only those.
+  const expectedSkipped = [...(input.priorSkippedIds ?? [])].sort().join("\n");
+  const skippedAsBefore = (stage: StageObservation): boolean =>
+    stage.tests!.pending === (input.priorSkippedIds ?? []).length && stage.tests!.observed.filter((test) => test.state === "pending").map((test) => `${test.file}\u0000${test.full_title}`).sort().join("\n") === expectedSkipped;
   const cleanFile = (stage: StageObservation): boolean => {
     const t = stage.tests!;
-    return t.failed === 0 && t.pending === 0 && stage.exit_code === 0 && ids(stage) === expectedIds && t.observed.some((test) => isMine(test) && test.state === "passed");
+    return t.failed === 0 && skippedAsBefore(stage) && stage.exit_code === 0 && ids(stage) === expectedIds && t.observed.some((test) => isMine(test) && test.state === "passed");
   };
   const caughtAtLine = (stage: StageObservation): boolean => {
     const t = stage.tests!;
     const mine = t.observed.find(isMine);
-    return ids(stage) === expectedIds && t.pending === 0 && !t.observed.some((test) => test.state === "failed" && test !== mine) && atDeclared(mine, assertion, input.declaredColumns);
+    return ids(stage) === expectedIds && skippedAsBefore(stage) && !t.observed.some((test) => test.state === "failed" && test !== mine) && atDeclared(mine, assertion, input.declaredColumns);
   };
 
   // D: the original copy with the new test, then again.
@@ -1086,7 +1105,7 @@ export function classifyCandidate(input: {
   const mineD = dt.observed.filter(isMine);
   if (mineD.length !== 1) return out("candidate_failed", mineD.length === 0 ? "new_test_not_found" : "new_test_title_not_unique");
   if (dt.failed > 0 || d!.exit_code !== 0) return out("candidate_failed", mineD[0]!.state === "failed" ? "fails_on_original" : "breaks_another_test");
-  if (dt.pending > 0) return out("inconclusive", "a_test_was_skipped");
+  if (!skippedAsBefore(d!)) return out("inconclusive", "a_test_was_skipped");
   if (ids(d) !== expectedIds) return out("inconclusive", "test_set_differs");
   const dr = stages.candidate_original_repeat;
   const drIssue = issueOf(dr);
@@ -1100,7 +1119,7 @@ export function classifyCandidate(input: {
   const et = e!.tests!;
   if (ids(e) !== expectedIds) return out("inconclusive", "test_set_differs_on_fault");
   const mineE = et.observed.find(isMine);
-  if (et.pending > 0 || mineE?.state === "pending") return out("inconclusive", "a_test_was_skipped_on_fault");
+  if (!skippedAsBefore(e!) || mineE?.state === "pending") return out("inconclusive", "a_test_was_skipped_on_fault");
   if (mineE?.state === "passed") return out("not_caught", null);
   if (et.observed.some((test) => test.state === "failed" && test !== mineE)) return out("caught_off_assertion", "other_tests_failed");
   if (!atDeclared(mineE, assertion, input.declaredColumns)) return out("caught_off_assertion", "not_at_the_declared_line");

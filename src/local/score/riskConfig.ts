@@ -49,6 +49,8 @@ export interface RiskConfig {
   proof: {
     /** `auto` or a no-shell executable/argument command string such as `uv run python -m pytest`. */
     python_runner: string;
+    /** The repository's build as plain words, run in each isolated copy after the fault and before the test. Absent when none is set. */
+    build?: string[];
     attempt_limit: number;
     baseline_green_target: number;
   };
@@ -109,6 +111,9 @@ function applyFile(cfg: RiskConfig, file: string, warnings: string[], label: str
     if (typeof proof.python_runner === "string" && proof.python_runner.trim() !== "") {
       cfg.proof.python_runner = proof.python_runner.trim();
     }
+    // A build is a list of plain words, or one string of them; nothing is run through a shell.
+    const build = typeof proof.build === "string" ? proof.build.trim().split(/\s+/) : proof.build;
+    if (Array.isArray(build) && build.length > 0 && build.every((word) => typeof word === "string" && /^[\w@.:=/+-]+$/.test(word))) cfg.proof.build = build as string[];
     if (proof.attempt_limit !== undefined) cfg.proof.attempt_limit = boundedInt(proof.attempt_limit, cfg.proof.attempt_limit, 1, 100);
     if (proof.baseline_green_target !== undefined) cfg.proof.baseline_green_target = boundedInt(proof.baseline_green_target, cfg.proof.baseline_green_target, 1, 100);
     for (const o of Array.isArray(raw.overrides) ? raw.overrides : []) {

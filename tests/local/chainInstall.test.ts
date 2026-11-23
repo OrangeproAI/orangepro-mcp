@@ -12,11 +12,11 @@ describe("the install a fixture names", () => {
     expect(() => installPlanOf(["npm", "install"], none)).toThrow(/npm ci with flags only: npm install can change the lockfile/);
   });
 
-  it("runs pnpm through corepack at the repository's pinned version, with its store in the container's /tmp", () => {
+  it("runs pnpm through corepack at the repository's pinned version, with its store in the container's /tmp and the manager kept for later stages", () => {
     const plan = installPlanOf(["pnpm", "install", "--frozen-lockfile"], { packageManagerField: "pnpm@11.13.1+sha512.b2fc7683b8a6525414e7d13e1ba28caaddde96bf66ec540bfaeb7e702b81f3e0be4d1f295edf7f9fe0396740a8dce4509c582ddf79891f4543fea32d37645f25", fixtureManager: null });
     expect(plan).toMatchObject({ manager: "pnpm", version: "11.13.1", version_from: "packageManager", lockfile: "pnpm-lock.yaml" });
     expect(plan.argv).toEqual(["corepack", "pnpm", "install", "--frozen-lockfile", "--store-dir", "/tmp/opro-pnpm-store"]);
-    expect(plan.env).toEqual({ COREPACK_HOME: "/tmp/opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
+    expect(plan.env).toEqual({ COREPACK_HOME: "/work/repo/node_modules/.opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
   });
 
   it("takes the version from the fixture only when the repository pins none", () => {

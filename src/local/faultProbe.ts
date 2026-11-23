@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, constants as fsConstants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,7 +25,7 @@ import { checkOracle, oracleDraftSha256, type Oracle } from "./contracts/oracle.
 import type { AddonProvenance } from "./pluginApi.js";
 import { EDIT_OPERATOR, editForTarget, FAULT_OPERATORS, faultRecordOf, parseFaultSpec, planEdit, planFault, type FaultEditInput, type FaultPlan, type FaultRecord } from "./contracts/faultRecord.js";
 import { locationEditArgs } from "./contracts/location.js";
-import { installedRunner, MOCHA_ENTRY, MOCHA_NO_REPO_CONFIG, MOCHA_REPORTER_TARGET, insideRepoPath, runnerMounts, runnerPlanOf, syntaxArgv, testArgv, witnessArgv, witnessTarget, type RunnerPlan } from "./chainRunner.js";
+import { buildPlanOf, installedRunner, keptManagerCommands, MOCHA_ENTRY, MOCHA_NO_REPO_CONFIG, MOCHA_REPORTER_TARGET, insideRepoPath, OPRO_BIN_DIR, runnerMounts, STAGE_PATH, workspaceNodeModules, runnerPlanOf, syntaxArgv, testArgv, witnessArgv, witnessTarget, type RunnerPlan } from "./chainRunner.js";
 import { REACH_MARK_ENV, reachMarkedBytes, textControls } from "./candidateTest.js";
 import {
   CLASSIFICATION_VERSION,
@@ -175,6 +175,14 @@ export interface FixtureProfile {
   /** The same plan under its first name, kept for a Mocha fixture's readers. */
   mocha: { options: string[]; operands: string[] };
   baselinePassing: number | null;
+  /** How many tests the repository itself skips in its whole suite, as the fixture recorded. */
+  baselinePending: number;
+  /** The repository's build command, as the fixture names it (checked against the checkout when a run starts). */
+  buildCommand: unknown;
+  /** The time one build may take. */
+  buildDeadlineSeconds: number | null;
+  /** Plain, non-secret variables every stage gets, as the fixture names them. */
+  variables: Record<string, string>;
 }
 
 /**
@@ -192,6 +200,32 @@ export function mochaPlanOf(expanded: unknown): { options: string[]; operands: s
   }
   const plan = runnerPlanOf(expanded, refuse);
   return { options: plan.options, operands: plan.operands };
+}
+
+// A variable a fixture may not set: one whose name looks like a secret, and the ones a stage sets itself.
+// The four git identity names are the only ones allowed although they hold a secret-looking word (AUTH in AUTHOR).
+const SECRET_LOOKING = /KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL/i;
+const GIT_IDENTITY_VARIABLES = new Set(["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]);
+const STAGE_OWN_VARIABLE = /^(HOME|PATH|CI|NODE_ENV|NODE_OPTIONS|NODE_V8_COVERAGE|OPRO_.*|COREPACK_.*|npm_config_.*)$/i;
+
+/**
+ * The fixture's `environment.variables`: plain names and plain one-line values. A name is refused when it
+ * holds KEY, TOKEN, SECRET, PASSWORD, AUTH or CREDENTIAL anywhere (API_KEY, APIKEY, ACCESSTOKEN, OAUTH), except
+ * exactly GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL, or when a stage sets
+ * that variable itself.
+ */
+export function fixtureVariablesOf(value: unknown, refuse: (detail: string) => never): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) return refuse("environment.variables must be an object of names and plain values.");
+  const out: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) refuse(`environment.variables: ${name} is not a plain variable name.`);
+    if (!GIT_IDENTITY_VARIABLES.has(name) && SECRET_LOOKING.test(name)) refuse(`environment.variables: ${name} looks like a secret by its name; a fixture carries plain values only.`);
+    if (STAGE_OWN_VARIABLE.test(name)) refuse(`environment.variables: ${name} is set by the stage itself and cannot be given by a fixture.`);
+    if (typeof raw !== "string" || !/^[\x20-\x7E]{0,200}$/.test(raw)) refuse(`environment.variables: the value of ${name} must be one plain line of at most 200 characters.`);
+    out[name] = raw as string;
+  }
+  return out;
 }
 
 export function readFixture(bytes: Buffer): FixtureProfile {
@@ -236,7 +270,11 @@ export function readFixture(bytes: Buffer): FixtureProfile {
     node: typeof env.node === "string" ? env.node : null,
     runner,
     mocha: { options: runner.options, operands: runner.operands },
-    baselinePassing: Number.isInteger(passing) && passing > 0 ? passing : null
+    baselinePassing: Number.isInteger(passing) && passing > 0 ? passing : null,
+    baselinePending: Number.isInteger(manifest.baseline?.pending) && manifest.baseline.pending > 0 ? manifest.baseline.pending : 0,
+    buildCommand: manifest.commands?.build,
+    buildDeadlineSeconds: Number.isInteger(limits.build_deadline_seconds) && limits.build_deadline_seconds > 0 ? limits.build_deadline_seconds : null,
+    variables: fixtureVariablesOf(env.variables, refuse)
   };
 }
 
@@ -454,6 +492,8 @@ export interface ClassifyInput {
   whole_suite_only?: boolean;
   /** The fixture's recorded passing count for the whole suite. */
   baseline_passing: number | null;
+  /** The fixture's recorded count of tests the repository itself skips in its whole suite (0 when it records none). */
+  baseline_pending?: number;
 }
 
 export interface ClassifyOutput {
@@ -533,6 +573,12 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   if (!input.checkout_unchanged) return result("blocked", "checkout_modified");
   if (ran.some((stage) => !stage.stopped)) return result("blocked", "container_not_stopped");
   if (ran.some((stage) => stage.boundary.failures.length > 0)) return result("blocked", "boundary_check_failed");
+  // A build that did not finish: nothing after it in that copy ran, and nothing is claimed.
+  const buildProblem = ran.flatMap((stage) => stage.output_problems).find((problem) => problem.startsWith("build_"));
+  if (buildProblem) return result("blocked", buildProblem.startsWith(BUILD_TIMEOUT) ? BUILD_TIMEOUT : BUILD_FAILED);
+  const wholeOnly = input.whole_suite_only === true;
+  // Tests the repository itself skips are part of its recorded suite; a selected file may have none.
+  const recordedSkipped = input.baseline_pending ?? 0;
   // A fault that is not a program is never run: say so, rather than that the tests did not run.
   if (!input.parses) return result("invalid_mutation", "does_not_parse");
   const originalIssue = runIssue(original);
@@ -541,12 +587,10 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const o = original!.tests!;
   if (o.failed > 0 || original!.exit_code !== 0) return result("blocked", "red_baseline");
   if (o.executed === 0) return result("inconclusive", "no_tests_executed");
-  if (o.pending > 0) return result("inconclusive", "selected_test_pending");
   const originalIds = idCounts(o.observed);
-  const wholeOnly = input.whole_suite_only === true;
   if (wholeOnly) {
     // The whole suite is what ran: it must be the suite the fixture recorded, as for any whole-suite claim.
-    if (input.baseline_passing === null || o.passed !== input.baseline_passing) return result("inconclusive", "full_suite_count_differs");
+    if (input.baseline_passing === null || o.passed !== input.baseline_passing || o.pending !== recordedSkipped) return result("inconclusive", "full_suite_count_differs");
   } else {
     if ([...originalIds.values()].some((n) => n > 1)) return result("inconclusive", "duplicate_test_titles");
     // Every selected file ran at least one test, and nothing ran that was not selected.
@@ -569,7 +613,11 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const faultIssue = runIssue(fault);
   if (faultIssue) return result("inconclusive", `fault_${faultIssue}`, { behavioral_difference: difference });
   const f = fault!.tests!;
-  if (f.pending > 0) return result("inconclusive", "selected_test_pending", { behavioral_difference: difference });
+  if (wholeOnly && f.pending > recordedSkipped) return result("inconclusive", "full_suite_skipped_more", { behavioral_difference: difference });
+  // Selected files: tests the repository itself skips are allowed when exactly the same ones are skipped on both
+  // copies. One that ran on the original and is skipped on the fault did not run: no claim.
+  const skippedIds = (tests: NonNullable<StageObservation["tests"]>): string => tests.observed.filter((test) => test.state === "pending").map(idOf).sort().join("\n");
+  if (!wholeOnly && skippedIds(f) !== skippedIds(o)) return result("inconclusive", "selected_test_pending", { behavioral_difference: difference });
   if (!sameCounts(originalIds, idCounts(f.observed)) || f.executed !== o.executed) {
     return result("inconclusive", "test_set_differs", { behavioral_difference: difference });
   }
@@ -593,7 +641,9 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const fo = fullOriginal!.tests!;
   const ff = fullFault!.tests!;
   if (fo.failed > 0 || fullOriginal!.exit_code !== 0) return survived("full_suite_red_on_original");
-  if (input.baseline_passing === null || fo.passed !== input.baseline_passing || fo.pending !== 0) return survived("full_suite_count_differs");
+  if (input.baseline_passing === null || fo.passed !== input.baseline_passing || fo.pending !== recordedSkipped) return survived("full_suite_count_differs");
+  // A fault run that skips more tests than the fixture records is not the recorded suite: no whole-suite claim.
+  if (ff.pending > recordedSkipped) return survived("full_suite_skipped_more");
   const fullOriginalIds = idCounts(fo.observed);
   if (!sameCounts(fullOriginalIds, idCounts(ff.observed))) return survived("full_suite_test_set_differs");
   if ([...originalIds.keys()].some((id) => !fullOriginalIds.has(id))) return survived("full_suite_lacks_selected");
@@ -613,6 +663,9 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
 
 const REASON_WORDS: Record<string, string> = {
   checkout_modified: "the checkout changed during the run",
+  build_failed: "the repository's build did not finish in a copy, so its tests were not run",
+  build_timeout: "the repository's build ran past its time limit in a copy and was stopped",
+  full_suite_skipped_more: "more tests were skipped on the fault than the fixture records for the suite",
   container_not_stopped: "a container could not be confirmed stopped after its deadline",
   boundary_check_failed: "the container boundary check failed",
   original_not_run: "the selected tests did not run on the original",
@@ -622,7 +675,7 @@ const REASON_WORDS: Record<string, string> = {
   original_runner_totals_mismatch: "the runner's totals disagree with its report on the original",
   red_baseline: "the selected tests do not all pass on the original",
   no_tests_executed: "no selected test ran",
-  selected_test_pending: "a selected test was skipped",
+  selected_test_pending: "a selected test that ran on the original was skipped on the fault",
   duplicate_test_titles: "two selected tests have the same name, so they cannot be told apart",
   selected_file_not_run: "a selected file ran no test",
   unselected_test_ran: "a test that was not selected ran",
@@ -643,14 +696,18 @@ const REASON_WORDS: Record<string, string> = {
 /** The one sentence shown to people. It names the function the change touched; it never says the change caused the gap. */
 export function statementFor(
   out: ClassifyOutput,
-  ctx: { symbolName: string; changedBy: string; operatorDescription: string; line: number; selectedCount: number; fullCount: number | null; assisted: boolean }
+  ctx: { symbolName: string; changedBy: string; operatorDescription: string; line: number; selectedCount: number; selectedSkipped?: number; fullCount: number | null; fullSkipped?: number; assisted: boolean }
 ): string {
   const where = `in ${ctx.symbolName}, which ${ctx.changedBy} changed (${ctx.operatorDescription}, line ${ctx.line})`;
   let sentence: string;
   if (out.classification === "survived_unverified" && out.scope === "full_suite") {
-    sentence = `The whole existing suite (${ctx.fullCount ?? "?"} tests) passed with a valid fault ${where}: the suite missed it.`;
+    // A suite with tests the repository itself skips says both counts, as the fixture records them.
+    const counts = (ctx.fullSkipped ?? 0) > 0 ? `${ctx.fullCount ?? "?"} run, ${ctx.fullSkipped} skipped, as recorded in the fixture` : `${ctx.fullCount ?? "?"} tests`;
+    sentence = `The whole existing suite (${counts}) passed with a valid fault ${where}: the suite missed it.`;
   } else if (out.classification === "survived_unverified") {
-    sentence = `The ${ctx.selectedCount} selected tests passed with a valid fault ${where}: the selected tests missed it. The rest of the suite was not shown to miss it.`;
+    // Tests the repository itself skips in the selected files are said, so the count is of what ran.
+    const selected = (ctx.selectedSkipped ?? 0) > 0 ? `The ${ctx.selectedCount} selected tests that ran (${ctx.selectedSkipped} more ${ctx.selectedSkipped === 1 ? "is" : "are"} skipped by the repository itself)` : `The ${ctx.selectedCount} selected tests`;
+    sentence = `${selected} passed with a valid fault ${where}: the selected tests missed it. The rest of the suite was not shown to miss it.`;
   } else if (out.classification === "caught_by_existing") {
     const first = out.caught_by[0];
     sentence = `The existing tests caught a fault ${where}: "${first?.full_title ?? "a test"}" failed at its assertion${out.scope === "full_suite" ? " (outside the selected files)" : ""}.`;
@@ -825,6 +882,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
   // With no selected file the run above is the whole suite already; it is not run a second time.
   const fullArgv = opts.full_suite && !wholeSuiteOnly ? testArgv(fixture.runner, null, runnerVersion) : null;
   const deadlineMs = Math.min(deps.stageDeadlineMs ?? DEFAULT_STAGE_DEADLINE_MS, fixture.shape.deadlineSeconds * 1000);
+  const build = stageBuildOf(fixture, sourceRoot, deadlineMs);
   const changedBy = fixture.prNumber !== null ? `PR #${fixture.prNumber}` : `the change ${record.selection.base_commit.slice(0, 12)}..${record.identity.merged_commit.slice(0, 12)}`;
   const statementCtx = {
     symbolName: record.identity.name,
@@ -833,6 +891,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     line: plan.site.lines.start,
     selectedCount: 0,
     fullCount: null as number | null,
+    fullSkipped: 0,
+    selectedSkipped: 0,
     assisted: oracle.assisted.flag
   };
   const stages: Partial<Record<StageName, StageObservation>> = {};
@@ -850,11 +910,21 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       checkout_unchanged: checkoutUnchanged(),
       selected_files: tests.map((test) => test.path),
       ...(wholeSuiteOnly ? { whole_suite_only: true } : {}),
-      baseline_passing: fixture.baselinePassing
+      baseline_passing: fixture.baselinePassing,
+      baseline_pending: fixture.baselinePending
     });
     statementCtx.selectedCount = (stages.original_selected ?? stages.original_suite)?.tests?.executed ?? 0;
     statementCtx.fullCount = (wholeSuiteOnly ? stages.fault_suite : stages.fault_full_suite)?.tests?.executed ?? null;
+    statementCtx.fullSkipped = fixture.baselinePending;
+    const originalRun = stages.original_selected ?? stages.original_suite;
+    const skippedOn = (stage: StageObservation | undefined): Array<{ file: string; full_title: string }> => (stage?.tests?.observed ?? []).filter((test) => test.state === "pending").map((test) => ({ file: test.file, full_title: test.full_title }));
+    // Every test the repository itself skips in the runs the result rests on, named once.
+    const skippedTests = [...new Map([...skippedOn(originalRun), ...skippedOn(stages.original_full_suite)].map((test) => [`${test.file}\u0000${test.full_title}`, test])).values()];
+    statementCtx.selectedSkipped = wholeSuiteOnly ? 0 : skippedOn(stages.original_selected).length;
+    const builds = (Object.values(stages) as StageObservation[]).filter((stage) => stage.stage.startsWith("build_")).map((stage) => ({ stage: stage.stage, duration_ms: stage.duration_ms, exit_code: stage.exit_code, timed_out: stage.timed_out }));
     const classification: Classification = {
+      ...(builds.length > 0 ? { builds } : {}),
+      ...(skippedTests.length > 0 ? { skipped_tests: skippedTests } : {}),
       version: CLASSIFICATION_VERSION,
       classifier_version: FAULT_CLASSIFIER_VERSION,
       run_id: runId,
@@ -892,7 +962,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     });
     // Mocha runs the files as they are, so V8 coverage of the original names the fault's bytes. Vitest and
     // Jest transform a file before it runs: there a marked copy of the original says whether the site ran.
-    const byCoverage = fixture.runner.name === "mocha";
+    // With a build, the tests may run built files, which coverage of the source file does not see: the marked copy is built like any other.
+    const byCoverage = fixture.runner.name === "mocha" && !build;
     if (!byCoverage) {
       const marked = reachMarkedBytes(symbolTarget.file, fileBytes, plan.site.bytes.start, plan.site.bytes.end);
       if (marked) {
@@ -942,7 +1013,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       full_suite_argv: fullArgv,
       runner: { name: fixture.runner.name, version: runnerVersion },
       container: containerProfile(fixture, mountsFor, { ...reportEnv, ...coverageEnv }),
-      limits: { stage_deadline_ms: deadlineMs },
+      limits: { stage_deadline_ms: deadlineMs, ...(build ? { build_deadline_ms: build.deadlineMs } : {}) },
+      ...(build ? { build: { fixture_command: build.fixture_command, argv: build.argv } } : {}),
       // Only an unapproved run carries this, so an approved run's profile keeps its bytes.
       ...(oracle.approval.status !== "approved" ? { oracle_status: { approval: oracle.approval.status, allowed_by: "--allow-proposed-oracle" as const } } : {})
     };
@@ -962,12 +1034,13 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       executor: deps.container ?? dockerExecutor(),
       clock: deps.clock,
       stages,
-      stageRefs
+      stageRefs,
+      build
     });
     const { runStage, held } = runner;
 
     const original = runStage(wholeSuiteOnly ? "original_suite" : "original_selected", "original", selectedArgv, { ...reportEnv, ...coverageEnv }, byCoverage ? fileBytes : undefined);
-    if (!held(original) || original.timed_out || !original.tests || original.tests.failed > 0 || original.tests.hook_failures > 0 || original.exit_code !== 0 || original.tests.executed === 0 || original.tests.pending > 0) {
+    if (!held(original) || original.timed_out || !original.tests || original.tests.failed > 0 || original.tests.hook_failures > 0 || original.exit_code !== 0 || original.tests.executed === 0 || (wholeSuiteOnly && original.tests.pending !== fixture.baselinePending)) {
       return finish(true);
     }
     if (copyRoots.marked && !held(runStage("reach_marked", "marked", selectedArgv, { ...reportEnv, [REACH_MARK_ENV]: `${WORK_OUT}/${REACH_MARK_FILE}` }, undefined, false, true))) return finish(true);
@@ -988,7 +1061,7 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
 
 // ── shared with verify-test (A3): the copies, the mounts and one stage ───────────
 
-export type CopyRoots = { original: string; mutant: string; marked?: string };
+export type CopyRoots = { original: string; mutant: string; marked?: string; /** The checkout's other node_modules folders (workspace packages), mounted at their own places. */ workspace?: Array<{ rel: string; real: string }>; /** A folder of package-manager commands the install stage kept, for stages to run by name. */ bin?: string };
 /** The marker a `reach_marked` stage looks for in its output folder. */
 const REACH_MARK_FILE = "reach-mark";
 
@@ -1037,7 +1110,7 @@ export function prepareFaultCopies(args: {
     throw new ProbeFaultRefusal("prepare_failed", "the proof script did not prepare the copies with the planned fault.");
   }
   const copyRoots: CopyRoots = { original: prepared.copies?.original?.root ?? "", mutant: prepared.copies?.mutant?.root ?? "" };
-  for (const copy of Object.values(copyRoots)) {
+  for (const copy of [copyRoots.original, copyRoots.mutant]) {
     if (!copy || !existsSync(copy) || relative(copiesDir, copy).startsWith("..") || isAbsolute(relative(copiesDir, copy))) {
       throw new ProbeFaultRefusal("prepare_failed", "the proof script did not put both copies inside the folder it was given.");
     }
@@ -1056,8 +1129,32 @@ export function prepareFaultCopies(args: {
       throw new ProbeFaultRefusal("tests_invalid", `${file.path} is not in the commit as it is in the checkout (missing, changed since the commit, or a symbolic link).`);
     }
   }
-  // Mount points for the installed dependencies: the copies never contain them.
-  for (const copy of Object.values(copyRoots)) mkdirSync(join(copy, "node_modules"), { recursive: true });
+  // Mount points for the installed dependencies: the copies never contain them. A workspace package's own
+  // node_modules is mounted at its own place; like the root's, it must be a folder of this checkout.
+  const workspace: Array<{ rel: string; real: string }> = [];
+  for (const rel of workspaceNodeModules(args.sourceRoot)) {
+    const abs = join(args.sourceRoot, rel);
+    if (!lstatSync(abs).isDirectory() || !realInside(args.sourceRoot, abs)) {
+      throw new ProbeFaultRefusal("not_installed", `${rel} is not a folder of this checkout (a link to somewhere else is not mounted): install the fixture inside the boundary.`);
+    }
+    workspace.push({ rel, real: realpathSync(abs) });
+  }
+  for (const copy of [copyRoots.original, copyRoots.mutant]) {
+    mkdirSync(join(copy, "node_modules"), { recursive: true });
+    for (const entry of workspace) mkdirSync(join(copy, entry.rel), { recursive: true });
+  }
+  if (workspace.length > 0) copyRoots.workspace = workspace;
+  // The manager the install stage kept (pnpm, yarn): a build or a test may call it by name, with no network.
+  const kept = keptManagerCommands(args.sourceRoot);
+  if (kept.length > 0) {
+    const bin = join(args.tmp, "opro-bin");
+    mkdirSync(bin);
+    for (const command of kept) {
+      writeFileSync(join(bin, command.name), command.script);
+      chmodSync(join(bin, command.name), 0o755);
+    }
+    copyRoots.bin = bin;
+  }
   return copyRoots;
 }
 
@@ -1066,8 +1163,10 @@ export function makeMountsFor(copyRoots: CopyRoots, nodeModulesReal: string, wit
   return (copy, out) => [
     { source: copyRoots[copy] ?? copyRoots.original, target: WORK_REPO, readonly: true, role: `<${copy}>` },
     { source: nodeModulesReal, target: `${WORK_REPO}/node_modules`, readonly: true, role: "<node_modules>" },
+    ...(copyRoots.workspace ?? []).map((entry) => ({ source: entry.real, target: `${WORK_REPO}/${entry.rel}`, readonly: true, role: `<node_modules:${entry.rel}>` })),
     { source: out, target: WORK_OUT, readonly: false, role: "<out>" },
     ...runnerMounts(plan).map((mount) => ({ ...mount, readonly: true })),
+    ...(copyRoots.bin ? [{ source: copyRoots.bin, target: OPRO_BIN_DIR, readonly: true, role: "<manager commands>" }] : []),
     ...(witnessFile ? [{ source: witnessFile, target: witnessTarget(plan), readonly: true, role: "<witness>" }] : [])
   ];
 }
@@ -1086,7 +1185,8 @@ export function containerProfile(fixture: FixtureProfile, mountsFor: ReturnType<
     tmp_size: "2g",
     deadline_seconds: fixture.shape.deadlineSeconds,
     mounts: mountsFor("original", "<out>").map((mount) => ({ source: mount.role, target: mount.target, mode: mount.readonly ? "ro" : "rw" })),
-    env_names: shapeEnvNames(env)
+    env_names: shapeEnvNames({ ...fixture.variables, ...env }),
+    ...(Object.keys(fixture.variables).length > 0 ? { variables: fixture.variables } : {})
   };
 }
 
@@ -1106,16 +1206,52 @@ export interface StageRunnerContext {
   clock: Clock;
   stages: Partial<Record<StageName, StageObservation>>;
   stageRefs: Classification["stages"];
+  /** The repository's build: run in a copy before its first stage and again after each change to the target file there. */
+  build?: { argv: string[]; deadlineMs: number } | null;
+}
+
+/** The output-problem prefixes of a stage that did not run because its copy's build did not finish. */
+export const BUILD_FAILED = "build_failed";
+export const BUILD_TIMEOUT = "build_timeout";
+
+/** The build a fixture names, checked against the checkout, with its time limit. Null when it names none. */
+export function stageBuildOf(fixture: FixtureProfile, sourceRoot: string, stageDeadlineMs: number): { fixture_command: string[]; argv: string[]; deadlineMs: number } | null {
+  const plan = buildPlanOf(fixture.buildCommand, sourceRoot, (detail) => {
+    throw new ProbeFaultRefusal("profile_option_not_allowed", detail);
+  });
+  if (!plan) return null;
+  return { ...plan, deadlineMs: fixture.buildDeadlineSeconds !== null ? fixture.buildDeadlineSeconds * 1000 : stageDeadlineMs };
 }
 
 export function createStageRunner(ctx: StageRunnerContext): {
   runStage: (stage: StageName, copy: "original" | "mutant" | "marked", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent?: boolean, reachMark?: boolean) => StageObservation;
   held: (stage: StageObservation) => boolean;
+  copied: (from: string, to: string) => void;
 } {
   const { runDir, runId, fixture, deadlineMs, tmp, copyRoots, mountsFor, executor } = ctx;
   /** One stage: the boundary probe in the stage's own shape, then, only if it holds, the stage's command. */
   // `faultPresent` says whether the target bytes in the copy hold the fault; by default, in the faulty copy only.
-  const runStage = (stage: StageName, copy: "original" | "mutant" | "marked", command: string[], env: Record<string, string>, coverageTarget?: Buffer, faultPresent = copy === "mutant", reachMark = false): StageObservation => {
+  // Which target bytes each copy folder was last built with. A copy made from a built one starts with its build.
+  const builtWith = new Map<string, string>();
+  const runStage = (stage: StageName, copy: "original" | "mutant" | "marked", command: string[], givenEnv: Record<string, string>, coverageTarget?: Buffer, faultPresent = copy === "mutant", reachMark = false): StageObservation => {
+    const isBuild = stage.startsWith("build_");
+    // The fixture's plain variables first; what the stage itself sets wins.
+    const env: Record<string, string> = { ...fixture.variables, ...givenEnv, ...(copyRoots.bin ? { PATH: STAGE_PATH } : {}) };
+    // The build comes first: in this copy, with the target file as it is now. A build that does not finish
+    // stops the stage it was for, with the reason.
+    let buildProblem: string | null = null;
+    if (ctx.build && !isBuild) {
+      const root = copyRoots[copy] ?? copyRoots.original;
+      const signature = sha256Hex(readFileSync(join(root, ctx.targetRel)));
+      if (builtWith.get(root) !== signature) {
+        const built = runStage(`build_${stage}` as StageName, copy, ctx.build.argv, {}, undefined, faultPresent);
+        if (built.timed_out) buildProblem = `${BUILD_TIMEOUT}: the build ran past its time limit (${Math.round(ctx.build.deadlineMs / 1000)} s) and was stopped`;
+        else if (built.boundary.failures.length > 0 || !built.stopped) buildProblem = `${BUILD_FAILED}: the build's container did not hold its boundary`;
+        else if (built.exit_code !== 0) buildProblem = `${BUILD_FAILED}: the build exited ${built.exit_code}`;
+        else builtWith.set(root, signature);
+      }
+    }
+    const stageDeadlineMs = isBuild && ctx.build ? ctx.build.deadlineMs : deadlineMs;
     // The probe and the stage each get a new, never-used output folder. A folder deleted and made again at
     // the same path is not the same folder to Docker Desktop's file sharing: the next container sees the
     // deleted one, and every write to it fails.
@@ -1124,7 +1260,9 @@ export function createStageRunner(ctx: StageRunnerContext): {
     const framed = env.OPRO_DYNAMIC_PROOF_FRAME === "1";
     // A new key for every stage, handed only to the reporter on stdin; never written anywhere.
     const reportKey = framed ? randomBytes(32) : null;
-    const request: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, out), env, workdir: WORK_REPO, command, deadlineMs, ...(reportKey ? { input: `${reportKey.toString("hex")}\n` } : {}) };
+    // A build writes into its copy; every other stage has the copy read-only.
+    const stageMounts = mountsFor(copy, out).map((mount) => (isBuild && mount.target === WORK_REPO ? { ...mount, readonly: false } : mount));
+    const request: ContainerRequest = { shape: fixture.shape, mounts: stageMounts, env, workdir: WORK_REPO, command, deadlineMs: stageDeadlineMs, ...(reportKey ? { input: `${reportKey.toString("hex")}\n` } : {}) };
     const probeRequest: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, probeOut), env, workdir: WORK_REPO, command, deadlineMs };
     const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy] ?? copyRoots.original, ctx.targetRel)));
     const startedAt = ctx.clock();
@@ -1135,10 +1273,10 @@ export function createStageRunner(ctx: StageRunnerContext): {
         ? boundaryFailures(probeReport, probeRequest, fixture.node)
         : [`the probe exited ${probe.exitCode}${probe.timedOut ? " (timeout)" : ""}${probe.stderr ? `: ${redactSecrets(probe.stderr).split("\n")[0]}` : ""}`];
     rmSync(probeOut, { recursive: true, force: true });
-    const run = failures.length === 0 ? executor(request) : null;
+    const run = failures.length === 0 && buildProblem === null ? executor(request) : null;
     const stdout = fileRef(runDir, `logs/${stage}.stdout.log`, Buffer.from(redactSecrets(run?.stdout ?? ""), "utf8"));
     const stderr = fileRef(runDir, `logs/${stage}.stderr.log`, Buffer.from(redactSecrets(run?.stderr ?? ""), "utf8"));
-    const outputProblems: string[] = [];
+    const outputProblems: string[] = buildProblem === null ? [] : [buildProblem];
     let report: FileRef | null = null;
     let observedTests: StageObservation["tests"] = null;
     if (run && reportKey) {
@@ -1239,8 +1377,13 @@ export function createStageRunner(ctx: StageRunnerContext): {
     rmSync(out, { recursive: true, force: true });
     return readBack;
   };
-  const held = (stage: StageObservation): boolean => stage.boundary.failures.length === 0 && stage.stopped;
-  return { runStage, held };
+  const held = (stage: StageObservation): boolean => stage.boundary.failures.length === 0 && stage.stopped && !stage.output_problems.some((problem) => problem.startsWith("build_"));
+  /** A copy folder made from another carries that one's build with it. */
+  const copied = (from: string, to: string): void => {
+    const signature = builtWith.get(from);
+    if (signature !== undefined) builtWith.set(to, signature);
+  };
+  return { runStage, held, copied };
 }
 
 /** Plain lines for the terminal. */

@@ -100,6 +100,43 @@ function usage() {
   ].join("\n");
 }
 
+const DEFAULT_BUILD_TIMEOUT_MS = 300_000;
+
+// The repository's build, as a JSON list of plain words. Nothing is run through a shell.
+function parseBuildArgv(value) {
+  if (value === undefined) {
+    return null;
+  }
+  let words;
+  try {
+    words = JSON.parse(value);
+  } catch {
+    throw new Error("--build-json must be a JSON list of words");
+  }
+  if (!Array.isArray(words) || words.length === 0 || !words.every(word => typeof word === "string" && /^[\w@.:=/+-]+$/.test(word))) {
+    throw new Error("--build-json must be a JSON list of plain words");
+  }
+  return words;
+}
+
+// Runs the build inside one isolated copy and gives the time it took. A build that does not finish stops the proof with the reason.
+function runBuildInCopy(argv, copyRoot, timeoutMs, which) {
+  const started = Date.now();
+  const result = spawnSync(argv[0], argv.slice(1), { cwd: copyRoot, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024, env: process.env });
+  const elapsed = Date.now() - started;
+  if (result.error && result.error.code === "ETIMEDOUT") {
+    throw new Error(`build_timeout: the build (${argv.join(" ")}) ran past its time limit (${Math.round(timeoutMs / 1000)} s) in the ${which} copy and was stopped`);
+  }
+  if (result.error) {
+    throw new Error(`build_failed: the build (${argv.join(" ")}) could not start in the ${which} copy: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const detail = String(result.stderr || result.stdout || "").split("\n").map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? "";
+    throw new Error(`build_failed: the build (${argv.join(" ")}) exited ${result.status} in the ${which} copy${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
+  return elapsed;
+}
+
 function parseArgs(argv) {
   const args = { json: false, linkNodeModules: false, runner: "auto", replacementMode: "return-json", testEnv: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -2874,6 +2911,8 @@ function runProof(args, root, binding) {
   const jestBin = args.jestBin ? path.resolve(args.jestBin) : defaultJestBin(root, workspaceRoot);
   const mochaBin = args.mochaBin ? path.resolve(args.mochaBin) : defaultMochaBin(root, workspaceRoot);
 
+  const buildArgv = parseBuildArgv(args.buildJson);
+  const buildTimeoutMs = args.buildTimeoutMs === undefined ? DEFAULT_BUILD_TIMEOUT_MS : parseTimeoutMs(args.buildTimeoutMs);
   const baselineCopy = copyFixtureRoot(root, "baseline", { linkNodeModules: args.linkNodeModules, workspaceRoot });
   let mutantCopy;
   try {
@@ -2883,6 +2922,8 @@ function runProof(args, root, binding) {
     throw error;
   }
   try {
+    // A named build runs in each copy before its test: the original as it is, the other after the fault.
+    const buildTimes = buildArgv ? { command: buildArgv, baseline_ms: runBuildInCopy(buildArgv, baselineCopy.repoRoot, buildTimeoutMs, "original"), mutant_ms: null } : null;
     const baseline = runTest({ runner, repoRoot: baselineCopy.repoRoot, monoRoot: baselineCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: baselineCopy.aliases });
     let boundPlan = null;
     // An exact edit keeps a function's own code, so a marker has no body to open; it carries none.
@@ -2892,6 +2933,7 @@ function runProof(args, root, binding) {
     } else {
       mutateMethod(path.join(mutantCopy.repoRoot, targetRel), args.method, replacementBody, marked, targetRel);
     }
+    if (buildArgv) buildTimes.mutant_ms = runBuildInCopy(buildArgv, mutantCopy.repoRoot, buildTimeoutMs, "faulty");
     // The reach file lives beside the copy, never inside the repository the test sees.
     const reachFile = marked ? createReachFile(mutantCopy.tmpRoot) : null;
     const mutant = runTest({ runner, repoRoot: mutantCopy.repoRoot, monoRoot: mutantCopy.monoRoot, testRel, vitestBin, jestBin, mochaBin, vitestConfigRel, jestConfigRel, timeoutMs, testEnv, aliases: mutantCopy.aliases, reachFile });
@@ -2899,6 +2941,7 @@ function runProof(args, root, binding) {
     const verdict = classify({ baseline, mutant, testRel, repoRoot: mutantCopy.repoRoot, reach, method: args.method });
     return {
       ...verdict,
+      ...(buildTimes ? { build: buildTimes } : {}),
       runner,
       replacementMode: args.replacementMode,
       vitestConfig: vitestConfigRel,

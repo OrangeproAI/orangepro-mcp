@@ -40,6 +40,9 @@ export function notExercisedReason(fn: string | undefined): string {
   return `not exercised: this test never runs ${fn && fn.trim() ? fn : "the function"}`;
 }
 
+/** Added to a "not exercised" result when no build was named: the test may be running a built copy the fault never reached. */
+export const BUILD_HINT = "If this test runs a built copy of the code, name the build (--build '<command>', or proof.build in .orangepro/config.json) so the fault is built before the test runs.";
+
 export function reachUnknownReason(fn: string | undefined): string {
   return `reach unknown: could not check whether this test runs ${fn && fn.trim() ? fn : "the function"}`;
 }

@@ -358,7 +358,9 @@ export function boundaryFailures(report: unknown, request: ContainerRequest, exp
     failures.push(`host-backed mounts are [${seen?.join(", ") ?? "unknown"}], expected [${expectedMounts.join(", ")}]`);
   }
   const names = Array.isArray(r.env_names) ? (r.env_names as unknown[]).map(String) : [];
-  const secretLooking = names.filter((name) => SECRET_NAME_RE.test(name));
+  // A variable the stage itself sets is not a leak: the fixture's own are plain by rule (a name with a part ending in
+  // KEY, TOKEN, SECRET, PASSWORD, AUTH or CREDENTIAL is refused before any run), so GIT_AUTHOR_NAME passes here too.
+  const secretLooking = names.filter((name) => SECRET_NAME_RE.test(name) && !Object.prototype.hasOwnProperty.call(request.env, name));
   if (secretLooking.length > 0) failures.push(`secret-looking variables are visible: ${secretLooking.join(", ")}`);
   const unexpected = names.filter((name) => !shapeEnvNames(request.env, request.network).includes(name) && !["PATH", "HOSTNAME", "NODE_VERSION", "YARN_VERSION", "PWD", "SHLVL", "_"].includes(name));
   if (unexpected.length > 0) failures.push(`unexpected variables are visible: ${unexpected.join(", ")}`);

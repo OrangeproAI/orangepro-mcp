@@ -282,6 +282,9 @@ export interface DynamicProofOptions {
   vitest_config?: string;
   jest_config?: string;
   test_env?: string[];
+  /** The repository's build as plain words (TS/JS): run in each isolated copy, after the fault, before the test. Falls back to proof.build in the config. */
+  build?: string[];
+  build_timeout_ms?: number;
   run_id?: string;
   /**
    * TS/JS, bound targets only: return the diff the mutation would make and stop.
@@ -365,6 +368,8 @@ export interface DynamicProofOracleSummary {
   reach?: Reach;
   /** Set for a JS/TS function: always changed by its exact position. Absent for Go, Java and Python. */
   mutation_route?: "bound" | "position";
+  /** The repository's build, when one was named: run in the original copy, then in the faulty one after the fault. */
+  build?: { command: string[]; baseline_ms: number; mutant_ms: number | null };
   /** Optional language-runner refusal class; absent for legacy TS/Go/Java spikes. */
   category?: "environment_unavailable" | "collection_error" | "project_boundary" | "mutation_unsupported";
   runner?: string;
@@ -2316,6 +2321,13 @@ export function opDynamicProof(
     if (opts.vitest_config) args.push("--vitest-config", toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.vitest_config)));
     if (opts.jest_config) args.push("--jest-config", toWorkspaceRel(sourceRoot, resolveContained(sourceRoot, opts.jest_config)));
     for (const entry of opts.test_env ?? []) args.push("--test-env", entry);
+    // A build named here or in the config runs in each copy after the fault, so a test that imports built files runs the faulty code.
+    const buildWords = opts.build && opts.build.length > 0 ? opts.build : loadRiskConfig(sourceRoot).config.proof.build;
+    if (buildWords && buildWords.length > 0) {
+      if (!buildWords.every((word) => typeof word === "string" && /^[\w@.:=/+-]+$/.test(word))) throw new Error("prove --build takes plain words only (nothing is run through a shell).");
+      args.push("--build-json", JSON.stringify(buildWords));
+      if (opts.build_timeout_ms !== undefined) args.push("--build-timeout-ms", String(opts.build_timeout_ms));
+    }
 
     const scriptPath = dynamicProofSpikePath();
     const startedAt = Date.now();
@@ -2373,6 +2385,8 @@ export function opDynamicProof(
       reason: oracle.reason,
       ...(oracle.reach ? { reach: oracle.reach } : {}),
       ...(mutationRoute ? { mutation_route: mutationRoute } : {}),
+      // The build that ran in each copy, with its time, when one was named.
+      ...((oracle as { build?: unknown }).build ? { build: (oracle as { build?: DynamicProofOracleSummary["build"] }).build } : {}),
       runner: oracle.runner,
       replacementMode: oracle.replacementMode,
       test: oracle.test,

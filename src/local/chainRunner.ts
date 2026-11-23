@@ -2,7 +2,7 @@
 // fixture names, what it may pass to it, the command line OrangePro builds, and the reporter that
 // signs the stage's account. One description per runner; nothing here is chosen by guessing.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { OPRO_DIR } from "./boundary.js";
 import { dynamicProofSpikePath } from "./operations.js";
@@ -284,4 +284,114 @@ export function runnerMounts(plan: RunnerPlan): Array<{ source: string; target: 
 /** The calls that define one test in a file run by this runner. */
 export function testCallNames(name: ChainRunnerName): string[] {
   return name === "mocha" ? ["it"] : ["it", "test"];
+}
+
+// ── a workspace: every node_modules, a build after a change, the manager offline ──
+
+/**
+ * The `node_modules` folders of a checkout besides the root's: one per workspace package that has its
+ * own. Folders inside a `node_modules` are not looked into. Repository-relative, `/`-separated, sorted.
+ */
+export function workspaceNodeModules(sourceRoot: string, maxDepth = 6, cap = 400): string[] {
+  const found: string[] = [];
+  const walk = (abs: string, rel: string, depth: number): void => {
+    if (found.length >= cap || depth > maxDepth) return;
+    let names: string[];
+    try {
+      names = readdirSync(abs).sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (name === ".git" || name === ".orangepro") continue;
+      const childAbs = join(abs, name);
+      const childRel = rel ? `${rel}/${name}` : name;
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(childAbs);
+      } catch {
+        continue;
+      }
+      if (name === "node_modules") {
+        if (rel !== "" && (stat.isDirectory() || stat.isSymbolicLink())) found.push(childRel);
+        continue;
+      }
+      if (stat.isDirectory()) walk(childAbs, childRel, depth + 1);
+    }
+  };
+  walk(sourceRoot, "", 0);
+  return found;
+}
+
+export const OPRO_BIN_DIR = `${OPRO_MOUNT}/bin`;
+/** The image's own search path, with OrangePro's folder of manager commands first. */
+// The project's own bin folder comes LAST: a test that starts a tool the project installed (as it would when the
+// manager runs the test script) finds it, and nothing the project installed can stand in for node or a system tool.
+export const STAGE_PATH = `${OPRO_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/work/repo/node_modules/.bin`;
+/** Where the install stage keeps corepack's copy of the pinned manager: inside the checkout's own node_modules, so later stages find it with the network off. */
+export const COREPACK_KEEP = "node_modules/.opro-corepack";
+
+/**
+ * The package managers the install stage kept (pnpm, yarn), as small command files a stage can run by
+ * name with no network: each starts the kept copy with node. Empty when nothing was kept.
+ */
+export function keptManagerCommands(sourceRoot: string): Array<{ name: string; script: string }> {
+  const out: Array<{ name: string; script: string }> = [];
+  const base = join(sourceRoot, COREPACK_KEEP, "v1");
+  for (const name of ["pnpm", "yarn"]) {
+    let versions: string[];
+    try {
+      versions = readdirSync(join(base, name)).filter((entry) => /^\d+\.\d+\.\d+/.test(entry)).sort();
+    } catch {
+      continue;
+    }
+    const version = versions[versions.length - 1];
+    if (!version) continue;
+    const dir = join(base, name, version);
+    let bin: string | null = null;
+    for (const meta of ["package.json", ".corepack"]) {
+      try {
+        const value = (JSON.parse(readFileSync(join(dir, meta), "utf8")) as { bin?: unknown }).bin;
+        const entry = typeof value === "string" ? value : Array.isArray(value) ? null : value && typeof value === "object" ? (value as Record<string, unknown>)[name] : null;
+        if (typeof entry === "string" && insideRepoPath(entry.replace(/^\.\//, ""))) {
+          bin = entry.replace(/^\.\//, "");
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+    if (!bin || !existsSync(join(dir, bin))) continue;
+    out.push({ name, script: `#!/bin/sh\nexec node "/work/repo/${COREPACK_KEEP}/v1/${name}/${version}/${bin}" "$@"\n` });
+  }
+  return out;
+}
+
+export interface BuildPlan {
+  /** The fixture's command, as written. */
+  fixture_command: string[];
+  /** What runs in the copy. */
+  argv: string[];
+}
+
+const BUILD_TOKEN = /^[\w@.:=/+-]+$/;
+
+/**
+ * The repository's build, from the fixture's `commands.build`: a package manager by name (`pnpm build`,
+ * `npm run build`), or a command the repository installed (`node_modules/.bin/<name>`). Plain words only:
+ * nothing is run through a shell. Null when the fixture names none.
+ */
+export function buildPlanOf(command: unknown, sourceRoot: string, refuse: Refuse): BuildPlan | null {
+  if (command === undefined || command === null) return null;
+  if (!Array.isArray(command) || command.length === 0 || !command.every((part) => typeof part === "string" && BUILD_TOKEN.test(part)) || (command[0] as string).startsWith("-")) {
+    return refuse("the fixture's commands.build must be a command line of plain words (a list of strings; nothing is run through a shell).");
+  }
+  const words = command as string[];
+  const first = words[0]!;
+  if (first.includes("/") || first === "." || first === "..") return refuse(`the fixture's commands.build starts with ${first}: name a package manager (npm, pnpm, yarn) or a command installed in node_modules/.bin.`);
+  if (first === "npm" || first === "pnpm" || first === "yarn") return { fixture_command: words, argv: words };
+  if (!existsSync(join(sourceRoot, "node_modules", ".bin", first))) {
+    return refuse(`the fixture's commands.build starts with ${first}, which is not installed in ${sourceRoot}/node_modules/.bin.`);
+  }
+  return { fixture_command: words, argv: [`node_modules/.bin/${first}`, ...words.slice(1)] };
 }

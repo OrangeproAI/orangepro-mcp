@@ -81,6 +81,8 @@ export const VALUE_FLAGS = new Set([
   "test",
   "tests",
   "test-env",
+  "build",
+  "build-timeout-ms",
   "test-run",
   "vitest-config",
   "witness",
