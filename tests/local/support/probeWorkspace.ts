@@ -223,7 +223,9 @@ export function hostExecutor(probe: (request: ContainerRequest) => unknown = pas
     try {
       const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: tmpdir() };
       for (const [key, value] of Object.entries(request.env)) env[key] = toHost(value);
-      const child = spawnSync(process.execPath, request.command.slice(1).map((arg) => (arg.startsWith("/") ? toHost(arg) : arg)), {
+      // A command that does not start with `node` is a file the repository installed (a build tool): node runs it.
+      const argv = request.command[0] === "node" ? request.command.slice(1) : request.command;
+      const child = spawnSync(process.execPath, argv.map((arg) => (arg.startsWith("/") ? toHost(arg) : arg)), {
         cwd: toHost(request.workdir),
         env,
         encoding: "utf8",

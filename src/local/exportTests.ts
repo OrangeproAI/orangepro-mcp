@@ -39,6 +39,7 @@ import {
   type ProbeFaultDeps
 } from "./faultProbe.js";
 import { installedRunner, testArgv } from "./chainRunner.js";
+import { stageBuildOf } from "./faultProbe.js";
 import { resolveTargetSymbol } from "./ledger.js";
 import { defaultDynamicProofRunner, ProofRefusalError, proofPreflight } from "./operations.js";
 import { toWorkspaceRel } from "./reprove/paths.js";
@@ -204,6 +205,8 @@ export function computeRows(input: {
   verify: { run: VerifyRun; recomputed: string };
   fresh: { runId: string; stages: Partial<Record<StageName, StageObservation>>; refs: Classification["stages"] };
   baseline: number;
+  /** Tests the repository itself skips in its whole suite, as the fixture records (0 when it records none). */
+  baselinePending?: number;
   originalSha: string;
   mutatedSha: string;
   restoreConfirmed: boolean;
@@ -214,7 +217,12 @@ export function computeRows(input: {
   const assertion = verify.run.assertion;
   const isMine = (test: { file: string; full_title: string }): boolean => test.file === assertion.test.file && test.full_title === assertion.test.full_title;
   const refsOf = (runId: string, refs: Classification["stages"], names: string[]): StageRef[] => refs.filter((r) => names.includes(r.stage)).map((r) => stageRef(runId, r));
-  const clean = (stage: StageObservation | undefined): boolean => Boolean(stage && issueOf(stage) === null && stage.exit_code === 0 && stage.tests!.failed === 0 && stage.tests!.pending === 0 && stage.tests!.executed > 0);
+  // `skipped` is how many tests the stage may leave skipped: none for selected files, the fixture's recorded count for the whole suite.
+  const clean = (stage: StageObservation | undefined, skipped = 0): boolean => Boolean(stage && issueOf(stage) === null && stage.exit_code === 0 && stage.tests!.failed === 0 && stage.tests!.pending === skipped && stage.tests!.executed > 0);
+  const suiteSkipped = input.baselinePending ?? 0;
+  // A whole-suite-only fault run's two stages are whole-suite runs.
+  // Selected files: the tests the repository itself skips there, as the fault run's original saw them.
+  const faultSkipped = fault.stages.original_selected ? (fault.stages.original_selected.tests?.pending ?? 0) : suiteSkipped;
   const row = (name: ProofRow, met: boolean, reason: string, stages: StageRef[]): ProofRowResult => ({ row: name, meaning: PROOF_ROW_MEANING[name], met, reason: met ? null : reason, stages });
 
   const a = fresh.stages.fresh_full_suite;
@@ -227,11 +235,11 @@ export function computeRows(input: {
   const hr = fresh.stages.fresh_restored_test_file;
   const hFailed = h?.tests?.observed.filter((test) => test.state === "failed") ?? [];
   return [
-    row("A", clean(a) && a!.tests!.passed === input.baseline && a!.copy_target_sha256 === input.originalSha, "the existing whole suite did not pass on the fresh original with the fixture's count", refsOf(fresh.runId, fresh.refs, ["fresh_full_suite"])),
-    row("B", clean(b), "the selected tests did not pass cleanly on the original", refsOf(fault.run.runId, fault.refs, ["original_selected", "original_suite"])),
+    row("A", clean(a, suiteSkipped) && a!.tests!.passed === input.baseline && a!.copy_target_sha256 === input.originalSha, "the existing whole suite did not pass on the fresh original with the fixture's count", refsOf(fresh.runId, fresh.refs, ["fresh_full_suite"])),
+    row("B", clean(b, faultSkipped), "the selected tests did not pass cleanly on the original", refsOf(fault.run.runId, fault.refs, ["original_selected", "original_suite"])),
     row(
       "C",
-      cls.classification === "survived_unverified" && clean(c) && c!.tests!.passed === b?.tests?.passed && fault.run.faultRecord.validity.parse === "ok" && cls.reached_by_selected_tests === "reached" && cls.behavioral_difference.status === "differs",
+      cls.classification === "survived_unverified" && clean(c, faultSkipped) && c!.tests!.passed === b?.tests?.passed && fault.run.faultRecord.validity.parse === "ok" && cls.reached_by_selected_tests === "reached" && cls.behavioral_difference.status === "differs",
       "the selected tests' survival of a valid, reached fault with a behavioral difference is not shown",
       refsOf(fault.run.runId, fault.refs, ["fault_selected", "fault_suite", "reach_marked", "witness_original", "witness_fault", "original_full_suite", "fault_full_suite"])
     ),
@@ -240,7 +248,7 @@ export function computeRows(input: {
     row("F", verified, `the verify run's stages do not show it (${verify.recomputed})`, refsOf(verify.run.runId, verify.run.stageRefs, ["candidate_restored", "candidate_original_text_control", "full_suite_with_candidate"])),
     row(
       "G",
-      clean(g) && g!.tests!.executed === input.baseline + 1 && g!.tests!.passed === input.baseline + 1 && g!.copy_target_sha256 === input.originalSha && g!.tests!.observed.some((test) => isMine(test) && test.state === "passed"),
+      clean(g, suiteSkipped) && g!.tests!.executed === input.baseline + 1 && g!.tests!.passed === input.baseline + 1 && g!.copy_target_sha256 === input.originalSha && g!.tests!.observed.some((test) => isMine(test) && test.state === "passed"),
       "the whole suite with the patch did not pass with one more test on the fresh original",
       refsOf(fresh.runId, fresh.refs, ["fresh_full_suite_with_patch"])
     ),
@@ -353,6 +361,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     assertion: verify.assertion,
     baseline: fixture.baselinePassing!,
     priorIds: (run.originalSelected ?? []).filter((t) => t.file === testPath).map((t) => `${t.file}\u0000${t.full_title}`),
+    priorSkippedIds: (run.originalSelected ?? []).filter((t) => t.file === testPath && t.state === "pending").map((t) => `${t.file}\u0000${t.full_title}`),
     expectedTargetSha: {
       candidate_original: originalSha,
       candidate_original_repeat: originalSha,
@@ -389,6 +398,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     const fullArgv = testArgv(fixture.runner, null, runnerVersion);
     const deadlineMs = Math.min(deps.stageDeadlineMs ?? 300_000, fixture.shape.deadlineSeconds * 1000);
     const reportEnv = REPORT_ENV;
+    const build = asExport(() => stageBuildOf(fixture, sourceRoot, deadlineMs));
     const copyRoots = asExport(() =>
       prepareFaultCopies({ runner: deps.dynamicProofRunner ?? defaultDynamicProofRunner, sourceRoot, targetRel: symbolTarget.file, method: symbolTarget.method, targetAbs: tsjs.targetAbs, bound, plan, tmp, mustHold: run.profile.selected_tests })
     );
@@ -409,16 +419,17 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
       full_suite_argv: fullArgv,
       runner: { name: fixture.runner.name, version: runnerVersion },
       container: containerProfile(fixture, mountsFor, reportEnv),
-      limits: { stage_deadline_ms: deadlineMs },
+      limits: { stage_deadline_ms: deadlineMs, ...(build ? { build_deadline_ms: build.deadlineMs } : {}) },
+      ...(build ? { build: { fixture_command: build.fixture_command, argv: build.argv } } : {}),
       candidate: { patch_sha256: sha256Hex(testsPatch), assertion_record_sha256: verify.verdict.assertion_record_sha256, generation_request_sha256: verify.verdict.generation_request_sha256 }
     };
     writeFileAtomic(join(runDir, "run-profile.json"), recordBytes(profile));
-    const { runStage, held } = createStageRunner({ runDir, runId, profileSha: recordSha256(profile), faultRecordSha: run.profile.fault_record_sha256, fixture, deadlineMs, tmp, copyRoots, mountsFor, targetRel: symbolTarget.file, faultSpan: plan.site.bytes, executor: deps.container ?? dockerExecutor(), clock: deps.clock, stages, stageRefs });
+    const { runStage, held } = createStageRunner({ build, runDir, runId, profileSha: recordSha256(profile), faultRecordSha: run.profile.fault_record_sha256, fixture, deadlineMs, tmp, copyRoots, mountsFor, targetRel: symbolTarget.file, faultSpan: plan.site.bytes, executor: deps.container ?? dockerExecutor(), clock: deps.clock, stages, stageRefs });
     const go = (stage: StageName, copy: "original" | "mutant", argv: string[], faultPresent?: boolean): boolean => held(runStage(stage, copy, argv, reportEnv, undefined, faultPresent));
     const sequence = (): void => {
       if (!go("fresh_full_suite", "original", fullArgv)) return;
       // The patch's bytes go into both copies; each copy then differs from before in the test file only.
-      for (const copy of Object.values(copyRoots)) {
+      for (const copy of [copyRoots.original, copyRoots.mutant]) {
         const before = treeHashes(copy, new Set());
         writeFileSync(join(copy, testPath), verifiedTest);
         const after = treeHashes(copy, new Set());
@@ -451,6 +462,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     verify: { run: verify, recomputed },
     fresh: { runId, stages, refs: stageRefs },
     baseline: fixture.baselinePassing!,
+    baselinePending: fixture.baselinePending,
     originalSha,
     mutatedSha: plan.mutated_file_sha256,
     restoreConfirmed,
@@ -464,6 +476,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
   const firstFresh = stages.fresh_full_suite;
   const attempts = earlierAttempts(join(paths.dir, "proof-runs"), run.faultKey);
   const receipt: VerificationReceipt = {
+    ...(run.classification.skipped_tests && run.classification.skipped_tests.length > 0 ? { skipped_tests: run.classification.skipped_tests } : {}),
     version: VERIFICATION_RECEIPT_VERSION,
     evidence_kind: "runtime_observation",
     tool: { name: "@orangepro/orangepro-mcp", version: ORANGEPRO_VERSION, build_sha256: checkBuild().build_sha256 },
@@ -490,6 +503,7 @@ function exportTests(root: string, opts: ExportTestsOptions, deps: ProbeFaultDep
     },
     environment: {
       container_image: fixture.shape.image,
+      ...(Object.keys(fixture.variables).length > 0 ? { fixture_variables: fixture.variables } : {}),
       container_node: typeof (firstFresh?.boundary.report as { node?: unknown } | null)?.node === "string" ? ((firstFresh!.boundary.report as { node: string }).node) : null,
       host: { node: process.version, platform: `${process.platform}-${process.arch}` },
       runner: { name: fixture.runner.name, version: runnerVersion },

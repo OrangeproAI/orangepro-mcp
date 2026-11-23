@@ -31,7 +31,9 @@ const LOCKFILE: Record<PackageManager, string> = { npm: "package-lock.json", pnp
 const FROZEN: Record<Exclude<PackageManager, "npm">, string[]> = { pnpm: ["--frozen-lockfile"], yarn: ["--immutable", "--frozen-lockfile"] };
 // Flags that undo a frozen install or move what the stage decides.
 const NEVER = new Set(["--no-frozen-lockfile", "--fix-lockfile", "--lockfile-only", "--no-immutable", "--store-dir", "--cache-folder", "--global", "--no-lockfile"]);
-const COREPACK_ENV = { COREPACK_HOME: "/tmp/opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
+// Corepack keeps its copy of the pinned manager inside the checkout's own node_modules, so a later stage (a build,
+// with the network off) can run the same manager. Everything else the managers cache or store stays in /tmp.
+const COREPACK_ENV = { COREPACK_HOME: "/work/repo/node_modules/.opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
 
 export const lockfileOf = (manager: PackageManager): string => LOCKFILE[manager];
 

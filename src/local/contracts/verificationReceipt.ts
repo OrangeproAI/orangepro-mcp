@@ -53,6 +53,8 @@ export interface ProofRowResult {
 }
 
 export interface VerificationReceipt {
+  /** Tests the repository itself skips in the runs this receipt rests on, named, so the claim shows exactly what did not run. Absent when none. */
+  skipped_tests?: Array<{ file: string; full_title: string }>;
   version: typeof VERIFICATION_RECEIPT_VERSION;
   evidence_kind: "runtime_observation";
   /** `build_sha256`: the stamped build that made the receipt (P0.6), null when run from source. */
@@ -80,6 +82,8 @@ export interface VerificationReceipt {
   };
   environment: {
     container_image: string;
+    /** Plain, non-secret variables the fixture names for every stage. Absent when it names none. */
+    fixture_variables?: Record<string, string>;
     container_node: string | null;
     host: { node: string; platform: string };
     runner: { name: "mocha" | "vitest" | "jest"; version: string };

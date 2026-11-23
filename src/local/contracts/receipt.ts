@@ -45,7 +45,8 @@ export const STAGE_NAMES = [
   // Vitest and Jest: the selected tests on a copy of the original whose fault site writes a marker when it runs.
   "reach_marked"
 ] as const;
-export type StageName = (typeof STAGE_NAMES)[number];
+/** A named stage, or the build that ran in a copy just before one (`build_<stage>`). */
+export type StageName = (typeof STAGE_NAMES)[number] | `build_${(typeof STAGE_NAMES)[number]}`;
 
 export interface ContainerProfile {
   image: string;
@@ -62,6 +63,8 @@ export interface ContainerProfile {
   /** Every mount, by role: `<original>` or `<mutant>` copy, `<node_modules>`, `<out>`, `<reporter>`, `<witness>`. */
   mounts: Array<{ source: string; target: string; mode: "ro" | "rw" }>;
   env_names: string[];
+  /** Plain, non-secret variables the fixture names for every stage. Absent when it names none. */
+  variables?: Record<string, string>;
 }
 
 /** One candidate tried before this run's own. */
@@ -135,7 +138,9 @@ export interface RunProfile {
   full_suite_argv: string[] | null;
   runner: { name: "mocha" | "vitest" | "jest"; version: string };
   container: ContainerProfile;
-  limits: { stage_deadline_ms: number };
+  limits: { stage_deadline_ms: number; build_deadline_ms?: number };
+  /** The repository's build, when the fixture names one: what runs in a copy before its tests, and after each change to it. */
+  build?: { fixture_command: string[]; argv: string[] };
   /** Present only when the function's rank moved since its expected behavior was approved. */
   approval_binding?: { approved_record_sha256: string; rank_at_approval: number | null; current_rank: number | null };
   /** Present only when the expected behavior was not approved and the run was asked for anyway. */
@@ -223,6 +228,10 @@ export const FAULT_CLASSES = ["caught_by_existing", "survived_unverified", "inva
 export type FaultClass = (typeof FAULT_CLASSES)[number];
 
 export interface Classification {
+  /** Tests the repository itself skips, in the runs this result rests on: the same on the original and on the fault. Absent when none. */
+  skipped_tests?: Array<{ file: string; full_title: string }>;
+  /** Every build that ran, in order, with its time. Absent when the fixture names no build. */
+  builds?: Array<{ stage: string; duration_ms: number; exit_code: number | null; timed_out: boolean }>;
   version: typeof CLASSIFICATION_VERSION;
   classifier_version: typeof FAULT_CLASSIFIER_VERSION;
   run_id: string;

@@ -493,6 +493,53 @@ does not have the image fetches it by that digest first. It writes
 `result.json`, the job summary and the run folders for upload, and exits 0 for every outcome
 except an internal error. It opens no pull request.
 
+**A build in the copy, for `prove` and `prove-loop` (TypeScript/JavaScript).** `--setup` runs once in
+the checkout, before the isolated copies are made, so a fault applied to a copy's source is never
+built. A test that imports built files (`dist/`) then runs the original code and the result reads
+"not exercised". `--build '<plain words>'` (or `proof.build` in `.orangepro/config.json`, which
+auto-prove also reads) runs the build inside each isolated copy: the original as it is, the faulty
+one after the fault, each before its test. Nothing goes through a shell. A build that fails, or runs
+past `--build-timeout-ms` (default 300000), makes the proof unrunnable with that reason. When a test
+never ran the function and no build was named, `opro prove` prints a hint saying so.
+
+**A workspace, and a build after a change.** A repository of several packages often has a
+`node_modules` in each package and tests that import a sibling's built files.
+- Every `node_modules` folder of the checkout (the root's and each package's own) is mounted
+  read-only at its own place in every copy. One that is a link to somewhere outside the checkout
+  is refused.
+- When the fixture names the repository's build (`commands.build`, plain words: a package manager
+  by name, such as `pnpm build`, or a command installed in `node_modules/.bin`), it runs inside
+  each copy, in the container with the network off, before that copy's first stage and again after
+  every change OrangePro makes to the target file there (the fault, the marked copy, verify-test's
+  text controls and restore). Only then is the copy writable; what the build writes is thrown away
+  with the copy.
+- Each build is its own stage (`build_<stage>`), with its time in the stage file and in the
+  result's `builds` list. A build that fails gives `blocked (build_failed)`; one that runs past
+  its limit (`limits.build_deadline_seconds`, else the stage limit) gives `blocked
+  (build_timeout)`. No test stage runs after either.
+- The package manager the install stage ran (pnpm, yarn) is kept inside the checkout's
+  `node_modules` and offered to every stage by name, with no network, so a build that calls it
+  works. Those stages also find the project's own installed tools by name (`node_modules/.bin`, last
+  on `PATH`, after the system's), as a test started through the manager would.
+- With a build named, "fault line run by the selected tests" always comes from the marked copy,
+  which is built like any other: coverage of the source file does not see a test that runs built
+  files.
+- **Tests the repository itself skips.** A whole-suite claim is judged against the counts the
+  fixture records (`baseline.passing` and `baseline.pending`) and says them: "The whole existing
+  suite (806 run, 2 skipped, as recorded in the fixture) passed …". A fault run that skips more
+  tests than recorded gives no whole-suite claim. Selected test files may still skip none.
+  In a selected file, the repository's own skipped tests are allowed when exactly the same ones are
+  skipped on the original and on the fault; the sentence then says how many ran and how many are
+  skipped. A test that ran on the original and is skipped on the fault gives no claim. The result
+  (`skipped_tests`) and the receipt name every skipped test.
+- **Plain variables from the fixture.** `environment.variables` gives every stage plain, non-secret
+  variables a repository's tests need (a git identity for tests that make commits, say). A name is
+  refused when it holds KEY, TOKEN, SECRET, PASSWORD, AUTH or CREDENTIAL anywhere (`API_KEY`,
+  `APIKEY`, `ACCESSTOKEN`, `OAUTH`). The only exceptions are exactly `GIT_AUTHOR_NAME`,
+  `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`. Also refused: a variable the stage
+  sets itself (`HOME`, `PATH`, `NODE_OPTIONS`, …). Values are one plain line. They are part of the
+  fixture's hash, recorded in the run profile, and listed in the receipt.
+
 **Which package manager.** The first word of the fixture's `commands.install` names it, and only a
 frozen install is run: `npm ci`, `pnpm install --frozen-lockfile`, or `yarn install --immutable`
 (`--frozen-lockfile` for yarn 1), each with plain flags only. A command that could change the

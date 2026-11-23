@@ -274,7 +274,7 @@ describe("opro actions-run — the post-merge step", { timeout: 300_000 }, () =>
     const seenA: Array<{ argv: string[]; env: Record<string, string> }> = [];
     const ra = run(a.w, a.profile, pushEvent(a.base, a.merged), { container: installer(a.w, seenA) });
     expect([ra.status, ra.reason]).toEqual(["verified_gap", null]);
-    expect(seenA).toEqual([{ argv: ["corepack", "pnpm@10.33.2", "install", "--frozen-lockfile", "--store-dir", "/tmp/opro-pnpm-store"], env: { COREPACK_HOME: "/tmp/opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" } }]);
+    expect(seenA).toEqual([{ argv: ["corepack", "pnpm@10.33.2", "install", "--frozen-lockfile", "--store-dir", "/tmp/opro-pnpm-store"], env: { COREPACK_HOME: "/work/repo/node_modules/.opro-corepack", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" } }]);
     expect(ra.install!.manager).toEqual({ name: "pnpm", version: "10.33.2", version_from: "fixture", argv: seenA[0]!.argv, lockfile: "pnpm-lock.yaml" });
 
     // No version anywhere, an install that could change the lockfile, and a lockfile name of another manager: refused, nothing run.
