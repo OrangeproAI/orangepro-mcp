@@ -1,4 +1,4 @@
-import { ConfirmedCoverageByLayer, DenominatorComposition, GraphNode, LocalGraph, TestLayer } from "../graph/ontology.js";
+import { ConfirmationPartial, ConfirmedCoverageByLayer, DenominatorComposition, GraphNode, LocalGraph, TestLayer } from "../graph/ontology.js";
 import { denominatorComposition, isDenominatorEligible } from "../graph/factories.js";
 
 /**
@@ -34,6 +34,12 @@ const layerOf = (n: GraphNode | undefined): TestLayer => {
   const l = n && typeof n.properties.test_layer === "string" ? (n.properties.test_layer as string) : "";
   return (LAYER_PRECEDENCE as string[]).includes(l) ? (l as TestLayer) : "unknown";
 };
+
+/** The one sentence every output uses when test-link confirmation did not finish. */
+export function confirmationPartialLine(p: ConfirmationPartial): string {
+  const why = p.reason === "memory" ? "the run neared its memory limit" : p.reason === "file_limit" ? "ORANGEPRO_MAX_CONFIRM_FILES limited it" : "the check could not run on this project";
+  return `partial: test links confirmed for ${p.confirmed_functions} of ${p.total_functions} functions (${why}). The others may have tests this run did not check.`;
+}
 
 export function confirmedCoverageByLayer(graph: Pick<LocalGraph, "nodes" | "edges">): ConfirmedCoverageByLayer {
   const byId = new Map<string, GraphNode>();

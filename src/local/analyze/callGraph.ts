@@ -182,6 +182,62 @@ function collectDecls(node: ts.Node, out: Set<string>): void {
   });
 }
 
+/** Names set only as `exports.n` / `module.exports.n`: no import or module-level declaration binds them. */
+function exportOnlyNames(sf: ts.SourceFile): Set<string> {
+  const declared = new Set<string>();
+  const assigned = new Set<string>();
+  for (const st of sf.statements) {
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) declared.add(st.name.text);
+    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) collectBindingName(d.name, declared);
+    if (ts.isImportDeclaration(st) && st.importClause) {
+      const c = st.importClause;
+      if (c.name) declared.add(c.name.text);
+      if (c.namedBindings && ts.isNamespaceImport(c.namedBindings)) declared.add(c.namedBindings.name.text);
+      if (c.namedBindings && ts.isNamedImports(c.namedBindings)) for (const el of c.namedBindings.elements) declared.add(el.name.text);
+    }
+    if (ts.isImportEqualsDeclaration(st)) declared.add(st.name.text);
+    if (!ts.isExpressionStatement(st) || !ts.isBinaryExpression(st.expression) || st.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) continue;
+    const left = st.expression.left;
+    if (!ts.isPropertyAccessExpression(left) || !ts.isIdentifier(left.name)) continue;
+    const owner = left.expression;
+    if ((ts.isIdentifier(owner) && owner.text === "exports") || (ts.isPropertyAccessExpression(owner) && ts.isIdentifier(owner.expression) && owner.expression.text === "module" && owner.name.text === "exports")) assigned.add(left.name.text);
+  }
+  for (const n of declared) assigned.delete(n);
+  return assigned;
+}
+
+/**
+ * Module-level `exports.n = function …` and `module.exports.n = …` statements whose name
+ * is exact: assigned once in the file, and not also a module-level declaration.
+ */
+function soleExportAssignments(sf: ts.SourceFile): Map<ts.Node, { name: string; fn: ts.FunctionExpression | ts.ArrowFunction }> {
+  const declared = new Set<string>();
+  const byName = new Map<string, { node: ts.Node; fn: ts.FunctionExpression | ts.ArrowFunction | null }[]>();
+  for (const st of sf.statements) {
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) declared.add(st.name.text);
+    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) collectBindingName(d.name, declared);
+    if (!ts.isExpressionStatement(st) || !ts.isBinaryExpression(st.expression) || st.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) continue;
+    const left = st.expression.left;
+    if (!ts.isPropertyAccessExpression(left) || !ts.isIdentifier(left.name)) continue;
+    const owner = left.expression;
+    const isExports =
+      (ts.isIdentifier(owner) && owner.text === "exports") ||
+      (ts.isPropertyAccessExpression(owner) && ts.isIdentifier(owner.expression) && owner.expression.text === "module" && owner.name.text === "exports");
+    if (!isExports) continue;
+    const right = st.expression.right;
+    const fn = ts.isFunctionExpression(right) || ts.isArrowFunction(right) ? right : null;
+    const seen = byName.get(left.name.text) ?? [];
+    seen.push({ node: st, fn });
+    byName.set(left.name.text, seen);
+  }
+  const out = new Map<ts.Node, { name: string; fn: ts.FunctionExpression | ts.ArrowFunction }>();
+  for (const [name, seen] of byName) {
+    if (seen.length !== 1 || declared.has(name) || !seen[0]!.fn) continue;
+    out.set(seen[0]!.node, { name, fn: seen[0]!.fn });
+  }
+  return out;
+}
+
 function simpleTypeName(type: ts.TypeNode | undefined): string | null {
   if (!type || !ts.isTypeReferenceNode(type) || !ts.isIdentifier(type.typeName) || (type.typeArguments?.length ?? 0) > 0) return null;
   return type.typeName.text;
@@ -429,6 +485,7 @@ export function extractCalls(content: string, tsx: boolean, shapeCallers?: Shape
   let capped = false;
   const injectedFieldsByClass = collectInjectedFieldsByClass(sf);
   const moduleCollections = moduleCollectionBindings(sf);
+  const exportOnly = exportOnlyNames(sf);
   // Export-shape callers, bound by POSITION (the function node), never by name:
   // a literal property `list` is not a module binding, so only its own node may
   // speak as `list`.
@@ -465,6 +522,7 @@ export function extractCalls(content: string, tsx: boolean, shapeCallers?: Shape
     const e = node.expression;
     if (ts.isIdentifier(e)) {
       if (shadowed.has(e.text)) return; // a local binding shadows the callee
+      if (exportOnly.has(e.text)) return; // `exports.x = …` binds no name `x`: this call is some other x
       out.push({ caller, callee: e.text, via: "free" });
     } else if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.name)) {
       if (e.expression.kind === ts.SyntaxKind.ThisKeyword) {
@@ -502,6 +560,7 @@ export function extractCalls(content: string, tsx: boolean, shapeCallers?: Shape
   // A nested named declaration does not establish a caller; its calls are dropped
   // (under-emit; hard CALLS cannot guess). Anonymous closures still inherit the
   // enclosing caller — they have no name to impersonate.
+  const soleExports = soleExportAssignments(sf);
   const walk = (node: ts.Node, caller: string | null, shadowed: ReadonlySet<string>, thisExact: boolean, topLevel: boolean): void => {
     if (capped) return;
 
@@ -540,7 +599,12 @@ export function extractCalls(content: string, tsx: boolean, shapeCallers?: Shape
       return;
     }
     if (ts.isVariableStatement(node)) {
-      if (!topLevel) return; // nested/namespace const/let → drop (would impersonate an emitted symbol)
+      if (!topLevel) {
+        // The local's own name is never a caller, but what its initializer calls is the
+        // enclosing function's call. The local is in `shadowed`, so a call to it links nothing.
+        if (caller) for (const d of node.declarationList.declarations) if (d.initializer) walk(d.initializer, caller, shadowed, thisExact, false);
+        return;
+      }
       for (const d of node.declarationList.declarations) {
         if (ts.isIdentifier(d.name) && d.initializer) {
           const callerName = d.name.text;
@@ -569,6 +633,13 @@ export function extractCalls(content: string, tsx: boolean, shapeCallers?: Shape
       return;
     }
 
+    if (topLevel && ts.isExpressionStatement(node)) {
+      const assigned = soleExports.get(node);
+      if (assigned && !shapeByNode.has(assigned.fn)) {
+        walk(assigned.fn.body, assigned.name, extend(shadowed, assigned.fn), false, false);
+        return;
+      }
+    }
     if (caller && ts.isCallExpression(node)) recordCall(node, caller, shadowed, thisExact);
     ts.forEachChild(node, (c) => walk(c, caller, shadowed, thisExact, topLevel));
   };

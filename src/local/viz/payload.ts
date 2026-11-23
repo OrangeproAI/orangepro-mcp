@@ -219,13 +219,13 @@ export interface VizGap {
   partial_scan?: { files_not_analyzed: number; budget_ms: number };
   /** Set when static confirmation was limited because the full scan exceeded the confirmer budget. */
   proof_limited?: {
-    skipped_files_budget: number;
+    skipped_files_limit: number;
     scoped_by_risk?: {
       candidate_pairs: number;
       involved_files: number;
       risk_symbols: number;
       risk_symbol_limit: number;
-      file_budget: number;
+      file_limit: number;
     };
   };
 }
@@ -703,10 +703,10 @@ function buildGap(graph: LocalGraph, ledger?: Ledger): VizGap {
           }
         }
       : {}),
-    ...(graph.analysis?.confirmed_coverage && graph.analysis.confirmed_coverage.skipped_files_budget > 0
+    ...(graph.analysis?.confirmed_coverage && graph.analysis.confirmed_coverage.skipped_files_limit > 0
       ? {
           proof_limited: {
-            skipped_files_budget: graph.analysis.confirmed_coverage.skipped_files_budget,
+            skipped_files_limit: graph.analysis.confirmed_coverage.skipped_files_limit,
             ...(graph.analysis.confirmed_coverage.scoped_by_risk ? { scoped_by_risk: graph.analysis.confirmed_coverage.scoped_by_risk } : {})
           }
         }

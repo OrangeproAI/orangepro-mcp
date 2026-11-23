@@ -124,7 +124,8 @@ function patchGraph(
           proofEdges.filter((e) => e.relationship_type === "COVERS").length,
         attempted: next.analysis.confirmed_coverage?.attempted ?? 0,
         capped_downgrades: next.analysis.confirmed_coverage?.capped_downgrades ?? 0,
-        skipped_files_budget: next.analysis.confirmed_coverage?.skipped_files_budget ?? 0
+        ...(next.analysis.confirmed_coverage?.partial ? { partial: next.analysis.confirmed_coverage.partial } : {}),
+        skipped_files_limit: next.analysis.confirmed_coverage?.skipped_files_limit ?? 0
       },
       confirmed_by_layer: confirmedCoverageByLayer(next)
     };

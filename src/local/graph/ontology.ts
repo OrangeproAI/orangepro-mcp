@@ -591,6 +591,13 @@ export interface StructuralClustersMeta {
   clusters: StructuralCluster[];
 }
 
+/** How far an unfinished test-link confirmation got, and what stopped it. */
+export interface ConfirmationPartial {
+  confirmed_functions: number;
+  total_functions: number;
+  reason: "file_limit" | "memory" | "error";
+}
+
 /**
  * Structural confirmation outcome (Phase 4 / Gate 2). Confirmed pairs emit hard
  * TESTED_BY/COVERS edges; everything else stays a candidate. Surfaced so the
@@ -606,14 +613,16 @@ export interface ConfirmedCoverageMeta {
   /** Confirmed-by-rule but the impl symbol was capped out of the graph → downgraded to INFERRED (never COVERS-to-file). */
   capped_downgrades: number;
   /** When > 0, confirmation was skipped because this many files exceeded the confirmer budget (use --base / raise the cap). */
-  skipped_files_budget: number;
+  skipped_files_limit: number;
+  /** Set when confirmation did not finish: N of M functions had every test link checked. */
+  partial?: ConfirmationPartial;
   /** When present, the full confirmer exceeded budget but a risk-ranked subset still ran. */
   scoped_by_risk?: {
     candidate_pairs: number;
     involved_files: number;
     risk_symbols: number;
     risk_symbol_limit: number;
-    file_budget: number;
+    file_limit: number;
   };
 }
 

@@ -723,11 +723,11 @@ describe("viz payload (gap-first model)", () => {
   it("surfaces when hard proof was skipped by the confirmer budget", () => {
     const graph = emptyGraph([], {
       analysis: {
-        confirmed_coverage: { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 2154 }
+        confirmed_coverage: { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_limit: 2154 }
       } as LocalGraph["analysis"]
     });
     const { gap } = buildVizPayload(graph, scoreGraph(graph));
-    expect(gap.proof_limited).toEqual({ skipped_files_budget: 2154 });
+    expect(gap.proof_limited).toEqual({ skipped_files_limit: 2154 });
   });
 
   it("keeps the back-compat metadata payload (nodes/edges/meta) intact", () => {
@@ -797,7 +797,7 @@ describe("viz HTML (v4 gap-first port, self-contained + offline)", () => {
   it("warns when hard proof is limited because the confirmer budget was exceeded", () => {
     const graph = emptyGraph([], {
       analysis: {
-        confirmed_coverage: { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 2154 }
+        confirmed_coverage: { confirmed_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_limit: 2154 }
       } as LocalGraph["analysis"]
     });
     const html = renderVizHtml(buildVizPayload(graph, scoreGraph(graph)));
@@ -814,8 +814,8 @@ describe("viz HTML (v4 gap-first port, self-contained + offline)", () => {
           confirmed_pairs: 1,
           attempted: 2,
           capped_downgrades: 0,
-          skipped_files_budget: 2154,
-          scoped_by_risk: { candidate_pairs: 2, involved_files: 2, risk_symbols: 1, risk_symbol_limit: 500, file_budget: 2 }
+          skipped_files_limit: 2154,
+          scoped_by_risk: { candidate_pairs: 2, involved_files: 2, risk_symbols: 1, risk_symbol_limit: 500, file_limit: 2 }
         }
       } as LocalGraph["analysis"]
     });

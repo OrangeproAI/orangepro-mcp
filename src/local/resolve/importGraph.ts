@@ -64,6 +64,8 @@ export interface ImportEdge {
   importKind: ImportKind;
   /** Imported binding names (populated for static imports; empty otherwise). */
   bindings: ImportBinding[];
+  /** Exact names a module-level `require` binds; read only to resolve calls between functions. */
+  requireBindings?: ImportBinding[];
   resolved: boolean;
   target: string | null;
   targetRole: FileRole | null;
@@ -210,6 +212,8 @@ export interface ExtractedImport {
   kind: ImportKind;
   /** Imported binding names (populated for static `import`; empty otherwise). */
   bindings: ImportBinding[];
+  /** Exact names a module-level `require` binds; read only to resolve calls between functions. */
+  requireBindings?: ImportBinding[];
 }
 
 /**
@@ -248,6 +252,7 @@ export function extractImports(file: string): ExtractedImport[] {
 
   const moduleText = (node: ts.Expression | undefined): string | null =>
     node && ts.isStringLiteralLike(node) ? node.text : null;
+  const namedRequires = moduleRequireBindings(sourceFile);
 
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) {
@@ -269,7 +274,8 @@ export function extractImports(file: string): ExtractedImport[] {
       // TODO(low): a concatenated dynamic-import arg yields a phantom specifier; ignored.
       if (isDynamicImport || isRequire || isEsmock) {
         const specifier = moduleText(node.arguments[0]);
-        if (specifier !== null) imports.push({ specifier, kind: "runtime", bindings: [] });
+        const requireBindings = isRequire ? namedRequires.get(node) : undefined;
+        if (specifier !== null) imports.push({ specifier, kind: "runtime", bindings: [], ...(requireBindings ? { requireBindings } : {}) });
       }
     }
     ts.forEachChild(node, visit);
@@ -277,6 +283,55 @@ export function extractImports(file: string): ExtractedImport[] {
   visit(sourceFile);
 
   return imports;
+}
+
+/**
+ * Names bound by module-level `var a = require("x").a` and `const { a, b: c } = require("x")`,
+ * by the `require` call. A name declared twice or assigned again anywhere in the file is left
+ * out, and so is every name when the file declares its own `require`.
+ */
+function moduleRequireBindings(sf: ts.SourceFile): Map<ts.Node, ImportBinding[]> {
+  const isRequireCall = (e: ts.Expression): e is ts.CallExpression =>
+    ts.isCallExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "require" && e.arguments.length === 1 && ts.isStringLiteralLike(e.arguments[0]!);
+  const found: { call: ts.Node; binding: ImportBinding }[] = [];
+  const declared = new Map<string, number>();
+  const declare = (name: string): void => void declared.set(name, (declared.get(name) ?? 0) + 1);
+  const declareName = (n: ts.BindingName): void => {
+    if (ts.isIdentifier(n)) declare(n.text);
+    else for (const el of n.elements) if (ts.isBindingElement(el)) declareName(el.name);
+  };
+  for (const st of sf.statements) {
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) declare(st.name.text);
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      declareName(d.name);
+      const init = d.initializer;
+      if (!init) continue;
+      if (ts.isIdentifier(d.name) && ts.isPropertyAccessExpression(init) && ts.isIdentifier(init.name) && isRequireCall(init.expression)) {
+        found.push({ call: init.expression, binding: { local: d.name.text, imported: init.name.text } });
+      } else if (ts.isObjectBindingPattern(d.name) && isRequireCall(init)) {
+        for (const el of d.name.elements) {
+          if (el.dotDotDotToken || el.initializer || !ts.isIdentifier(el.name)) continue;
+          if (el.propertyName && !ts.isIdentifier(el.propertyName)) continue;
+          found.push({ call: init, binding: { local: el.name.text, imported: (el.propertyName ?? el.name).text } });
+        }
+      }
+    }
+  }
+  const out = new Map<ts.Node, ImportBinding[]>();
+  if (found.length === 0 || declared.has("require")) return out;
+  const assigned = new Set<string>();
+  const scan = (n: ts.Node): void => {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && ts.isIdentifier(n.left)) assigned.add(n.left.text);
+    if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && ts.isIdentifier(n.operand)) assigned.add(n.operand.text);
+    ts.forEachChild(n, scan);
+  };
+  scan(sf);
+  for (const { call, binding } of found) {
+    if (declared.get(binding.local) !== 1 || assigned.has(binding.local)) continue;
+    out.set(call, [...(out.get(call) ?? []), binding]);
+  }
+  return out;
 }
 
 /**
@@ -473,6 +528,7 @@ export function buildImportGraph(
         category,
         importKind: imp.kind,
         bindings: imp.bindings,
+        ...(imp.requireBindings ? { requireBindings: imp.requireBindings } : {}),
         resolved: r.resolved,
         target: r.resolvedFileName,
         targetRole: targetRoleOf(r.resolvedFileName),

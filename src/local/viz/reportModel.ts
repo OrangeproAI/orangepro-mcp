@@ -3,6 +3,7 @@ import type { AddonProvenance } from "../pluginApi.js";
 import { denominatorComposition } from "../graph/factories.js";
 import type { Ledger } from "../ledger.js";
 import { ANALYZER_VERSION } from "../provenance.js";
+import { confirmationPartialLine } from "../score/coverage.js";
 import { TEST_SUPPORT_RANKING_REASON_CODE } from "../score/rankEligibility.js";
 import { rankRiskGaps } from "../score/risk.js";
 import { BOILERPLATE_REASON, TRIVIAL_BODY_REASON } from "../analyze/boilerplate.js";
@@ -20,9 +21,9 @@ import { byHandCounts, type ByHandRun, type ReportByHand } from "./byHand.js";
  * `.orangepro/report-data.json`. A reuse run re-renders from this file without
  * analysing anything (R14 §5); bump REPORT_DATA_VERSION when its shape changes.
  */
-export const REPORT_DATA_VERSION = 8;
+export const REPORT_DATA_VERSION = 9;
 /** Bump when either renderer changes what it draws from the same data. */
-export const REPORT_RENDERER_VERSION = "r18.1";
+export const REPORT_RENDERER_VERSION = "r18.2";
 export const REPORT_DATA_FILE = "report-data.json";
 /** Rows the detailed report carries (filters and search run over these). */
 export const WORKLIST_LIMIT = 500;
@@ -65,6 +66,8 @@ export interface ReportModel {
   since: ReportSince;
   /** Set when test-support code is most of what OrangePro counts: the line both reports show. */
   testSupport?: { count: number; counted: number; text: string };
+  /** Set when test-link confirmation did not finish: the line both reports show. */
+  confirmationPartial?: { confirmed: number; total: number; text: string };
   noun: { plural: string; singular: string; title: string };
   history: { state: string; commits: number; days: number; complete: boolean };
   counts: {
@@ -395,6 +398,15 @@ export function buildReportModel(input: ReportModelInput): ReportModel {
     timeZone: current.timeZone,
     since: sinceLine(input.previous, current, input.runReason),
     ...testSupportNote(graph),
+    ...(graph.analysis?.confirmed_coverage?.partial
+      ? {
+          confirmationPartial: {
+            confirmed: graph.analysis.confirmed_coverage.partial.confirmed_functions,
+            total: graph.analysis.confirmed_coverage.partial.total_functions,
+            text: confirmationPartialLine(graph.analysis.confirmed_coverage.partial)
+          }
+        }
+      : {}),
     noun: input.noun,
     history: { state: prov.history, commits: prov.commitsScanned ?? 0, days, complete: prov.churnState === "complete" },
     counts: current.counts,

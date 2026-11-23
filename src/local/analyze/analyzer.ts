@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
-import { CandidateEdge, GraphEdge, GraphNode, LocalGraph, LOCAL_GRAPH_SCHEMA_VERSION, ManifestFileEntry, Provenance, SourceScope } from "../graph/ontology.js";
+import { CandidateEdge, ConfirmationPartial, GraphEdge, GraphNode, LocalGraph, LOCAL_GRAPH_SCHEMA_VERSION, ManifestFileEntry, Provenance, SourceScope } from "../graph/ontology.js";
 import { makeCandidateEdge, makeEdge, makeNode, makeProofEdges, makeTestCaseNode } from "../graph/factories.js";
 import { sendsHttpRequests } from "./httpTests.js";
 import { hashString } from "../util/hash.js";
@@ -76,7 +76,8 @@ function extractionBackend(language: string): string {
   return treeSitterReady(language) ? "ts" : "rx"; // tree-sitter AST vs regex fallback
 }
 import { ResolverCache } from "../resolve/resolverCache.js";
-import { repoRootOf, resolveSpecifier, workspacePackages, runConfirmer, type ConfirmCandidate } from "./confirm.js";
+import { confirmationPartialLine } from "../score/coverage.js";
+import { heapGuard, repoRootOf, resolveSpecifier, workspacePackages, runConfirmer, type ConfirmCandidate } from "./confirm.js";
 import { computeRouteLinks, type RouteLinkCounts } from "./routeLinks.js";
 import { reexportSpecifiers } from "./reexports.js";
 import { computeReceiverLinks, RECEIVER_CANDIDATE_REASON_PREFIX, type ReceiverCounts } from "./receiverTyping.js";
@@ -444,7 +445,7 @@ interface RiskScopedConfirmInput {
   edges: GraphEdge[];
   candidate_edges: CandidateEdge[];
   root: string;
-  confirmBudget: number;
+  confirmFileLimit: number;
   riskSymbolLimit: number;
   eligibleSymbolsByFile: Map<string, string[]>;
 }
@@ -496,7 +497,7 @@ function selectRiskScopedConfirmCandidates(input: RiskScopedConfirmInput): { can
     const next = new Set(involved);
     next.add(candidate.testAbs);
     next.add(candidate.implAbs);
-    if (next.size > input.confirmBudget) continue;
+    if (next.size > input.confirmFileLimit) continue;
     selected.push(candidate);
     involved.clear();
     for (const file of next) involved.add(file);
@@ -1515,6 +1516,12 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         let tm = typeBindingsByFile.get(fromRel);
         if (!tm) typeBindingsByFile.set(fromRel, (tm = new Map()));
         if (!tm.has(b.local)) tm.set(b.local, { imported: b.imported, targetRel, targetAbs });
+      }
+      // A `require` binding resolves calls only: it adds no import fact and no test link.
+      for (const b of e.requireBindings ?? []) {
+        let m = importBindingsByFile.get(fromRel);
+        if (!m) importBindingsByFile.set(fromRel, (m = new Map()));
+        if (!m.has(b.local)) m.set(b.local, { imported: b.imported, targetRel, targetAbs });
       }
       const pairKey = `${fromRel}|${targetRel}`;
       if (!seenImports.has(pairKey)) {
@@ -3043,7 +3050,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
   // barrel — which holds no LOCAL behavior symbols — is not confirmed here;
   // barrel-routed confirmation is a documented follow-up. Under-confirming is the
   // desired failure mode.)
-  let confirmedCoverage: { confirmed_pairs: number; associated_pairs?: number; attempted: number; capped_downgrades: number; skipped_files_budget: number } | undefined;
+  let confirmedCoverage: { confirmed_pairs: number; associated_pairs?: number; attempted: number; capped_downgrades: number; skipped_files_limit: number } | undefined;
   if (readContent && eligibleSymbolsByFile.size > 0) {
     const absByRel = new Map(resolveFiles.map((f) => [f.rel, f.abs]));
     const candidates: ConfirmCandidate[] = [];
@@ -3098,7 +3105,28 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         }
       }
     }
-    const confirmBudget = Math.max(1, Number(process.env.ORANGEPRO_MAX_CONFIRM_FILES) || 1500);
+    // No file limit unless one is asked for: a limit decides by rank which real links are never checked.
+    const confirmFileLimit = Math.max(1, Number(process.env.ORANGEPRO_MAX_CONFIRM_FILES) || Number.POSITIVE_INFINITY);
+    const heapFraction = Number(process.env.ORANGEPRO_CONFIRM_HEAP_FRACTION);
+    const partialOf = (ran: ConfirmCandidate[], reason: ConfirmationPartial["reason"]): ConfirmationPartial | undefined => {
+      const ranPairs = new Set(ran.map((c) => `${c.testRel}|${c.implRel}`));
+      const all = new Set<string>();
+      const unchecked = new Set<string>();
+      for (const c of candidates) {
+        for (const name of eligibleSymbolsByFile.get(c.implRel) ?? []) {
+          const id = `sym:${c.implRel}#${name}`;
+          all.add(id);
+          if (!ranPairs.has(`${c.testRel}|${c.implRel}`)) unchecked.add(id);
+        }
+      }
+      if (unchecked.size === 0) return undefined;
+      return { confirmed_functions: all.size - unchecked.size, total_functions: all.size, reason };
+    };
+    const withPartial = (partial: ConfirmationPartial | undefined): { partial?: ConfirmationPartial } => {
+      if (!partial) return {};
+      warnings.push(confirmationPartialLine(partial));
+      return { partial };
+    };
     const riskSymbolLimit = Math.max(1, Number(process.env.ORANGEPRO_CONFIRM_RISK_SYMBOLS) || DEFAULT_CONFIRM_RISK_SYMBOLS);
     const involved = new Set<string>();
     for (const c of candidates) {
@@ -3106,27 +3134,34 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       involved.add(c.implAbs);
     }
     if (candidates.length === 0) {
-      confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 0 };
+      confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_limit: 0 };
     } else try {
-      const scoped = involved.size > confirmBudget
+      const scoped = involved.size > confirmFileLimit
         ? selectRiskScopedConfirmCandidates({
             candidates,
             nodes,
             edges,
             candidate_edges,
             root,
-            confirmBudget,
+            confirmFileLimit,
             riskSymbolLimit,
             eligibleSymbolsByFile
           })
         : { candidates, riskSymbols: 0, involvedFiles: involved.size };
-      if (involved.size > confirmBudget && scoped.candidates.length === 0) {
-        confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: involved.size };
+      if (involved.size > confirmFileLimit && scoped.candidates.length === 0) {
+        confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_limit: involved.size };
+        Object.assign(confirmedCoverage, withPartial(partialOf([], "file_limit")));
         warnings.push(
-          `Static confirmation skipped: ${involved.size} files exceed the confirmer budget (${confirmBudget}), and no high-risk subset fit. Use \`--base <ref>\` for PR-scoped confirmation, or raise ORANGEPRO_MAX_CONFIRM_FILES.`
+          `Static confirmation skipped: ${involved.size} files exceed the confirmer file limit (${confirmFileLimit}), and no high-risk subset fit. Use \`--base <ref>\` for PR-scoped confirmation, or raise ORANGEPRO_MAX_CONFIRM_FILES.`
         );
       } else {
-        const result = runConfirmer({ candidates: scoped.candidates, symbolsByImpl: eligibleSymbolsByFile, existingSymIds: codeSymbolIds, anchorFile: root });
+        const result = runConfirmer({
+          candidates: scoped.candidates,
+          symbolsByImpl: eligibleSymbolsByFile,
+          existingSymIds: codeSymbolIds,
+          anchorFile: root,
+          shouldStop: heapGuard(heapFraction > 0 && heapFraction <= 1 ? heapFraction : 0.85)
+        });
         const proofVerifiedAt = scanStartMs;
         const seenEdge = new Set<string>();
         let confirmedPairs = 0;
@@ -3169,22 +3204,23 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           associated_pairs: associatedPairs,
           attempted: result.attempted,
           capped_downgrades: result.capped_downgrades,
-          skipped_files_budget: involved.size > confirmBudget ? involved.size : 0,
-          ...(involved.size > confirmBudget
+          skipped_files_limit: involved.size > confirmFileLimit ? involved.size : 0,
+          ...withPartial(partialOf(scoped.candidates.slice(0, result.completed), result.stopped ? "memory" : "file_limit")),
+          ...(involved.size > confirmFileLimit
             ? {
                 scoped_by_risk: {
                   candidate_pairs: scoped.candidates.length,
                   involved_files: scoped.involvedFiles,
                   risk_symbols: scoped.riskSymbols,
                   risk_symbol_limit: riskSymbolLimit,
-                  file_budget: confirmBudget
+                  file_limit: confirmFileLimit
                 }
               }
             : {})
         };
-        if (involved.size > confirmBudget) {
+        if (involved.size > confirmFileLimit) {
           warnings.push(
-            `Static confirmation scoped: ${involved.size} files exceed the confirmer budget (${confirmBudget}); ran ${scoped.candidates.length} candidate pair(s) from the top ${scoped.riskSymbols} risk-ranked symbol(s). Public Proven still requires dynamic targeted proof.`
+            `Static confirmation scoped: ${involved.size} files exceed the confirmer file limit (${confirmFileLimit}); ran ${scoped.candidates.length} candidate pair(s) from the top ${scoped.riskSymbols} risk-ranked symbol(s). Public Proven still requires dynamic targeted proof.`
           );
         }
       }
@@ -3193,7 +3229,8 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       // or a TS compiler-API edge must NEVER crash analyze. Degrade to
       // candidate-only coverage with a disclosure.
       const msg = err instanceof Error ? err.message : String(err);
-      confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_budget: 0 };
+      confirmedCoverage = { confirmed_pairs: 0, associated_pairs: 0, attempted: 0, capped_downgrades: 0, skipped_files_limit: 0 };
+      Object.assign(confirmedCoverage, withPartial(partialOf([], "error")));
       warnings.push(
         `Static confirmation skipped: the structural confirmer could not run on this project (${msg.slice(0, 160)}). Coverage is reported from candidate links only.`
       );
@@ -3325,7 +3362,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
       associated_pairs: confirmedCoverage?.associated_pairs ?? 0,
       attempted: (confirmedCoverage?.attempted ?? 0) + nonTsHardProofAttempted,
       capped_downgrades: confirmedCoverage?.capped_downgrades ?? 0,
-      skipped_files_budget: confirmedCoverage?.skipped_files_budget ?? 0
+      skipped_files_limit: confirmedCoverage?.skipped_files_limit ?? 0
     };
   }
 
