@@ -22,7 +22,9 @@ const VERB_PHRASE: Record<Verb, (n: number) => string> = {
 };
 
 export function sinceHtml(model: ReportModel): string {
-  const note = model.testSupport ? `<p class="since" style="margin-top:8px">${esc(model.testSupport.text)}</p>` : "";
+  const note =
+    (model.confirmationPartial ? `<p class="since" style="margin-top:8px"><b>${esc(model.confirmationPartial.text)}</b></p>` : "") +
+    (model.testSupport ? `<p class="since" style="margin-top:8px">${esc(model.testSupport.text)}</p>` : "");
   if (model.checked) return `<p class="since same">${esc(model.checked.text)}</p>${note}`;
   return `<p class="since${model.since.kind === "unchanged" ? " same" : ""}">${esc(model.since.text)}</p>${note}`;
 }

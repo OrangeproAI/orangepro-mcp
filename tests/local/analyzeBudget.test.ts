@@ -164,7 +164,7 @@ describe("confirmer file budget", () => {
     process.env.ORANGEPRO_CONFIRM_RISK_SYMBOLS = "3";
     try {
       const frag = analyzeRepo(root, { readContent: true });
-      expect(frag.analysis.confirmed_coverage?.skipped_files_budget).toBeGreaterThan(2);
+      expect(frag.analysis.confirmed_coverage?.skipped_files_limit).toBeGreaterThan(2);
       expect(frag.analysis.confirmed_coverage?.attempted).toBeGreaterThan(0);
       expect(frag.analysis.confirmed_coverage?.scoped_by_risk?.candidate_pairs).toBeGreaterThan(0);
       expect(frag.edges.some((e) => e.relationship_type === "COVERS" && e.to_external_id === "sym:src/api/handler.ts#handleLogin")).toBe(true);

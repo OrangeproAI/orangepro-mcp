@@ -142,7 +142,7 @@ function graph(): LocalGraph {
         code_symbols_total: 5,
         unattributed: 0
       },
-      confirmed_coverage: { confirmed_pairs: 1, attempted: 1, capped_downgrades: 0, skipped_files_budget: 0 },
+      confirmed_coverage: { confirmed_pairs: 1, attempted: 1, capped_downgrades: 0, skipped_files_limit: 0 },
       behavior_contracts: { total: 1, by_framework: { express: 1 }, by_kind: { http_endpoint: 1 }, handler_edges: 1 },
       flows: {
         method: "static_calls_weakest_link",

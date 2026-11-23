@@ -201,12 +201,12 @@ describe("call links for the newly visible functions", () => {
     const g = analyzeRepo(repo({ "index.js": ENTRY, "lib/kit.js": KIT, "lib/extras.js": "exports.pad = function (s) { return s + ' '; };\n" }, { name: "x", main: "index.js" }));
     const fromKit = calls(g).filter((c) => c.startsWith("lib/kit.js#"));
     expect(fromKit).toEqual([
+      "lib/kit.js#kit.append -> lib/kit.js#kit.size", // this.size() inside a local variable declaration
       "lib/kit.js#kit.enable -> lib/kit.js#kit.header", // this.set → alias of kit.header
       "lib/kit.js#kit.total -> lib/kit.js#kit.sum",
       "lib/kit.js#kit.touch -> lib/kit.js#kit.header",
       "lib/kit.js#kit.touch -> lib/kit.js#kit.size"
     ]);
-    // kit.append calls this.size() inside a local variable declaration: today's linker drops that call.
     // kit.later reaches this.size() only inside a nested function; kit.arrow has no `this` of its own.
   });
 
@@ -230,7 +230,7 @@ describe("call links for the newly visible functions", () => {
     expect(calls(g)).toEqual(["src/routes/items.js#count -> src/routes/items.js#pick"]);
   });
 
-  it("a function written `exports.name = function` still has no outgoing links", () => {
+  it("a bare call is not a call to a sibling `exports.name`, which binds no such name", () => {
     const g = analyzeRepo(repo({ "src/routes/a.js": "exports.run = function () { return stop(); };\nexports.stop = function () { return 1; };\n" }));
     expect(calls(g)).toEqual([]);
   });

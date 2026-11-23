@@ -159,13 +159,13 @@ function initViz() {
     proofBanner.style.display = 'block';
     if (proofLimited.scoped_by_risk) {
       proofBanner.textContent = 'HARD PROOF SCOPED — this full scan had '
-        + fmt(proofLimited.skipped_files_budget)
+        + fmt(proofLimited.skipped_files_limit)
         + ' confirmable files, above the confirmer budget. OrangePro ran a risk-ranked subset ('
         + fmt(proofLimited.scoped_by_risk.candidate_pairs)
         + ' candidate pair(s)); Proven is still a conservative lower bound. Linked tests are not proof. Use PR scope (--base <ref>) or raise ORANGEPRO_MAX_CONFIRM_FILES for the whole repo.';
     } else {
       proofBanner.textContent = 'HARD PROOF SKIPPED — this full scan exceeded the confirmer budget ('
-        + fmt(proofLimited.skipped_files_budget)
+        + fmt(proofLimited.skipped_files_limit)
         + ' files). Proven coverage is a conservative lower bound because that proof pass did not run. Linked tests are still shown, but they are not proof. Use PR scope (--base <ref>) or raise ORANGEPRO_MAX_CONFIRM_FILES.';
     }
   }

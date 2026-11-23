@@ -23,6 +23,8 @@
 
 import ts from "typescript";
 import path from "node:path";
+import v8 from "node:v8";
+import vm from "node:vm";
 import { readFileSync as fsRead, existsSync as fsExists } from "node:fs";
 import { loadTsConfigFor, resolveImport } from "../resolve/resolver.js";
 import { walkBarrel } from "../resolve/barrelWalker.js";
@@ -2451,6 +2453,33 @@ export interface ConfirmerInput {
   existingSymIds: Set<string>;
   /** Anchor file for tsconfig resolution (repo root or any in-tree file). */
   anchorFile: string;
+  /** Asked before each pair; true ends the run and keeps what was found. */
+  shouldStop?: () => boolean;
+}
+
+/**
+ * True once the heap stays above `fraction` of its limit after a full collection. Used heap alone
+ * counts garbage, so a collection runs first. Checked every 16 pairs. It cannot interrupt the
+ * compiler's own program build, which happens before the first pair.
+ */
+export function heapGuard(fraction: number): () => boolean {
+  let calls = 0;
+  const over = (): boolean => {
+    const h = v8.getHeapStatistics();
+    return h.used_heap_size > h.heap_size_limit * fraction;
+  };
+  return () => {
+    if (calls++ % 16 !== 0 || !over()) return false;
+    try {
+      v8.setFlagsFromString("--expose-gc");
+      const gc = vm.runInNewContext("gc") as unknown;
+      v8.setFlagsFromString("--no-expose-gc");
+      if (typeof gc === "function") gc();
+    } catch {
+      return true;
+    }
+    return over();
+  };
 }
 
 export interface ConfirmerOutput {
@@ -2461,6 +2490,10 @@ export interface ConfirmerOutput {
   attempted: number;
   /** Confirmed-by-rule but the impl symbol was capped out of the graph → downgraded to INFERRED. */
   capped_downgrades: number;
+  /** How many candidates, from the start of the list, were fully checked. */
+  completed: number;
+  /** True when `shouldStop` ended the run early. */
+  stopped: boolean;
 }
 
 // Workspace/alias resolution is useful for candidate linkage in TS monorepos,
@@ -2584,7 +2617,7 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
   const associations: ConfirmedEdge[] = [];
   let attempted = 0;
   let capped_downgrades = 0;
-  if (candidates.length === 0) return { confirmations, associations, attempted, capped_downgrades };
+  if (candidates.length === 0) return { confirmations, associations, attempted, capped_downgrades, completed: 0, stopped: false };
 
   const absFiles = new Set<string>();
   for (const c of candidates) {
@@ -2594,7 +2627,14 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
   const ctx = buildConfirmProgram([...absFiles], anchorFile);
 
   const seen = new Set<string>(); // dedup (testRel|symId)
+  let completed = 0;
+  let stopped = false;
   for (const c of candidates) {
+    if (input.shouldStop?.()) {
+      stopped = true;
+      break;
+    }
+    completed++;
     const names = symbolsByImpl.get(c.implRel);
     if (!names || names.length === 0) continue;
     const verdicts = confirmBehaviors(ctx, c.testAbs, c.implAbs, names);
@@ -2616,5 +2656,5 @@ export function runConfirmer(input: ConfirmerInput): ConfirmerOutput {
       else associations.push(edge);
     }
   }
-  return { confirmations, associations, attempted, capped_downgrades };
+  return { confirmations, associations, attempted, capped_downgrades, completed, stopped };
 }
