@@ -31,7 +31,7 @@ import { extractSymbolsWithMeta, extractTestNames, MAX_SYMBOLS_PER_FILE, type Ex
 import { extractTreeSitterStructure, extractTreeSitterSymbols, treeSitterReady, treeSitterStatus, type TreeSitterStructure } from "./treeSitter/engine.js";
 import { isTreeSitterLanguage } from "./treeSitter/languages.js";
 import { conventionSibling, isConventionLanguage } from "./linkage/conventions.js";
-import { isBoilerplateSymbol, BOILERPLATE_REASON, DOCUMENTED_PRIVATE_REASON, TRIVIAL_BODY_REASON } from "./boilerplate.js";
+import { isBoilerplateSymbol, BOILERPLATE_REASON, DOCUMENTED_PRIVATE_REASON, NOT_EXPORTED_REASON, TRIVIAL_BODY_REASON } from "./boilerplate.js";
 import { entryFileReexports } from "./entryReexports.js";
 import type { NotSupportedEntry } from "./exportShapes.js";
 import {
@@ -62,7 +62,7 @@ function extractFileSymbols(content: string, language: string): SymbolExtraction
   if (isTreeSitterLanguage(language) && treeSitterReady(language)) {
     return extractTreeSitterSymbols(content, language);
   }
-  return extractSymbolsWithMeta(content, language);
+  return extractSymbolsWithMeta(content, language, { helpers: true });
 }
 
 /**
@@ -1136,7 +1136,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
               : ((sym.aliases ?? []).map((alias) => behaviorSurfaceReason(file.relPath, alias, sym.member_of)).find((reason) => reason !== null) ?? null);
             const surfaceReason = base.surfaceReason ?? aliasReason;
             const publicApiEntry = !base.surfaceExclusionReason && publicEntryFiles.has(file.relPath);
-            const isPublic = base.cliDenominatorOverride || surfaceReason !== null || publicApiEntry;
+            const isPublic = sym.seen_by !== "local_helper" && (base.cliDenominatorOverride || surfaceReason !== null || publicApiEntry);
             // Already visible and still not public: 0.2.58's result stands, reason included.
             if (sym.seen_by === undefined && !isPublic) continue;
             const documentedPrivate = sym.documented_private === true;
@@ -1182,7 +1182,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
             const target = gated.candidate ? passThroughTarget(sym) : null;
             const passesStraightOn = target !== null && target !== sym.name && countedBeforePassThrough(target);
             const base = baseByName.get(sym.name);
-            const reasons = [
+            const reasons = sym.seen_by === "local_helper" ? ["not_exported"] : [
               ...(gated.documentedPrivate ? ["documented_private"] : []),
               ...(gated.trivial || passesStraightOn ? ["trivial_body"] : []),
               ...(gated.isPublic ? [] : [base?.surfaceExclusionReason ? "infra_behavior_surface" : "not_entry_point_adjacent"])
@@ -1196,6 +1196,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           }
         }
         for (const sym of extraction.symbols) {
+          if (sym.seen_by === "local_helper" && symbolCount >= maxSymbols) continue; // never reported as a lost public symbol
           if (symbolCount >= maxSymbols) {
             symbolCapHit = true;
             warnings.push(`Symbol extraction cap (${maxSymbols}) reached; some code symbols omitted. Raise ORANGEPRO_MAX_SYMBOLS to include them.`);
@@ -1214,7 +1215,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           const notEntryPointAdjacent = callableBehaviorCandidate && !eligible && !behaviorSurfaceExcluded;
           const rankingExclusion = builtInRankExclusion(file.relPath) ?? importExclusion;
           const pythonRankingExclusion = treeStructure?.pythonRankingExclusions?.find((candidate) => candidate.symbol === sym.name);
-          if (isBoilerplate || gateReasons[0] === "trivial_body") excludedBoilerplate++;
+          if (sym.seen_by !== "local_helper" && (isBoilerplate || gateReasons[0] === "trivial_body")) excludedBoilerplate++;
           nodes.push(
             makeNode({
               kind: "CodeSymbol",
@@ -1268,7 +1269,9 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
               provenance: prov(file.relPath),
               behavior_source: "code_export",
               denominator_eligible: eligible,
-              denominator_reason: isDts
+              denominator_reason: sym.seen_by === "local_helper"
+                ? NOT_EXPORTED_REASON
+                : isDts
                 ? "Type declaration (.d.ts/.d.mts/.d.cts) — no runtime behavior to test."
                 : isInfra
                   ? NON_PRODUCT_REASON
@@ -1316,12 +1319,12 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
           }
           // Proof-edge eligibility: eligible OR not_entry_point_adjacent, but never infra
           // (behaviorSurfaceExcluded). Denominator-neutral — only the non-TS proof resolvers read it.
-          if (eligible || notEntryPointAdjacent) {
+          if ((eligible || notEntryPointAdjacent) && sym.seen_by !== "local_helper") {
             const list = proofEligibleSymbolsByFile.get(file.relPath);
             if (list) list.push(sym.name);
             else proofEligibleSymbolsByFile.set(file.relPath, [sym.name]);
           }
-          symbolCount++;
+          if (sym.seen_by !== "local_helper") symbolCount++;
         }
         const contractsForFile = behaviorContractsByFile.get(file.relPath) ?? [];
         const fileSymbols = symbolsByFile.get(file.relPath) ?? new Set<string>();
@@ -1587,6 +1590,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
     const seenCalls = new Set<string>();
     const seenFrameworkDerivedCalls = new Set<string>();
     const seenMay = new Set<string>();
+    const localHelperIds = new Set(nodes.filter((n) => n.properties.seen_by === "local_helper").map((n) => n.external_id));
     const emitCall = (callerId: string, calleeId: string, fromRel: string, callVia: string, resolution: string): void => {
       if (callerId === calleeId) return; // skip self-recursion edges
       const key = `${callerId}|${calleeId}`;
@@ -1596,7 +1600,7 @@ export function analyzeRepo(root: string, opts: AnalyzeOptions = {}): AnalyzeFra
         makeEdge({
           from_external_id: callerId,
           to_external_id: calleeId,
-          relationship_type: "CALLS",
+          relationship_type: localHelperIds.has(callerId) || localHelperIds.has(calleeId) ? "HELPER_CALLS" : "CALLS",
           evidence_strength: "hard",
           review_status: "auto_detected",
           provenance: prov(fromRel),

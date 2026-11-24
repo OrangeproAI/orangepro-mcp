@@ -212,7 +212,7 @@ function matchesProvableLanguageShape(node: GraphNode, opts?: { allowGoMethod?: 
 function isEligibleHardExistingTarget(node: GraphNode | undefined): boolean {
   if (!node) return false;
   const reasonCode = node.properties.denominator_reason_code;
-  if (reasonCode === "infra_behavior_surface" || reasonCode === "trivial_body" || reasonCode === "documented_private") return false;
+  if (reasonCode === "infra_behavior_surface" || reasonCode === "trivial_body" || reasonCode === "documented_private" || node.properties.seen_by === "local_helper") return false;
   return matchesProvableLanguageShape(node, { allowGoMethod: true });
 }
 

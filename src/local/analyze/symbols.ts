@@ -337,7 +337,7 @@ function isComponentLikeConst(name: string, init: ts.Expression | undefined): bo
  * never sees the filename; call-wrapped factories (memo(() => {}), styled(...))
  * stay non-callable, which is the documented v1 policy.
  */
-function collectTsJsExports(content: string): TsJsExtraction {
+function collectTsJsExports(content: string, opts: { helpers?: boolean } = {}): TsJsExtraction {
   const acc = new Map<string, TsJsSymbol>();
   const nodeLines = (sf: ts.SourceFile, node: ts.Node): Pick<ExtractedSymbol, "start_line" | "end_line"> => ({
     start_line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
@@ -644,6 +644,24 @@ function collectTsJsExports(content: string): TsJsExtraction {
       }
     });
   }
+  // Module-level functions no export reaches. Added last, so they never displace a public symbol.
+  // Only for the graph: asking what a file exports never returns them.
+  // A name the export rules refused (it also names an exported member) stays out: its id would be ambiguous.
+  const refusedNames = new Set(notSupported.map((entry) => entry.name));
+  for (const stmt of opts.helpers ? sf.statements : []) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasExportModifier(stmt) && !acc.has(stmt.name.text) && !refusedNames.has(stmt.name.text)) {
+      const traits = traitsOf({ sf, anchor: stmt, fn: stmt });
+      acc.set(stmt.name.text, { kind: "function", callable: false, ...nodeLines(sf, stmt), seen_by: "local_helper", ...(traits ? { traits } : {}), site: { sf, anchor: stmt, fn: stmt } });
+    } else if (ts.isVariableStatement(stmt) && !hasExportModifier(stmt)) {
+      for (const d of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name) || !d.initializer || acc.has(d.name.text) || refusedNames.has(d.name.text)) continue;
+        const init = unwrapInitializer(d.initializer);
+        if (!ts.isArrowFunction(init) && !ts.isFunctionExpression(init)) continue;
+        const traits = traitsOf({ sf, anchor: stmt, fn: init });
+        acc.set(d.name.text, { kind: "const", callable: true, ...nodeLines(sf, d), seen_by: "local_helper", ...(traits ? { traits } : {}), site: { sf, anchor: stmt, fn: init } });
+      }
+    }
+  }
   return { symbols: acc, notSupported };
 }
 
@@ -679,7 +697,7 @@ function tsJsExtras(sym: TsJsSymbol): Partial<ExtractedSymbol> {
  * runs, so another language's regex can never mint phantom symbols from a
  * comment or string. Defaults to TS/JS when language is omitted.
  */
-export function extractSymbolsWithMeta(content: string, language?: string): SymbolExtraction {
+export function extractSymbolsWithMeta(content: string, language?: string, opts: { helpers?: boolean } = {}): SymbolExtraction {
   const byName = new Map<string, ExtractedSymbol>();
   let truncated = false;
   let notSupported: NotSupportedEntry[] = [];
@@ -700,7 +718,7 @@ export function extractSymbolsWithMeta(content: string, language?: string): Symb
       return;
     }
     if (byName.size >= MAX_SYMBOLS_PER_FILE) {
-      truncated = true;
+      if (extras?.seen_by !== "local_helper") truncated = true; // a helper past the limit hides no public function
       return;
     }
     const sym: ExtractedSymbol =
@@ -715,7 +733,7 @@ export function extractSymbolsWithMeta(content: string, language?: string): Symb
   if (family === "tsjs") {
     // TS/JS from the AST — comment/string-safe.
     if (TSJS_EXPORT_GATE_RE.test(content)) {
-      const extraction = collectTsJsExports(content);
+      const extraction = collectTsJsExports(content, opts);
       for (const [name, sym] of extraction.symbols) consider(name, sym.kind, sym.callable, sym.member_of, sym, tsJsExtras(sym));
       notSupported = extraction.notSupported;
     }
@@ -769,9 +787,9 @@ export interface FunctionSite {
  * `content`, re-derived from the source — so a caller can bind a symbol to its
  * bytes without trusting anything stored on a graph node.
  */
-export function listFunctionSites(content: string): { sites: FunctionSite[]; not_supported: NotSupportedEntry[] } {
+export function listFunctionSites(content: string, opts: { helpers?: boolean } = {}): { sites: FunctionSite[]; not_supported: NotSupportedEntry[] } {
   if (!TSJS_EXPORT_GATE_RE.test(content)) return { sites: [], not_supported: [] };
-  const extraction = collectTsJsExports(content);
+  const extraction = collectTsJsExports(content, opts);
   const sites: FunctionSite[] = [];
   for (const [name, sym] of extraction.symbols) {
     const site = sym.site;

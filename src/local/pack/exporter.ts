@@ -52,7 +52,7 @@ export function buildPack(
       source_upload_policy: graph.workspace.source_upload_policy
     },
     sources: graph.sources.map(toSource),
-    entities: graph.nodes.map(toEntity),
+    entities: graph.nodes.filter((node) => node.properties.seen_by !== "local_helper").map(toEntity),
     // IMPORTS edges are local resolver substrate (they feed coverage metrics and
     // the structural confirmer), not promotion evidence: at monorepo scale they
     // would dominate the pack for zero consumer value, so they stay local-only.
@@ -164,7 +164,7 @@ type ProofReviewStatus = Exclude<ReviewStatus, "ai_suggested">;
 type PackGraphEdge = GraphEdge & { evidence_strength: "hard" | "reviewed" };
 
 function isPackRelationshipEdge(edge: GraphEdge): edge is PackGraphEdge {
-  return edge.relationship_type !== "IMPORTS" && edge.evidence_strength !== "framework-derived";
+  return edge.relationship_type !== "IMPORTS" && edge.relationship_type !== "HELPER_CALLS" && edge.evidence_strength !== "framework-derived";
 }
 
 function proofReviewStatus(status: ReviewStatus): ProofReviewStatus {

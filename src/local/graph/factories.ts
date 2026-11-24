@@ -240,6 +240,7 @@ export function denominatorComposition(graph: Pick<LocalGraph, "nodes">): Denomi
   };
   for (const n of graph.nodes) {
     if (n.stale === true) continue; // deleted-file ghosts are not witnessable
+    if (n.properties.seen_by === "local_helper") continue; // in the graph to follow a change, not part of what was found to count
     if (n.kind === "CodeSymbol") comp.code_symbols_total++; // true "found" total (eligible + every excluded class)
     if (isDenominatorEligible(n)) {
       comp.total++;

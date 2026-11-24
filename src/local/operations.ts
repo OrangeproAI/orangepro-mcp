@@ -1136,13 +1136,13 @@ function viaHelperHolds(via: unknown, ctx: TargetRecordContext): boolean {
     return false;
   }
   if (!existsSync(helperAbs)) return false;
-  const helper = describeTarget(readFileSync(helperAbs), match[2]!);
+  const helper = describeTarget(readFileSync(helperAbs), match[2]!, { helpers: true });
   if (!helper.ok) return false;
   if (!isDeepStrictEqual(via.function, helper.target.function) || via.function_sha256 !== helper.target.function_sha256) return false;
   if (path.length < 2 || path.length > 3 || path[0] !== via.symbol_id || path[path.length - 1] !== ctx.target) return false;
   const hardCalls = new Set(
     ctx.graph.edges
-      .filter((edge) => edge.relationship_type === "CALLS" && edge.evidence_strength === "hard")
+      .filter((edge) => (edge.relationship_type === "CALLS" || edge.relationship_type === "HELPER_CALLS") && edge.evidence_strength === "hard")
       .map((edge) => `${edge.from_external_id}\u0000${edge.to_external_id}`)
   );
   return path.slice(1).every((caller, index) => hardCalls.has(`${caller}\u0000${path[index]}`));

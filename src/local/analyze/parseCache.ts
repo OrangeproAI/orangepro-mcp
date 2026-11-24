@@ -65,7 +65,7 @@ import { createRequire } from "node:module";
 // v20: TS/JS sees five more export shapes (export lists, prototype methods,
 // exported-object methods, object-literal exports, unnamed defaults) and
 // carries per-symbol body/doc traits; warm v19 entries lack all of them.
-export const PARSER_VERSION = 20;
+export const PARSER_VERSION = 21;
 
 /** Tool package version, folded into the cache guard so UPGRADES auto-invalidate
  *  the cache — bumping PARSER_VERSION by hand is a discipline; this is a lock.
@@ -81,7 +81,7 @@ export const TOOL_VERSION: string = (() => {
 })();
 
 const SYMBOL_KINDS = new Set(["function", "class", "const", "method"]);
-const SEEN_BY = new Set(["export_list", "prototype_method", "exported_object_method", "object_literal_export", "unnamed_default_export"]);
+const SEEN_BY = new Set(["local_helper", "export_list", "prototype_method", "exported_object_method", "object_literal_export", "unnamed_default_export"]);
 const SHAPE_FORMS = new Set(["export_list", "prototype", "member", "literal_inline", "literal_reference", "unnamed_default"]);
 const TRIVIAL_BODIES = new Set(["empty", "stored_value", "stores_parameter"]);
 

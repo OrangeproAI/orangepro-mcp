@@ -16,7 +16,9 @@ export type SeenBy =
   | "prototype_method"
   | "exported_object_method"
   | "object_literal_export"
-  | "unnamed_default_export";
+  | "unnamed_default_export"
+  /** A module-level function no export reaches: in the graph to follow a change, never counted. */
+  | "local_helper";
 
 export type ShapeForm = "export_list" | "prototype" | "member" | "literal_inline" | "literal_reference" | "unnamed_default";
 

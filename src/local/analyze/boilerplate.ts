@@ -18,6 +18,7 @@ export const BOILERPLATE_REASON = "Trivial accessor/object method — excluded f
 // A trivial body is disclosed together with the accessors above.
 export const TRIVIAL_BODY_REASON =
   "Trivial body (empty, returns or stores a value unchanged, or passes its own arguments straight to a counted function) — kept for grounding, excluded from the behavior denominator.";
+export const NOT_EXPORTED_REASON = "Module-level function no export reaches — kept in the graph to follow a change to its public callers, never counted.";
 export const DOCUMENTED_PRIVATE_REASON = "Documented private/internal by its own JSDoc — kept for grounding, excluded from the behavior denominator.";
 
 /**
