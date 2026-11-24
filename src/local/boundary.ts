@@ -69,6 +69,11 @@ export interface ContainerRequest {
    * per-stage report key: it is in no argument, variable, mount or file. Never recorded.
    */
   input?: string;
+  /**
+   * For a stage whose runner writes one signed report frame on stdout: when the process is still alive this long
+   * after a complete frame has gone by, the container is stopped. A process that exits by itself is untouched.
+   */
+  stopAfterReportMs?: number;
 }
 
 export interface ContainerResult {
@@ -82,6 +87,8 @@ export interface ContainerResult {
   dockerArgv: string[];
   /** false when the container could not be confirmed gone after its deadline: nothing after it can be trusted. */
   stopped: boolean;
+  /** The process was still alive after its complete report and was stopped (never set for one that exited by itself). */
+  stoppedAfterReport?: boolean;
 }
 
 /** Runs one command in the boundary. Injectable, so tests can run synthetic fixtures without docker. */
@@ -183,6 +190,38 @@ export function resolveDocker(env: NodeJS.ProcessEnv = process.env): string | nu
   return null;
 }
 
+/**
+ * The helper a report-writing stage runs through: `node -e <this> <docker> <name> <grace ms> <docker run args…>`.
+ * It passes stdin, stdout and stderr through unchanged, and when a complete report frame has gone by on stdout
+ * and the process is still alive after the grace time, it stops the container. It never reads the report: the
+ * caller verifies the frame's signature. Its last word goes to descriptor 3 as one JSON line.
+ */
+export const STOP_AFTER_REPORT_HELPER = [
+  'const { spawn, spawnSync } = require("node:child_process");',
+  'const { writeSync } = require("node:fs");',
+  "const [docker, name, grace, ...args] = process.argv.slice(1);",
+  'const child = spawn(docker, args, { stdio: ["pipe", "pipe", "pipe"] });',
+  "let state = 0, tail = \"\", stopped = false, timer = null, done = false;",
+  'const START = "<<OPRO-FRAME:v1:";',
+  "const finish = (out) => { if (done) return; done = true; if (timer) clearTimeout(timer); try { writeSync(3, JSON.stringify(out) + \"\\n\"); } catch {} };",
+  "const scan = (chunk) => {",
+  '  let text = tail + chunk.toString("latin1");',
+  "  if (state === 0) { const at = text.indexOf(START); if (at >= 0) { state = 1; text = text.slice(at + START.length); } }",
+  '  if (state === 1 && text.indexOf(">>") >= 0) {',
+  "    state = 2;",
+  '    timer = setTimeout(() => { stopped = true; spawnSync(docker, ["kill", name], { stdio: "ignore", timeout: 30000 }); }, Number(grace));',
+  "  }",
+  "  tail = text.slice(-START.length);",
+  "};",
+  'child.on("error", (error) => { finish({ error: String(error && error.code) }); });',
+  'child.stdout.on("data", (chunk) => { process.stdout.write(chunk); scan(chunk); });',
+  'child.stderr.on("data", (chunk) => { process.stderr.write(chunk); });',
+  'child.stdin.on("error", () => {});',
+  "process.stdin.pipe(child.stdin);",
+  'child.on("close", (code, signal) => { finish({ exitCode: code, signal: signal, stoppedAfterReport: stopped }); });',
+  ""
+].join("\n");
+
 function sleepMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -205,18 +244,43 @@ export function dockerExecutor(dockerBin: string | null = resolveDocker()): Cont
       return { exitCode: null, signal: null, timedOut: false, stdout: "", stderr: "docker was not found on a trusted PATH (set ORANGEPRO_DOCKER to its absolute path).", durationMs: 0, dockerArgv, stopped: true };
     }
     const started = Date.now();
-    const child = spawnSync(dockerBin, dockerRunArgs(name, request), {
+    const viaHelper = request.stopAfterReportMs !== undefined;
+    const runArgs = dockerRunArgs(name, request);
+    const child = spawnSync(viaHelper ? process.execPath : dockerBin, viaHelper ? ["-e", STOP_AFTER_REPORT_HELPER, dockerBin, name, String(request.stopAfterReportMs), ...runArgs] : runArgs, {
       encoding: "utf8",
       timeout: request.deadlineMs,
       killSignal: "SIGKILL",
       maxBuffer: 64 * 1024 * 1024,
-      ...(request.input !== undefined ? { input: request.input } : {}),
-      stdio: [request.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"]
+      // The helper always has a stdin to pass on; with no input it gets an empty one.
+      ...(request.input !== undefined ? { input: request.input } : viaHelper ? { input: "" } : {}),
+      stdio: viaHelper ? ["pipe", "pipe", "pipe", "pipe"] : [request.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"]
     });
-    const code = (child.error as NodeJS.ErrnoException | undefined)?.code;
+    let code = (child.error as NodeJS.ErrnoException | undefined)?.code;
     const timedOut = code === "ETIMEDOUT";
+    // The helper's last word: how the docker client ended, and whether the container was stopped after its report.
+    let exitCode = child.status;
+    let signal: string | null = child.signal;
+    let stoppedAfterReport = false;
+    if (viaHelper && !timedOut) {
+      let last: { exitCode?: number | null; signal?: string | null; stoppedAfterReport?: boolean; error?: string } | null = null;
+      try {
+        last = JSON.parse(String((child.output as unknown as Array<string | null>)[3] ?? "").trim());
+      } catch {
+        last = null;
+      }
+      if (last && last.error === undefined) {
+        exitCode = typeof last.exitCode === "number" ? last.exitCode : null;
+        signal = typeof last.signal === "string" ? last.signal : null;
+        stoppedAfterReport = last.stoppedAfterReport === true;
+      } else {
+        // The helper could not start docker, or ended without a word: nothing it printed is trusted as a clean run.
+        exitCode = null;
+        signal = null;
+        code = last?.error === "ENOENT" ? "ENOENT" : (code ?? "EHELPER");
+      }
+    }
     let stopped = true;
-    if (timedOut || (child.error && code !== "ENOENT")) {
+    if (timedOut || stoppedAfterReport || (code !== undefined && code !== "ENOENT")) {
       spawnSync(dockerBin, ["kill", name], { stdio: "ignore", timeout: 30_000 });
       stopped = false;
       for (let attempt = 0; attempt < 10 && !stopped; attempt++) {
@@ -226,9 +290,10 @@ export function dockerExecutor(dockerBin: string | null = resolveDocker()): Cont
       }
     }
     return {
-      exitCode: child.status,
-      signal: child.signal,
+      exitCode,
+      signal,
       timedOut,
+      ...(stoppedAfterReport ? { stoppedAfterReport: true } : {}),
       stdout: child.stdout ?? "",
       stderr: code === "ENOENT" ? `${dockerBin} could not be started.` : (child.stderr ?? ""),
       durationMs: Date.now() - started,

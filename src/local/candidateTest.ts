@@ -1006,6 +1006,8 @@ export function issueOf(stage: StageObservation | undefined): string | null {
   if (stage.boundary.failures.length > 0) return "boundary_check_failed";
   if (!stage.stopped) return "container_not_stopped";
   if (stage.timed_out) return "timeout";
+  // Stopped after its report (verdict rules v1): the process did not end by itself, so the stage is never a clean one here.
+  if (stage.process_did_not_exit) return "process_did_not_exit";
   if (stage.output_problems.some((problem) => problem.startsWith(REPORT_TAMPERED))) return REPORT_TAMPERED;
   // The repository's build did not finish in this stage's copy, so the stage did not run.
   const buildProblem = stage.output_problems.find((problem) => problem.startsWith("build_"));

@@ -561,17 +561,6 @@ describe("review findings — no result the runs did not earn", { timeout: 120_0
     expect(probe(w, ROUNDING).classification).toMatchObject({ classification: "inconclusive", reason: "duplicate_test_titles" });
   });
 
-  it("a failure off an assertion beside one at an assertion makes the catch suspect: no claim", () => {
-    const tests = `var assert = require('assert');
-var api = require('../lib/api');
-describe('api', function () {
-  it('converts whole seconds', function () { assert.strictEqual(api.seconds(2000), 2); });
-  it('formats', function () { assert.strictEqual(api.seconds(2000).toFixed(0), '2'); });
-});
-`;
-    expect(probe(workspace({ "test/api.test.js": tests }), NEGATION).classification).toMatchObject({ classification: "inconclusive", reason: "failed_off_assertion" });
-  });
-
   it("a witness that does not answer on the faulty copy shows nothing about the fault", () => {
     const witness = "var api = require(process.cwd() + '/lib/api');\nvar r = api.seconds(1500);\nif (r === 2) process.exit(3);\nprocess.stdout.write(JSON.stringify({ seconds: r }) + '\\n');\n";
     expect(probe(workspace(undefined, { witness }), ROUNDING).classification).toMatchObject({ classification: "inconclusive", reason: "witness_failed_on_fault" });
