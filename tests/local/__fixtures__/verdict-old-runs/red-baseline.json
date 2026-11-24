@@ -1,0 +1,25 @@
+{
+ "name": "red-baseline",
+ "judged_by": "main 75eb947 (0.2.63-demo.14), before the verdict rules",
+ "judge": {
+  "parses": true,
+  "full_suite_requested": false,
+  "checkout_unchanged": true,
+  "selected_files": [
+   "test/api.test.js"
+  ],
+  "baseline_passing": 1,
+  "baseline_pending": 0
+ },
+ "statement": {
+  "symbolName": "api.seconds",
+  "changedBy": "PR #7",
+  "operatorDescription": "! removed",
+  "line": 11,
+  "assisted": false
+ },
+ "stage_files": {
+  "stages/original_selected.json": "{\"argv\":[\"node\",\"node_modules/mocha/bin/mocha.js\",\"--no-config\",\"--no-package\",\"--check-leaks\",\"--reporter\",\"/opro/mocha-reporter.cjs\",\"test/api.test.js\"],\"boundary\":{\"failures\":[],\"report\":{\"docker_socket_visible\":false,\"effective_capabilities\":\"0000000000000000\",\"env_names\":[\"CI\",\"HOME\",\"NODE_ENV\",\"NODE_V8_COVERAGE\",\"OPRO_DYNAMIC_PROOF_FRAME\",\"npm_config_audit\",\"npm_config_cache\",\"npm_config_fund\",\"npm_config_update_notifier\",\"PATH\"],\"host_backed_mounts\":[\"/opro/mocha-reporter.cjs\",\"/opro/witness.cjs\",\"/work/out\",\"/work/repo\",\"/work/repo/node_modules\"],\"host_users_dir_visible\":false,\"network_reachable\":false,\"no_new_privileges\":\"1\",\"root_writable\":false,\"tmp_writable\":true,\"uid\":1000,\"writable\":{\"/opro/mocha-reporter.cjs\":false,\"/opro/witness.cjs\":false,\"/work/out\":true,\"/work/repo\":false,\"/work/repo/node_modules\":false}}},\"copy\":\"original\",\"copy_target_sha256\":\"68087abed40d73c2c6ab19b62b4f08ca0fa16d7e095368adbae4f6dc70e55b15\",\"coverage\":{\"bytes\":597,\"path\":\"coverage/original_selected.json\",\"sha256\":\"4957fcc7518c9ebc46bacc2ea31a1846a9efdac38ebdb4d75974e78c4ed2429e\"},\"cwd\":\"/work/repo\",\"docker_argv\":[\"docker\",\"run\",\"<host test double>\"],\"duration_ms\":71,\"env_names\":[\"CI\",\"HOME\",\"NODE_ENV\",\"NODE_V8_COVERAGE\",\"OPRO_DYNAMIC_PROOF_FRAME\",\"npm_config_audit\",\"npm_config_cache\",\"npm_config_fund\",\"npm_config_update_notifier\"],\"exit_code\":1,\"fault_record_sha256\":null,\"fault_span_count\":1,\"output\":null,\"output_problems\":[],\"report\":{\"bytes\":1030,\"path\":\"reports/original_selected.json\",\"sha256\":\"73150f1a9c71b7de3483f79548f0cb964848bac2b224bfc0a84af2000de86326\"},\"run_id\":\"run_test_10\",\"run_profile_sha256\":\"9451408de6529779c511377ac688d0b85b56270cf31a0fa86452a4d950ce30b7\",\"signal\":null,\"stage\":\"original_selected\",\"started_at\":\"2026-10-21T00:00:00Z\",\"stderr\":{\"bytes\":0,\"path\":\"logs/original_selected.stderr.log\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"stdout\":{\"bytes\":1461,\"path\":\"logs/original_selected.stdout.log\",\"sha256\":\"53faa4a648b051e006e110ca0c2398e7614aaa10c18e52937b3a3844d8f45ce3\"},\"stopped\":true,\"tests\":{\"executed\":1,\"failed\":1,\"hook_failures\":0,\"observed\":[{\"duration_ms\":0,\"failure\":{\"at_assertion\":true,\"first_frame\":\"at Context.<anonymous> (test/api.test.js:4:39)\",\"message\":\"Expected values to be strictly equal:\",\"name\":\"AssertionError\"},\"file\":\"test/api.test.js\",\"full_title\":\"api is wrong\",\"hook\":false,\"state\":\"failed\"}],\"passed\":0,\"pending\":0,\"runner_totals\":{\"failures\":1,\"passes\":0,\"pending\":0,\"tests\":1}},\"timed_out\":false,\"version\":\"orangepro.stage_observation.v1\"}\n"
+ },
+ "classification_json": "{\"assisted\":false,\"behavioral_difference\":{\"fault\":null,\"original\":null,\"status\":\"unknown\"},\"caught_by\":[],\"classification\":\"blocked\",\"classifier_version\":\"orangepro.fault_classifier.v2\",\"fault_record_sha256\":\"ce6ed59667baf4084edbb93249956455c206a54513574163cc0d16ce8677a181\",\"reached_by_selected_tests\":\"reached\",\"reason\":\"red_baseline\",\"run_id\":\"run_test_10\",\"scope\":null,\"stages\":[{\"path\":\"stages/original_selected.json\",\"sha256\":\"25d07f14273dcca70ea26e7d8ffcad25d3c9e6fb884ce57129e01e73c4c4e636\",\"stage\":\"original_selected\"}],\"statement\":\"No claim about the fault in api.seconds, which PR #7 changed (! removed, line 11): the selected tests do not all pass on the original.\",\"version\":\"orangepro.fault_classification.v1\"}\n"
+}

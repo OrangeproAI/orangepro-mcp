@@ -32,6 +32,7 @@ import {
   FAULT_CLASSIFIER_VERSION,
   RUN_PROFILE_VERSION,
   STAGE_OBSERVATION_VERSION,
+  VERDICT_RULES_VERSION,
   type Classification,
   type FaultClass,
   type FileRef,
@@ -360,6 +361,17 @@ export function failedAtAssertion(detail: Record<string, unknown> | undefined, t
   return origin === null || origin.file === testFile || origin.file.startsWith("node_modules/") || origin.file.startsWith("node:");
 }
 
+/**
+ * The runner stopped the test at its own per-test time limit: Mocha by its error code, Vitest and Jest by the
+ * fixed first words of their message. Never the stage's deadline.
+ */
+export function runnerTimedOut(detail: Record<string, unknown> | undefined): boolean {
+  if (!detail) return false;
+  if (detail.code === "ERR_MOCHA_TIMEOUT") return true;
+  const message = String(detail.message ?? "").split("\n")[0] ?? "";
+  return /^Test timed out in \d+ ?ms\b/.test(message) || /^(thrown: )?"?Exceeded timeout of \d+ ?ms for a test\b/.test(message);
+}
+
 function repoRel(file: unknown): string {
   const text = typeof file === "string" ? file : "";
   return text.startsWith(`${WORK_REPO}/`) ? text.slice(WORK_REPO.length + 1) : text;
@@ -385,7 +397,8 @@ export function testsFromReport(report: any): NonNullable<StageObservation["test
                 name: typeof detail?.name === "string" ? detail.name : typeof detail?.constructorName === "string" ? (detail.constructorName as string) : null,
                 message: redactSecrets(String(detail?.message ?? "").split("\n")[0] ?? "").slice(0, 500),
                 first_frame: firstFrame(detail?.stack),
-                at_assertion: failedAtAssertion(detail, file)
+                at_assertion: failedAtAssertion(detail, file),
+                ...(runnerTimedOut(detail) ? { timed_out: true as const } : {})
               }
             : null
       });
@@ -503,9 +516,36 @@ export interface ClassifyOutput {
   caught_by: Classification["caught_by"];
   behavioral_difference: Classification["behavioral_difference"];
   reached_by_selected_tests: Classification["reached_by_selected_tests"];
+  also_failed_off_assertion?: Classification["also_failed_off_assertion"];
+  process_did_not_exit?: true;
+  /** Present only when a finer verdict rule applied; without it the result is what the v2 classifier alone gives. */
+  verdict_rules?: typeof VERDICT_RULES_VERSION;
 }
 
 const idOf = (test: ObservedTest): string => `${test.file}\u0000${test.full_title}`;
+
+interface NewFailure {
+  file: string;
+  full_title: string;
+  at_assertion: boolean;
+  timed_out: boolean;
+  error: string | null;
+}
+
+/** Tests that passed on the original and failed on the fault. */
+function newFailures(original: NonNullable<StageObservation["tests"]>, fault: NonNullable<StageObservation["tests"]>): NewFailure[] {
+  const before = new Map(original.observed.map((test) => [idOf(test), test]));
+  return fault.observed
+    .filter((test) => test.state === "failed" && before.get(idOf(test))?.state === "passed")
+    .map((test) => ({ file: test.file, full_title: test.full_title, at_assertion: test.failure?.at_assertion === true, timed_out: test.failure?.timed_out === true, error: test.failure?.name ?? null }));
+}
+
+/** Verdict rules v1, R3: the fault run's only new failures are the runner's own time-outs, so the stage is run once more. */
+export function needsTimeoutRepeat(original: StageObservation | undefined, fault: StageObservation | undefined): boolean {
+  if (!original?.tests || !fault?.tests || runIssue(fault, true) !== null) return false;
+  const news = newFailures(original.tests, fault.tests);
+  return !news.some((test) => test.at_assertion) && news.some((test) => test.timed_out);
+}
 
 /** Each test id with how many times it was seen. */
 function idCounts(tests: ObservedTest[]): Map<string, number> {
@@ -519,9 +559,16 @@ function sameCounts(a: Map<string, number>, b: Map<string, number>): boolean {
 }
 
 /** A test stage that cannot be read as a clean account of what ran, or null when it can. */
-function runIssue(stage: StageObservation | undefined): string | null {
+/** The process behind this stage did not end by itself (deadline reached, or stopped after its complete report). */
+const didNotExit = (stage: StageObservation | undefined): boolean => stage?.timed_out === true || stage?.process_did_not_exit === true;
+
+/**
+ * `byReport` (a fault stage, verdict rules v1): a stage that reached its deadline is still judged by its signed
+ * report when it has one; the checks below decide whether that report is complete.
+ */
+function runIssue(stage: StageObservation | undefined, byReport = false): string | null {
   if (!stage) return "stage_missing";
-  if (stage.timed_out) return "timeout";
+  if (stage.timed_out && !(byReport && stage.tests && stage.report !== null)) return "timeout";
   if (stage.output_problems.some((problem) => problem.startsWith(REPORT_TAMPERED))) return REPORT_TAMPERED;
   const t = stage.tests;
   if (!t || stage.report === null) return "runner_error";
@@ -559,6 +606,8 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const unknownDifference = { status: "unknown" as const, original: witnessOriginal?.output ?? null, fault: witnessFault?.output ?? null };
   const reached: ClassifyOutput["reached_by_selected_tests"] =
     original?.fault_span_count === null || original?.fault_span_count === undefined ? reachFromMarkedCopy(original, stages.reach_marked) : original.fault_span_count > 0 ? "reached" : "not_reached";
+  // Set at each place a finer verdict rule decides something the v2 classifier alone would not.
+  let finerRule = false;
   const result = (classification: FaultClass, reason: string | null, extra: Partial<ClassifyOutput> = {}): ClassifyOutput => ({
     classification,
     scope: null,
@@ -566,7 +615,8 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
     caught_by: [],
     behavioral_difference: unknownDifference,
     reached_by_selected_tests: reached,
-    ...extra
+    ...extra,
+    ...(finerRule ? { verdict_rules: VERDICT_RULES_VERSION } : {})
   });
   const ran = Object.values(stages).filter((stage): stage is StageObservation => stage !== undefined);
   // 1. blocked
@@ -610,8 +660,10 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   if (same) return result("inconclusive", "no_behavioral_difference", { behavioral_difference: difference });
   // 4./5. the selected tests on the fault
   const fault = stages.fault_selected ?? stages.fault_suite;
-  const faultIssue = runIssue(fault);
+  const faultIssue = runIssue(fault, true);
   if (faultIssue) return result("inconclusive", `fault_${faultIssue}`, { behavioral_difference: difference });
+  // Judged by its report although its process did not end by itself: a finer rule from here on.
+  if (didNotExit(fault)) finerRule = true;
   const f = fault!.tests!;
   if (wholeOnly && f.pending > recordedSkipped) return result("inconclusive", "full_suite_skipped_more", { behavioral_difference: difference });
   // Selected files: tests the repository itself skips are allowed when exactly the same ones are skipped on both
@@ -621,13 +673,40 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   if (!sameCounts(originalIds, idCounts(f.observed)) || f.executed !== o.executed) {
     return result("inconclusive", "test_set_differs", { behavioral_difference: difference });
   }
-  const before = new Map(o.observed.map((test) => [idOf(test), test]));
-  const caught = f.observed
-    .filter((test) => test.state === "failed" && before.get(idOf(test))?.state === "passed")
-    .map((test) => ({ file: test.file, full_title: test.full_title, at_assertion: test.failure?.at_assertion === true }));
-  // One failure off an assertion makes every other failure on the same run suspect.
-  if (caught.some((test) => !test.at_assertion)) return result("inconclusive", "failed_off_assertion", { caught_by: caught, behavioral_difference: difference });
-  if (caught.length > 0) return result("caught_by_existing", null, { scope: wholeOnly ? "full_suite" : "selected", caught_by: caught, behavioral_difference: difference });
+  const news = newFailures(o, f);
+  const entry = (test: NewFailure): { file: string; full_title: string; at_assertion: boolean } => ({ file: test.file, full_title: test.full_title, at_assertion: test.at_assertion });
+  const also = (tests: NewFailure[]): Partial<ClassifyOutput> => (tests.length > 0 ? { also_failed_off_assertion: tests.map((test) => ({ file: test.file, full_title: test.full_title, error: test.error })) } : {});
+  const noExit: Partial<ClassifyOutput> = didNotExit(fault) ? { process_did_not_exit: true } : {};
+  const atAssertion = news.filter((test) => test.at_assertion);
+  const timedOut = news.filter((test) => !test.at_assertion && test.timed_out);
+  const offAssertion = news.filter((test) => !test.at_assertion && !test.timed_out);
+  const scopeNow = wholeOnly ? ("full_suite" as const) : ("selected" as const);
+  // Each failing test is judged by itself: one that fails at its assertion catches the fault, whatever else failed.
+  if (atAssertion.length > 0) {
+    if (atAssertion.length < news.length) finerRule = true;
+    return result("caught_by_existing", null, { scope: scopeNow, caught_by: atAssertion.map(entry), behavioral_difference: difference, ...also([...timedOut, ...offAssertion]), ...noExit });
+  }
+  // The runner's own time-out on a test the original passes counts when a second run times out the same test.
+  if (timedOut.length > 0) {
+    finerRule = true;
+    const repeat = stages.fault_selected_repeat ?? stages.fault_suite_repeat;
+    const again = new Set<string>();
+    if (repeat && runIssue(repeat, true) === null && sameCounts(originalIds, idCounts(repeat.tests!.observed))) {
+      for (const test of repeat.tests!.observed) if (test.state === "failed" && test.failure?.timed_out === true) again.add(idOf(test));
+    }
+    const repeated = timedOut.filter((test) => again.has(`${test.file}\u0000${test.full_title}`));
+    if (repeated.length === 0) return result("inconclusive", "fault_timeout_not_repeated", { caught_by: news.map(entry), behavioral_difference: difference, ...noExit });
+    return result("caught_by_existing", null, {
+      scope: scopeNow,
+      caught_by: repeated.map((test) => ({ ...entry(test), how: "timed_out" as const })),
+      behavioral_difference: difference,
+      ...also([...timedOut.filter((test) => !repeated.includes(test)), ...offAssertion]),
+      ...noExit
+    });
+  }
+  if (offAssertion.length > 0) return result("inconclusive", "failed_off_assertion", { caught_by: news.map(entry), behavioral_difference: difference, ...noExit });
+  // A process that did not end by itself can show a fault caught, never a fault missed.
+  if (didNotExit(fault)) return result("inconclusive", "fault_process_did_not_exit", { behavioral_difference: difference, process_did_not_exit: true });
   if (f.failed > 0 || f.passed !== o.executed || fault!.exit_code !== 0) return result("inconclusive", "fault_runner_error", { behavioral_difference: difference });
   // Every selected test passed on the fault. The whole suite widens the claim only when it ran cleanly on both
   // copies, matched the fixture's recorded count, and contained the selected tests.
@@ -637,7 +716,8 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   if (!input.full_suite_requested) return survived(null);
   const fullOriginal = stages.original_full_suite;
   const fullFault = stages.fault_full_suite;
-  if (runIssue(fullOriginal) || runIssue(fullFault)) return survived("full_suite_inconclusive");
+  if (runIssue(fullOriginal) || runIssue(fullFault, true)) return survived("full_suite_inconclusive");
+  if (didNotExit(fullFault)) finerRule = true;
   const fo = fullOriginal!.tests!;
   const ff = fullFault!.tests!;
   if (fo.failed > 0 || fullOriginal!.exit_code !== 0) return survived("full_suite_red_on_original");
@@ -647,17 +727,17 @@ export function classifyFaultRun(input: ClassifyInput): ClassifyOutput {
   const fullOriginalIds = idCounts(fo.observed);
   if (!sameCounts(fullOriginalIds, idCounts(ff.observed))) return survived("full_suite_test_set_differs");
   if ([...originalIds.keys()].some((id) => !fullOriginalIds.has(id))) return survived("full_suite_lacks_selected");
-  const fullBefore = new Map(fo.observed.map((test) => [idOf(test), test]));
-  const fullCaught = ff.observed
-    .filter((test) => test.state === "failed" && fullBefore.get(idOf(test))?.state === "passed")
-    .map((test) => ({ file: test.file, full_title: test.full_title, at_assertion: test.failure?.at_assertion === true }));
-  if (fullCaught.length > 0) {
-    if (fullCaught.every((test) => test.at_assertion)) {
-      return result("caught_by_existing", "caught_outside_selection", { scope: "full_suite", caught_by: fullCaught, behavioral_difference: difference });
+  const fullNews = newFailures(fo, ff);
+  if (fullNews.length > 0) {
+    // The same per-test rule: a whole-suite test that fails at its assertion catches the fault. Time-outs alone do not widen.
+    const fullAt = fullNews.filter((test) => test.at_assertion);
+    if (fullAt.length > 0) {
+      if (fullAt.length < fullNews.length) finerRule = true;
+      return result("caught_by_existing", "caught_outside_selection", { scope: "full_suite", caught_by: fullAt.map(entry), behavioral_difference: difference, ...also(fullNews.filter((test) => !test.at_assertion)), ...(didNotExit(fullFault) ? { process_did_not_exit: true as const } : {}) });
     }
     return survived("full_suite_failed_off_assertion");
   }
-  if (ff.failed > 0 || fullFault!.exit_code !== 0 || ff.passed !== input.baseline_passing) return survived("full_suite_inconclusive");
+  if (didNotExit(fullFault) || ff.failed > 0 || fullFault!.exit_code !== 0 || ff.passed !== input.baseline_passing) return survived("full_suite_inconclusive");
   return result("survived_unverified", null, { scope: "full_suite", behavioral_difference: difference });
 }
 
@@ -690,7 +770,9 @@ const REASON_WORDS: Record<string, string> = {
   fault_hook_failure: "a setup hook failed on the fault",
   fault_runner_totals_mismatch: "the runner's totals disagree with its report on the fault",
   test_set_differs: "a different set of tests ran on the fault",
-  failed_off_assertion: "a selected test failed on the fault, but not at an assertion"
+  failed_off_assertion: "a selected test failed on the fault, but not at an assertion",
+  fault_timeout_not_repeated: "a test timed out on the fault, but did not time out again on a second run",
+  fault_process_did_not_exit: "the tests passed on the fault, but the test process did not end by itself, so the run is not counted as a miss"
 };
 
 /** The one sentence shown to people. It names the function the change touched; it never says the change caused the gap. */
@@ -710,13 +792,76 @@ export function statementFor(
     sentence = `${selected} passed with a valid fault ${where}: the selected tests missed it. The rest of the suite was not shown to miss it.`;
   } else if (out.classification === "caught_by_existing") {
     const first = out.caught_by[0];
-    sentence = `The existing tests caught a fault ${where}: "${first?.full_title ?? "a test"}" failed at its assertion${out.scope === "full_suite" ? " (outside the selected files)" : ""}.`;
+    const how = first?.how === "timed_out" ? "timed out on the fault, twice, and passes on the original" : "failed at its assertion";
+    sentence = `The existing tests caught a fault ${where}: "${first?.full_title ?? "a test"}" ${how}${out.scope === "full_suite" ? " (outside the selected files)" : ""}.`;
+    // Only when something else also failed, or the process had to be stopped: say the numbers.
+    const more = out.also_failed_off_assertion?.length ?? 0;
+    if (more > 0) sentence += ` ${out.caught_by.length} ${out.caught_by.length === 1 ? "test" : "tests"} ${first?.how === "timed_out" ? "timed out twice" : "failed at an assertion"}; ${more} more failed and ${more === 1 ? "is" : "are"} not counted.`;
+    if (out.process_did_not_exit) sentence += " The test process did not end by itself and was stopped.";
   } else if (out.classification === "invalid_mutation") {
     sentence = `No claim: the fault ${where} is not a valid change (${REASON_WORDS[out.reason ?? ""] ?? out.reason}).`;
   } else {
     sentence = `No claim about the fault ${where}: ${REASON_WORDS[out.reason ?? ""] ?? out.reason}.`;
   }
   return ctx.assisted ? `${sentence} Assisted replay: this target and fault were known before the run (see the oracle).` : sentence;
+}
+
+/** What a result's sentence needs beyond the stage files. */
+export interface StatementBasis {
+  symbolName: string;
+  changedBy: string;
+  operatorDescription: string;
+  line: number;
+  assisted: boolean;
+}
+
+/**
+ * classification.json, from a judged run. Pure: the same stage files, judgment and basis give the same bytes,
+ * so a stored run can be judged again and compared.
+ */
+export function classificationRecord(parts: {
+  out: ClassifyOutput;
+  stages: Partial<Record<StageName, StageObservation>>;
+  whole_suite_only: boolean;
+  baseline_pending: number;
+  statement: StatementBasis;
+  run_id: string;
+  fault_record_sha256: string;
+  stage_refs: Classification["stages"];
+}): Classification {
+  const { out, stages } = parts;
+  const originalRun = stages.original_selected ?? stages.original_suite;
+  const skippedOn = (stage: StageObservation | undefined): Array<{ file: string; full_title: string }> => (stage?.tests?.observed ?? []).filter((test) => test.state === "pending").map((test) => ({ file: test.file, full_title: test.full_title }));
+  // Every test the repository itself skips in the runs the result rests on, named once.
+  const skippedTests = [...new Map([...skippedOn(originalRun), ...skippedOn(stages.original_full_suite)].map((test) => [`${test.file}\u0000${test.full_title}`, test])).values()];
+  const ctx = {
+    ...parts.statement,
+    selectedCount: originalRun?.tests?.executed ?? 0,
+    fullCount: (parts.whole_suite_only ? stages.fault_suite : stages.fault_full_suite)?.tests?.executed ?? null,
+    fullSkipped: parts.baseline_pending,
+    selectedSkipped: parts.whole_suite_only ? 0 : skippedOn(stages.original_selected).length
+  };
+  const builds = (Object.values(stages) as StageObservation[]).filter((stage) => stage.stage.startsWith("build_")).map((stage) => ({ stage: stage.stage, duration_ms: stage.duration_ms, exit_code: stage.exit_code, timed_out: stage.timed_out }));
+  return {
+    ...(builds.length > 0 ? { builds } : {}),
+    ...(skippedTests.length > 0 ? { skipped_tests: skippedTests } : {}),
+    version: CLASSIFICATION_VERSION,
+    classifier_version: FAULT_CLASSIFIER_VERSION,
+    ...(out.verdict_rules ? { verdict_rules: out.verdict_rules } : {}),
+    run_id: parts.run_id,
+    fault_record_sha256: parts.fault_record_sha256,
+    classification: out.classification,
+    scope: out.scope,
+    reason: out.reason,
+    statement: statementFor(out, ctx),
+    assisted: parts.statement.assisted,
+    reached_by_selected_tests: out.reached_by_selected_tests,
+    behavioral_difference: out.behavioral_difference,
+    caught_by: out.caught_by,
+    ...(out.also_failed_off_assertion ? { also_failed_off_assertion: out.also_failed_off_assertion } : {}),
+    ...(out.process_did_not_exit ? { process_did_not_exit: true as const } : {}),
+    stages: parts.stage_refs
+  };
 }
 
 // ── the operation ────────────────────────────────────────────────────────────────
@@ -889,10 +1034,6 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     changedBy,
     operatorDescription: `${plan.original_text}${plan.replacement_text ? ` → ${plan.replacement_text}` : " removed"}`,
     line: plan.site.lines.start,
-    selectedCount: 0,
-    fullCount: null as number | null,
-    fullSkipped: 0,
-    selectedSkipped: 0,
     assisted: oracle.assisted.flag
   };
   const stages: Partial<Record<StageName, StageObservation>> = {};
@@ -913,32 +1054,16 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
       baseline_passing: fixture.baselinePassing,
       baseline_pending: fixture.baselinePending
     });
-    statementCtx.selectedCount = (stages.original_selected ?? stages.original_suite)?.tests?.executed ?? 0;
-    statementCtx.fullCount = (wholeSuiteOnly ? stages.fault_suite : stages.fault_full_suite)?.tests?.executed ?? null;
-    statementCtx.fullSkipped = fixture.baselinePending;
-    const originalRun = stages.original_selected ?? stages.original_suite;
-    const skippedOn = (stage: StageObservation | undefined): Array<{ file: string; full_title: string }> => (stage?.tests?.observed ?? []).filter((test) => test.state === "pending").map((test) => ({ file: test.file, full_title: test.full_title }));
-    // Every test the repository itself skips in the runs the result rests on, named once.
-    const skippedTests = [...new Map([...skippedOn(originalRun), ...skippedOn(stages.original_full_suite)].map((test) => [`${test.file}\u0000${test.full_title}`, test])).values()];
-    statementCtx.selectedSkipped = wholeSuiteOnly ? 0 : skippedOn(stages.original_selected).length;
-    const builds = (Object.values(stages) as StageObservation[]).filter((stage) => stage.stage.startsWith("build_")).map((stage) => ({ stage: stage.stage, duration_ms: stage.duration_ms, exit_code: stage.exit_code, timed_out: stage.timed_out }));
-    const classification: Classification = {
-      ...(builds.length > 0 ? { builds } : {}),
-      ...(skippedTests.length > 0 ? { skipped_tests: skippedTests } : {}),
-      version: CLASSIFICATION_VERSION,
-      classifier_version: FAULT_CLASSIFIER_VERSION,
+    const classification = classificationRecord({
+      out,
+      stages,
+      whole_suite_only: wholeSuiteOnly,
+      baseline_pending: fixture.baselinePending,
+      statement: statementCtx,
       run_id: runId,
       fault_record_sha256: faultRecordSha,
-      classification: out.classification,
-      scope: out.scope,
-      reason: out.reason,
-      statement: statementFor(out, statementCtx),
-      assisted: oracle.assisted.flag,
-      reached_by_selected_tests: out.reached_by_selected_tests,
-      behavioral_difference: out.behavioral_difference,
-      caught_by: out.caught_by,
-      stages: stageRefs
-    };
+      stage_refs: stageRefs
+    });
     writeFileAtomic(join(runDir, "classification.json"), recordBytes(classification));
     writeRunManifest(runDir, runId, ORANGEPRO_VERSION);
     return { run_id: runId, run_dir: toWorkspaceRel(root, runDir), fault_record: faultRecord, classification };
@@ -1049,7 +1174,10 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
     for (const [stage, copy] of [["witness_original", "original"], ["witness_original_repeat", "original"], ["witness_fault", "mutant"]] as const) {
       if (!held(runStage(stage, copy, witnessArgv(fixture.runner), {}))) return finish(true);
     }
-    if (!held(runStage(wholeSuiteOnly ? "fault_suite" : "fault_selected", "mutant", selectedArgv, reportEnv))) return finish(true);
+    const faultRun = runStage(wholeSuiteOnly ? "fault_suite" : "fault_selected", "mutant", selectedArgv, reportEnv);
+    if (!held(faultRun)) return finish(true);
+    // Only the runner's own time-outs failed: the same stage once more, to see whether they repeat.
+    if (needsTimeoutRepeat(original, faultRun) && !held(runStage(wholeSuiteOnly ? "fault_suite_repeat" : "fault_selected_repeat", "mutant", selectedArgv, reportEnv))) return finish(true);
     if (fullArgv) {
       if (held(runStage("original_full_suite", "original", fullArgv, reportEnv))) runStage("fault_full_suite", "mutant", fullArgv, reportEnv);
     }
@@ -1064,6 +1192,8 @@ export function opProbeFault(root: string, opts: ProbeFaultOptions, deps: ProbeF
 export type CopyRoots = { original: string; mutant: string; marked?: string; /** The checkout's other node_modules folders (workspace packages), mounted at their own places. */ workspace?: Array<{ rel: string; real: string }>; /** A folder of package-manager commands the install stage kept, for stages to run by name. */ bin?: string };
 /** The marker a `reach_marked` stage looks for in its output folder. */
 const REACH_MARK_FILE = "reach-mark";
+/** How long a test process may stay alive after its complete report before the stage is stopped. */
+export const STOP_AFTER_REPORT_MS = 10_000;
 
 /**
  * The original and the faulty copy, made by the proof script from the commit's own files
@@ -1262,7 +1392,7 @@ export function createStageRunner(ctx: StageRunnerContext): {
     const reportKey = framed ? randomBytes(32) : null;
     // A build writes into its copy; every other stage has the copy read-only.
     const stageMounts = mountsFor(copy, out).map((mount) => (isBuild && mount.target === WORK_REPO ? { ...mount, readonly: false } : mount));
-    const request: ContainerRequest = { shape: fixture.shape, mounts: stageMounts, env, workdir: WORK_REPO, command, deadlineMs: stageDeadlineMs, ...(reportKey ? { input: `${reportKey.toString("hex")}\n` } : {}) };
+    const request: ContainerRequest = { shape: fixture.shape, mounts: stageMounts, env, workdir: WORK_REPO, command, deadlineMs: stageDeadlineMs, ...(reportKey ? { input: `${reportKey.toString("hex")}\n`, stopAfterReportMs: STOP_AFTER_REPORT_MS } : {}) };
     const probeRequest: ContainerRequest = { shape: fixture.shape, mounts: mountsFor(copy, probeOut), env, workdir: WORK_REPO, command, deadlineMs };
     const copyTargetSha = sha256Hex(readFileSync(join(copyRoots[copy] ?? copyRoots.original, ctx.targetRel)));
     const startedAt = ctx.clock();
@@ -1359,6 +1489,7 @@ export function createStageRunner(ctx: StageRunnerContext): {
       exit_code: run?.exitCode ?? null,
       signal: run?.signal ?? null,
       timed_out: run?.timedOut ?? false,
+      ...(run?.timedOut || run?.stoppedAfterReport ? { process_did_not_exit: true as const } : {}),
       tests: observedTests,
       output: run && !framed ? lastJsonLine(run.stdout) : null,
       fault_span_count: coverageTarget || reachMark ? spanCount : null,

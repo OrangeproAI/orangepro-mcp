@@ -11,6 +11,12 @@ export const CLASSIFICATION_VERSION = "orangepro.fault_classification.v1" as con
 // v2 (A3): "at an assertion" needs the failure's first stack frame in the test's own file; v1 also accepted
 // any AssertionError or any error carrying expected and actual.
 export const FAULT_CLASSIFIER_VERSION = "orangepro.fault_classifier.v2" as const;
+/**
+ * Finer verdict rules on top of that definition: each failing test judged by itself, a stage judged by its
+ * complete report, a repeated runner time-out, and never a miss when the test process did not end by itself.
+ * A result carries this name only when one of those rules applied; without it, it is what v2 alone gives.
+ */
+export const VERDICT_RULES_VERSION = "orangepro.verdict_rules.v1" as const;
 
 export const STAGE_NAMES = [
   "original_selected",
@@ -43,7 +49,10 @@ export const STAGE_NAMES = [
   "original_suite",
   "fault_suite",
   // Vitest and Jest: the selected tests on a copy of the original whose fault site writes a marker when it runs.
-  "reach_marked"
+  "reach_marked",
+  // Verdict rules v1: the fault stage again, run only when the first run's only new failures are the runner's own time-outs.
+  "fault_selected_repeat",
+  "fault_suite_repeat"
 ] as const;
 /** A named stage, or the build that ran in a copy just before one (`build_<stage>`). */
 export type StageName = (typeof STAGE_NAMES)[number] | `build_${(typeof STAGE_NAMES)[number]}`;
@@ -167,6 +176,8 @@ export interface ObservedTest {
      * code outside the test. classification.json names the classifier version.
      */
     at_assertion: boolean;
+    /** The runner stopped this test at its own per-test time limit. Present only when true. */
+    timed_out?: true;
   } | null;
 }
 
@@ -204,6 +215,11 @@ export interface StageObservation {
   exit_code: number | null;
   signal: string | null;
   timed_out: boolean;
+  /**
+   * The process did not end by itself: it reached the stage's deadline, or was stopped after its complete report.
+   * Present only when true. Such a stage can show a fault caught; it can never show a fault missed.
+   */
+  process_did_not_exit?: true;
   /** Mocha stages only; null when the boundary did not hold, or the runner left no readable report. */
   tests: {
     executed: number;
@@ -234,6 +250,8 @@ export interface Classification {
   builds?: Array<{ stage: string; duration_ms: number; exit_code: number | null; timed_out: boolean }>;
   version: typeof CLASSIFICATION_VERSION;
   classifier_version: typeof FAULT_CLASSIFIER_VERSION;
+  /** Present only when a finer verdict rule applied to this result. */
+  verdict_rules?: typeof VERDICT_RULES_VERSION;
   run_id: string;
   fault_record_sha256: string;
   classification: FaultClass;
@@ -247,7 +265,11 @@ export interface Classification {
   reached_by_selected_tests: "reached" | "not_reached" | "unknown";
   behavioral_difference: { status: "differs" | "same" | "unknown"; original: unknown; fault: unknown };
   /** Selected tests that passed on the original and failed on the fault. */
-  caught_by: Array<{ file: string; full_title: string; at_assertion: boolean }>;
+  caught_by: Array<{ file: string; full_title: string; at_assertion: boolean; how?: "timed_out" }>;
+  /** Tests that also newly failed on the fault but are not counted as catching it: off an assertion, or a time-out that did not repeat. */
+  also_failed_off_assertion?: Array<{ file: string; full_title: string; error: string | null }>;
+  /** The fault stage's process did not end by itself (see the stage file). Present only when true. */
+  process_did_not_exit?: true;
   /** Every stage file the classification was computed from, in run order. */
   stages: Array<{ stage: StageName; path: string; sha256: string }>;
 }

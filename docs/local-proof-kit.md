@@ -332,6 +332,22 @@ that describes how the repository runs its tests and in which container, and the
   covers (the selected tests, or the whole suite when `--full-suite` also ran on both copies), or
   `invalid_mutation`, `inconclusive` or `blocked` with a reason. A run in which no test executed,
   a test was skipped, or a different set of tests ran is never a survivor.
+- **Each failing test is judged by itself.** One test that fails at its assertion
+  catches the fault, whatever else failed. Tests that also newly fail off an assertion are listed
+  (`also_failed_off_assertion`) and said in the sentence; they are not counted. A run whose only
+  new failures are off an assertion is still no claim (`failed_off_assertion`).
+- **A test the runner itself times out** (its own per-test limit, never the stage's deadline), which
+  passes on the original, catches the fault when a second run of the same stage times out the same
+  test (`how: "timed_out"`). If it does not repeat: no claim (`fault_timeout_not_repeated`).
+- **A test process that does not end by itself.** A stage whose complete signed report has arrived is
+  stopped 10 seconds later if its process is still alive, and a stage that reaches its deadline is
+  judged by its report when it has a complete one. Either is marked `process_did_not_exit`. Such a
+  stage can show a fault caught. It never shows a fault missed: with every test green it is no
+  claim (`fault_process_did_not_exit`), and `verify-test` and `export-tests` never take it as a
+  clean stage.
+- **Which results these three rules touched.** A result one of them decided carries
+  `verdict_rules: "orangepro.verdict_rules.v1"`. A result without it is exactly what the rules
+  before them give. `classifier_version` names the definition of "at an assertion" and is unchanged.
 - Everything is written to `.orangepro/proof-runs/<run-id>/`, with `MANIFEST.json` last. The
   checkout is not changed. It needs Docker and an installed checkout (the fixture's test runner in `node_modules`).
 
