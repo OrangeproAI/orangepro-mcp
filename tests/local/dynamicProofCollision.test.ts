@@ -23,7 +23,8 @@ import { describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const script = path.join(root, "scripts/spikes/dynamic-proof-spike.mjs");
-const vitestBin = require.resolve("vitest/vitest.mjs");
+// vitest 4 no longer exports the "./vitest.mjs" subpath; the bin file is still shipped beside package.json.
+const vitestBin = path.join(path.dirname(require.resolve("vitest/package.json")), "vitest.mjs");
 
 describe("dynamic proof — same-identity collision must not mint proven", () => {
   it("does NOT credit a skipped-at-baseline twin's mutant failure via a colliding passed-baseline identity", () => {
