@@ -5,7 +5,7 @@
   "description": "OrangePro (`opro`) — a local-first, BYOK CLI + MCP server that builds an evidence graph from a local checkout, ingests runtime coverage, and generates grounded tests. Metadata-only exports; no source upload; generated tests stay local.",
   "license": "MIT",
   "author": "OrangePro",
-  "homepage": "https://github.com/OrangeproAI/orangepro-mcp#readme",
+  "homepage": "https://orangepro.ai",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/OrangeproAI/orangepro-mcp.git"
