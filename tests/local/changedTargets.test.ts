@@ -464,7 +464,8 @@ attach(label, 'weigh', function (parcel) {
 
     expect(result.complete).toBe(false);
     expect(result.blocks.map((block) => [block.new_start, block.status, block.unknown])).toEqual([
-      [lineOf(merged, "n < 1 ? 1 : n"), "unknown", "unrecognised_function"],
+      // A non-exported helper is known, and nothing counted calls it: still unknown, with the exact reason.
+      [lineOf(merged, "n < 1 ? 1 : n"), "unknown", "no_caller_link"],
       [lineOf(merged, "parcel.weight * 3"), "unknown", "unsupported_shape"]
     ]);
     expect(result.targets).toEqual([]);

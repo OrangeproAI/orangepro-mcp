@@ -125,6 +125,8 @@ export type RelationshipType =
   // not read by the confirmer, denominator, or test linkage. A later proof layer
   // may promote it, but on its own it implies nothing about whether code is tested.
   | "CALLS"
+  // A call to or from a non-exported helper. Read only to follow a change to its public callers: never scored.
+  | "HELPER_CALLS"
   | "USES_FRAMEWORK"
   | "DEPENDS_ON"
   | "CONFIGURED_BY"

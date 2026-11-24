@@ -189,14 +189,15 @@ const LINE_RULE_MISMATCH_RE = new RegExp(`\\r(?!\\n)|[${String.fromCharCode(0x20
  * Re-derive one symbol's definition from the file's raw bytes. Never reads the
  * graph: the caller compares what comes back with whatever it was told.
  */
-export function describeTarget(fileBytes: Buffer, symbolName: string): DescribeResult {
+export function describeTarget(fileBytes: Buffer, symbolName: string, opts: { helpers?: boolean } = {}): DescribeResult {
   const text = fileBytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(fileBytes)) return { ok: false, refused: "not_utf8" };
   // git counts a line at every line feed; the TypeScript scanner also breaks at a
   // lone carriage return and at U+2028/U+2029. A file containing one of those
   // would get two different line numbers for the same byte.
   if (LINE_RULE_MISMATCH_RE.test(text)) return { ok: false, refused: "line_rule_mismatch" };
-  const site = listFunctionSites(text).sites.find((candidate) => candidate.name === symbolName);
+  // `helpers`: only to describe the helper a change came through. A helper is never a target itself.
+  const site = listFunctionSites(text, opts).sites.find((candidate) => candidate.name === symbolName);
   if (!site) return { ok: false, refused: "symbol_not_found" };
   if (!site.fn) return { ok: false, refused: "not_a_function" };
   // UTF-16 offset → byte offset, and → git line, in one pass over the sorted cut points.

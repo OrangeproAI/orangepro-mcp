@@ -252,7 +252,7 @@ export function leftOutParts(graph: Pick<LocalGraph, "nodes">): {
 } {
   const out = { found: 0, counted: 0, generated: 0, notEntryPoint: 0, infraSurface: 0, trivial: 0, ciAndTest: 0, other: 0 };
   for (const node of graph.nodes) {
-    if (node.kind !== "CodeSymbol" || node.stale === true) continue;
+    if (node.kind !== "CodeSymbol" || node.stale === true || node.properties.seen_by === "local_helper") continue;
     out.found += 1;
     if (node.denominator_eligible === true) out.counted += 1;
     else if (node.denominator_reason === GENERATED_CODE_REASON) out.generated += 1;

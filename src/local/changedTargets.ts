@@ -457,7 +457,7 @@ function parseSource(text: string, fileName: string): ParsedSource {
     }
     return tokens;
   };
-  const listed = listFunctionSites(text);
+  const listed = listFunctionSites(text, { helpers: true });
   // Each character belongs to the innermost definition around it, so a class is
   // read without its methods. Larger definitions are painted first.
   const definitions = [...new Map(listed.sites.map((site) => [site.statement.join(":"), site.statement])).values()].sort(
@@ -1130,7 +1130,7 @@ function mapChange(root: string, opts: ChangedTargetsOptions, deps: ChangedTarge
   // ---- Following a helper: hard CALLS links backwards, two steps at most ----
   const callersOf = new Map<string, Set<string>>();
   for (const edge of graph.edges) {
-    if (edge.relationship_type !== "CALLS" || edge.evidence_strength !== "hard") continue;
+    if ((edge.relationship_type !== "CALLS" && edge.relationship_type !== "HELPER_CALLS") || edge.evidence_strength !== "hard") continue;
     const set = callersOf.get(edge.to_external_id) ?? new Set<string>();
     set.add(edge.from_external_id);
     callersOf.set(edge.to_external_id, set);
@@ -1352,7 +1352,7 @@ function mapChange(root: string, opts: ChangedTargetsOptions, deps: ChangedTarge
     const rel = fileOfSymbol(node);
     const bytes = recordFile(rel);
     if (!Buffer.isBuffer(bytes)) return bytes;
-    const described = describeTarget(bytes, nameInId(node.external_id));
+    const described = describeTarget(bytes, nameInId(node.external_id), { helpers: true });
     if (!described.ok) {
       if (described.refused === "not_utf8" || described.refused === "line_rule_mismatch") {
         return refuse(described.refused, "A file needed for a record cannot be read as text with git's line numbers.", [gitPathOf(rel)]);

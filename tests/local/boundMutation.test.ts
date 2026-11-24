@@ -1537,6 +1537,29 @@ describe("opDynamicProof — a target record is a claim", { timeout: 120_000 }, 
     expect(refusalOf(() => prove({ ...real, identity: { ...real.identity, file: "lib/shelf.js", package_root: "" } })).code).toBe("stale_record");
   });
 
+  it("a record reached through a non-exported helper passes the proof step's check, and a wrong helper path does not", () => {
+    const libWith = (factor: number): string => `function inner(n) {\n  return n * ${factor};\n}\nexports.count = function (items) {\n  return inner(items.length) + 2;\n};\n`;
+    const repo = makeRepo({ ".gitignore": ".orangepro/\n.orangeproignore\n", "package.json": JSON.stringify({ name: "bound-helper", version: "1.0.0", main: "lib/index.js" }), "lib/index.js": libWith(2) }, "bound-helper-");
+    git(repo, "init", "-q");
+    const before = commitAll(repo, "before");
+    writeFileSync(path.join(repo, "lib/index.js"), libWith(3));
+    commitAll(repo, "first");
+    opInit(repo, deps);
+    analyzed(repo);
+    const helperId = "sym:lib/index.js#inner";
+    const targetId = "sym:lib/index.js#count";
+    const base = realRecord(repo, before, targetId);
+    expect(base.identity.via_helper?.path).toEqual([helperId, targetId]);
+    const prove = (record: TargetRecord): string[][] => {
+      const { calls, runner } = recordingRunner();
+      opDynamicProof(repo, { target_symbol: targetId, source: repo, test_path: "lib/index.js", replacement: KILL, target_record: record }, { ...deps, dynamicProofRunner: runner });
+      return calls;
+    };
+    expect(prove(base)).toHaveLength(1);
+    const wrong = { ...base, identity: { ...base.identity, via_helper: { ...base.identity.via_helper!, path: [targetId, helperId] } } };
+    expect(refusalOf(() => prove(wrong)).message).toContain("via_helper");
+  });
+
   it("checks the helper half of a record: the helper's bytes, and a link path made of calls the graph has", () => {
     // `shelf.inner` is documented private, so it is not counted: a change inside it is followed to its
     // counted caller `shelf.count`, and the record for that caller carries the helper it was reached through.
