@@ -487,7 +487,9 @@ reviewer's action, then the limits and every stage. The checkout is not changed.
 `opro install-github-action --profile-from <folder>` shows, and with `--yes` writes, two things:
 `.github/workflows/orangepro-proof.yml` and `.orangepro/actions/` (the profile: which function, the
 approved expected behavior, the fault, the selected tests and the test to replay, with the frozen
-fixture manifest and lockfile). The workflow asks for `contents: read` only, uses no secret, keeps no
+fixture manifest and lockfile). The profile gives the fault either as `fault` (`<operator>@<byte offset>`)
+or as `fault_edit` (a file holding the fault as its own edit, the one `probe-fault --fault-edit` takes),
+never both. The workflow asks for `contents: read` only, uses no secret, keeps no
 token after checkout, pins every action to a commit and installs one pinned OrangePro version. It
 runs after a push to the base branch, or by hand with a merged commit and its previous base, and
 checks out the profile's branch and the commit to prove side by side. Nothing is committed or
@@ -590,6 +592,11 @@ delivery record (`orangepro-delivery-…`) and the report to share (`orangepro-r
 - the fault run the receipt names, and that run's allowlist;
 - that no line of the diagnostic fault is in the patch;
 - that the receipt was made by the same build.
+
+A PR is only ever opened in the named repository. Inside a workflow run, `--repo` must be the repository the
+run belongs to. GitHub must answer for exactly that repository, read before any write and again right before the PR
+is created; a renamed or moved repository, or any other, is `wrong_repository` and nothing is written. The PR's
+head is a branch of the same repository, and the read-back must show that repository as both base and head.
 
 Then it checks that `--base` still points at the proven merged commit, or at that commit plus only the files the
 installer owns (the workflow and `.orangepro/actions/`), as GitHub's compare API reports them. The code under the PR is

@@ -21,6 +21,7 @@ import { allowedPaths, earlierAttempts, faultKeyOf, opTestBrief, opVerifyTest } 
 import { gitBytes, opChangedTargets, type GitBytes } from "./changedTargets.js";
 import { recordBytes, recordSha256, sha256Hex, writeFileAtomic } from "./contracts/io.js";
 import { approvalMatch } from "./contracts/approvalBinding.js";
+import { checkFaultEditInput, type FaultEditInput } from "./contracts/faultRecord.js";
 import type { TargetRecord } from "./contracts/targetRecord.js";
 import { opExportTests } from "./exportTests.js";
 import { opProbeFault, ProbeFaultRefusal, readFixture, trackedStatus } from "./faultProbe.js";
@@ -56,8 +57,10 @@ export interface ActionsProfile {
   target_record: string;
   oracle: string;
   witness: string;
-  /** `<operator>@<byte offset>` in the target file. */
-  fault: string;
+  /** `<operator>@<byte offset>` in the target file. Exactly one of `fault` and `fault_edit` is given. */
+  fault?: string;
+  /** The fault as its own edit: a file in the profile's folder, the one `probe-fault --fault-edit` takes. */
+  fault_edit?: string;
   tests: string[];
   full_suite: boolean;
   /** The test to replay, written earlier (assisted) and kept as a patch and an assertion record template; null stops after the brief. */
@@ -173,8 +176,9 @@ export function profilePathOk(path: unknown): path is string {
 export function checkActionsProfile(value: unknown): { ok: true; profile: ActionsProfile } | { ok: false; message: string } {
   const fail = (message: string) => ({ ok: false as const, message });
   if (!isPlain(value)) return fail("the profile is not a JSON object.");
-  const keys = ["version", "base_branch", "orangepro", "fixture", "target_record", "oracle", "witness", "fault", "tests", "full_suite", "candidate", "limits"];
-  const unknown = Object.keys(value).filter((key) => !keys.includes(key));
+  const keys = ["version", "base_branch", "orangepro", "fixture", "target_record", "oracle", "witness", "tests", "full_suite", "candidate", "limits"];
+  const faultKeys = ["fault", "fault_edit"];
+  const unknown = Object.keys(value).filter((key) => !keys.includes(key) && !faultKeys.includes(key));
   const missing = keys.filter((key) => !(key in value));
   if (unknown.length > 0 || missing.length > 0) return fail(`unknown field(s) [${unknown.join(", ")}], missing field(s) [${missing.join(", ")}].`);
   if (value.version !== ACTIONS_PROFILE_VERSION) return fail(`version must be ${ACTIONS_PROFILE_VERSION}.`);
@@ -186,7 +190,9 @@ export function checkActionsProfile(value: unknown): { ok: true; profile: Action
   const f = value.fixture;
   if (!isPlain(f) || !profilePathOk(f.manifest) || (f.lockfile !== null && !profilePathOk(f.lockfile))) return fail("fixture needs manifest and lockfile (or null), as paths inside the profile's folder.");
   for (const key of ["target_record", "oracle", "witness"] as const) if (!profilePathOk(value[key])) return fail(`${key} must be a path inside the profile's folder.`);
-  if (typeof value.fault !== "string" || !/^[a-z_]+@\d+$/.test(value.fault)) return fail("fault must be <operator>@<byte offset>.");
+  if ("fault" in value === "fault_edit" in value) return fail("give exactly one of fault (<operator>@<byte offset>) and fault_edit (a file with the fault as its own edit).");
+  if ("fault" in value && (typeof value.fault !== "string" || !/^[a-z_]+@\d+$/.test(value.fault))) return fail("fault must be <operator>@<byte offset>.");
+  if ("fault_edit" in value && !profilePathOk(value.fault_edit)) return fail("fault_edit must be a path inside the profile's folder.");
   if (!Array.isArray(value.tests) || value.tests.length === 0 || !value.tests.every((test) => typeof test === "string" && PROFILE_PATH_RE.test(test))) {
     return fail("tests must list at least one test file of the repository.");
   }
@@ -210,6 +216,7 @@ interface LoadedProfile {
   targetRecord: TargetRecord;
   oracle: unknown;
   witness: Buffer;
+  faultEdit: FaultEditInput | null;
   candidate: { patch: Buffer; assertion: Record<string, unknown> } | null;
 }
 
@@ -243,6 +250,12 @@ function loadProfile(profilePath: string): LoadedProfile {
   const p = checked.profile;
   const assertion = p.candidate ? json(p.candidate.assertion) : null;
   if (p.candidate && !isPlain(assertion)) throw new ProfileError(`${p.candidate.assertion} is not an assertion record template.`);
+  let faultEdit: FaultEditInput | null = null;
+  if (p.fault_edit) {
+    const checkedEdit = checkFaultEditInput(json(p.fault_edit));
+    if (!checkedEdit.ok) throw new ProfileError(`${p.fault_edit}: ${checkedEdit.message}`);
+    faultEdit = checkedEdit.input;
+  }
   return {
     profile: p,
     sha256: sha256Hex(bytes),
@@ -251,6 +264,7 @@ function loadProfile(profilePath: string): LoadedProfile {
     targetRecord: json(p.target_record) as TargetRecord,
     oracle: json(p.oracle),
     witness: read(p.witness),
+    faultEdit,
     candidate: p.candidate ? { patch: read(p.candidate.patch), assertion: assertion as Record<string, unknown> } : null
   };
 }
@@ -491,7 +505,7 @@ export function opActionsRun(opts: ActionsRunOptions, deps: ActionsRunDeps): Act
     const stageDeps = { clock: deps.clock, container: executor, ...(deps.runId ? { runId: deps.runId } : {}) };
     const fault = opProbeFault(
       repo,
-      { target_record: record, fault: profile.fault, oracle: loaded.oracle, fixture_bytes: manifest, tests: profile.tests, witness_bytes: loaded.witness, full_suite: profile.full_suite },
+      { target_record: record, fault: profile.fault ?? "", ...(loaded.faultEdit ? { fault_edit: loaded.faultEdit } : {}), oracle: loaded.oracle, fixture_bytes: manifest, tests: profile.tests, witness_bytes: loaded.witness, full_suite: profile.full_suite },
       stageDeps
     );
     result.runs.fault = fault.run_id;

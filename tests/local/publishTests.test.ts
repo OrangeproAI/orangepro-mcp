@@ -10,7 +10,7 @@ const TOKEN = "ghs_sentinel_token_value_0123456789";
 const REPO = "example/round";
 
 /** A small in-memory GitHub: refs, commits, trees and PRs, enough for publish-tests' calls. */
-function fakeGitHub(opts: { baseSha?: string; baseFiles?: string[] } = {}) {
+function fakeGitHub(opts: { baseSha?: string; baseFiles?: string[]; answersAs?: string; prBaseRepo?: string } = {}) {
   const blobs = new Map<string, Buffer>([[gitBlobSha(Buffer.from(TEST_BEFORE)), Buffer.from(TEST_BEFORE)]]);
   const trees = new Map<string, Record<string, string>>([["tree0", { "test/round.js": gitBlobSha(Buffer.from(TEST_BEFORE)) }]]);
   const commits = new Map<string, { tree: string; parents: string[]; message: string }>([[MERGED, { tree: "tree0", parents: [], message: "merge" }]]);
@@ -37,6 +37,7 @@ function fakeGitHub(opts: { baseSha?: string; baseFiles?: string[] } = {}) {
     const p = u.pathname.replace(`/repos/${REPO}`, "");
     if (method !== "GET") writes += 1;
     let m: RegExpMatchArray | null;
+    if (method === "GET" && p === "") return json(200, { full_name: opts.answersAs ?? REPO });
     if (method === "GET" && (m = p.match(/^\/git\/ref\/(.+)$/))) return refs.has(m[1]) ? json(200, { object: { sha: refs.get(m[1]) } }) : json(404, { message: "Not Found" });
     if (method === "GET" && (m = p.match(/^\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/))) {
       if (m[1] !== MERGED || m[2] !== opts.baseSha || !opts.baseFiles) return json(404, {});
@@ -76,7 +77,7 @@ function fakeGitHub(opts: { baseSha?: string; baseFiles?: string[] } = {}) {
     }
     if (method === "GET" && p === "/pulls") return json(200, pulls.filter((pr) => `example:${pr.head.ref}` === u.searchParams.get("head")));
     if (method === "POST" && p === "/pulls") {
-      const pr = { number: 40 + pulls.length, html_url: `https://github.com/${REPO}/pull/${40 + pulls.length}`, draft: body.draft, state: "open", merged: false, title: body.title, body: body.body, base: { ref: body.base }, head: { ref: body.head } };
+      const pr = { number: 40 + pulls.length, html_url: `https://github.com/${REPO}/pull/${40 + pulls.length}`, draft: body.draft, state: "open", merged: false, title: body.title, body: body.body, base: { ref: body.base, repo: { full_name: opts.prBaseRepo ?? REPO } }, head: { ref: body.head, repo: { full_name: REPO } } };
       pulls.push(pr);
       return json(201, pr);
     }
@@ -139,6 +140,37 @@ describe("opro publish-tests: the trusted draft-PR publisher (no repository code
       }
     }
     expect(JSON.stringify([res, again])).not.toContain(TOKEN);
+  });
+
+  it("a PR is only ever opened in the named repository: another repository answering, or another run's repository, is refused with no write", async () => {
+    const f = proofRunFixture();
+    // GitHub answers under another name (the repository was renamed or moved, or is the upstream).
+    const moved = fakeGitHub({ answersAs: "upstream/round" });
+    const res = await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(moved));
+    expect([res.status, res.reason]).toEqual(["refused", "wrong_repository"]);
+    expect(moved.writes).toBe(0);
+    expect(moved.pulls).toHaveLength(0);
+    // Inside a workflow run of another repository: refused before any request.
+    const gh = fakeGitHub();
+    const other = await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(gh, { env: { ...env, GITHUB_REPOSITORY: "upstream/round" } }));
+    expect([other.status, other.reason]).toEqual(["refused", "wrong_repository"]);
+    expect(gh.calls).toHaveLength(0);
+    // The run's own repository, in another letter case, is the same repository.
+    const same = await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(fakeGitHub(), { env: { ...env, GITHUB_REPOSITORY: REPO.toUpperCase() } }));
+    expect(same.status).toBe("delivered");
+  });
+
+  it("the repository is read again right before the PR is opened, and a PR that reads back with another base repository is not called delivered", async () => {
+    const f = proofRunFixture();
+    const gh = fakeGitHub();
+    await opPublishTests({ from_run: f.exportDir, repo: REPO, base: "main", yes: true, out: f.runs }, deps(gh));
+    const create = gh.calls.findIndex((c) => c.startsWith("POST /repos/example/round/pulls"));
+    expect(gh.calls[create - 1]).toMatch(/^GET \/repos\/example\/round auth=true$/);
+    expect(gh.calls[0]).toMatch(/^GET \/repos\/example\/round auth=true$/);
+    const f2 = proofRunFixture();
+    const wrong = await opPublishTests({ from_run: f2.exportDir, repo: REPO, base: "main", yes: true, out: f2.runs }, deps(fakeGitHub({ prBaseRepo: "upstream/round" })));
+    expect([wrong.status, wrong.reason]).toEqual(["blocked", "readback_mismatch"]);
+    expect(wrong.detail).toContain("its base repository is upstream/round");
   });
 
   it("the base moved since the proof: stale_base, and no write", async () => {

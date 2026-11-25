@@ -284,6 +284,10 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
     const body = prBody(r, receiptSha, oracle, { run_url: runUrl });
     plan = { repository: opts.repo, base: opts.base, branch, merged_commit: r.source.merged_commit, file: run.patch.file, title: prTitle(r), body_sha256: sha256Hex(Buffer.from(body, "utf8")) };
 
+    // Inside a workflow run, a PR is only ever opened in the repository the run belongs to.
+    if (env.GITHUB_REPOSITORY && env.GITHUB_REPOSITORY.toLowerCase() !== opts.repo.toLowerCase()) {
+      throw new Stop("refused", "wrong_repository", `this run belongs to ${env.GITHUB_REPOSITORY}; a PR is not opened in ${opts.repo}.`);
+    }
     const token = env.GITHUB_TOKEN || env.GH_TOKEN || null;
     if (!opts.yes) {
       return finish("dry_run", null, `Would open a draft PR on ${opts.repo} from ${branch} into ${opts.base}, changing ${run.patch.file} only. Nothing was written (add --yes).`);
@@ -291,6 +295,14 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
     if (!token) throw new Stop("blocked", "no_token", "no GITHUB_TOKEN or GH_TOKEN: nothing was delivered; the artifacts stay.");
     api = makeApi(apiRoot(env), token, deps.fetch ?? fetch);
     const repoPath = `/repos/${opts.repo}`;
+    // The PR opens in the named repository and nowhere else: GitHub must answer for that exact repository (a
+    // renamed or moved one answers under another name). Checked before any write, and again before the PR.
+    const sameRepo = (name: unknown): boolean => typeof name === "string" && name.toLowerCase() === opts.repo.toLowerCase();
+    const repositoryIs = async (when: string): Promise<void> => {
+      const info = expect(await api!.get(repoPath), [200], `reading ${opts.repo}`);
+      if (!sameRepo(info?.full_name)) throw new Stop("refused", "wrong_repository", `GitHub answers for ${String(info?.full_name ?? "another repository")}, not ${opts.repo} (${when}): no PR opened.`);
+    };
+    await repositoryIs("before any write");
 
     // Freshness (AD-5): the base must still point at the proven commit.
     const baseHead = async (): Promise<string> => expect(await api!.get(`${repoPath}/git/ref/heads/${encodePath(opts.base)}`), [200], `reading ${opts.base}`)?.object?.sha;
@@ -371,6 +383,7 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
       if (existing.body !== finalBody) expect(await api.send("PATCH", `${repoPath}/pulls/${number}`, { body: finalBody }), [200], "updating the PR's description");
       status = reuse ? "unchanged" : "updated";
     } else {
+      await repositoryIs("before opening the PR");
       const pr = expect(await api.send("POST", `${repoPath}/pulls`, { title: plan.title, head: branch, base: opts.base, body: finalBody, draft: true, maintainer_can_modify: false }), [201], "opening the draft PR");
       number = pr.number;
       status = "delivered";
@@ -395,6 +408,8 @@ export async function opPublishTests(opts: PublishTestsOptions, deps: PublishTes
       const problems = [
         readBack.draft ? null : "it is not a draft",
         readBack.base_ref === opts.base ? null : `its base is ${readBack.base_ref}`,
+        sameRepo(pr.base?.repo?.full_name) ? null : `its base repository is ${String(pr.base?.repo?.full_name ?? "unknown")}`,
+        sameRepo(pr.head?.repo?.full_name) ? null : `its head repository is ${String(pr.head?.repo?.full_name ?? "unknown")}`,
         readBack.head_sha === commit ? null : "its head is not the delivered commit",
         names.length === 1 && names[0] === run.patch.file ? null : `it changes ${names.join(", ") || "no file"}`
       ].filter(Boolean);

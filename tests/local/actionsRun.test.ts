@@ -8,7 +8,7 @@ import type { BuildCheck } from "../../src/local/buildInfo.js";
 import { ASSERTION_RECORD_VERSION } from "../../src/local/contracts/candidate.js";
 import { unifiedFileDiff } from "../../src/local/contracts/faultRecord.js";
 import { ORANGEPRO_VERSION } from "../../src/local/version.js";
-import { deps, git, hostExecutor, mochaPackage, OFFSETS, PASSING_TESTS, passingProbe, sha256, tempDir, trackedChanges, workspace, type Workspace } from "./support/probeWorkspace.js";
+import { deps, editInput, git, hostExecutor, mochaPackage, OFFSETS, PASSING_TESTS, passingProbe, sha256, tempDir, trackedChanges, workspace, type Workspace } from "./support/probeWorkspace.js";
 
 const BUILD = "b".repeat(64);
 const BUILT: BuildCheck = { status: "build", build_sha256: BUILD, reason: null };
@@ -120,6 +120,33 @@ describe("opro actions-run — the post-merge step", { timeout: 300_000 }, () =>
     expect(r.fixture).toMatchObject({ frozen_platform: "linux/arm64", effective_platform: "linux/arm64" });
     expect(r.fixture!.effective_sha256).toBe(r.fixture!.frozen_sha256);
     expect(trackedChanges(w.repo)).toBe("");
+  });
+
+  it("a profile may give the fault as its own edit: the same verified gap as with the operator", () => {
+    const w = workspace();
+    const { base, merged } = commits(w);
+    const edit = JSON.stringify(editInput("Math.floor", "Math.ceil"));
+    const r = run(w, profileFor(w, { fault: undefined, fault_edit: "fault-edit.json" }, { "fault-edit.json": edit }), pushEvent(base, merged));
+    expect([r.status, r.reason]).toEqual(["verified_gap", null]);
+    expect(r.receipt?.rows.every((row) => row.met)).toBe(true);
+    const faultRecord = JSON.parse(readFileSync(path.join(r.out, "runs", r.runs.fault!, "fault-record.json"), "utf8"));
+    expect(faultRecord).toMatchObject({ original_text: "Math.floor", replacement_text: "Math.ceil" });
+  });
+
+  it("a profile with both a fault and a fault edit, with neither, or with an edit that is not one, is refused by name", () => {
+    const w = workspace();
+    const { base, merged } = commits(w);
+    const edit = JSON.stringify(editInput("Math.floor", "Math.ceil"));
+    const both = run(w, profileFor(w, { fault_edit: "fault-edit.json" }, { "fault-edit.json": edit }), pushEvent(base, merged));
+    expect(both.status).toBe("blocked");
+    expect(both.detail).toContain("exactly one of fault");
+    const neither = run(w, profileFor(w, { fault: undefined }), pushEvent(base, merged));
+    expect(neither.detail).toContain("exactly one of fault");
+    const notOne = run(w, profileFor(w, { fault: undefined, fault_edit: "fault-edit.json" }, { "fault-edit.json": "{}" }), pushEvent(base, merged));
+    expect(notOne.status).toBe("blocked");
+    expect(notOne.detail).toContain("fault-edit.json");
+    const outside = run(w, profileFor(w, { fault: undefined, fault_edit: "../fault-edit.json" }), pushEvent(base, merged));
+    expect(outside.detail).toContain("fault_edit must be a path inside the profile's folder");
   });
 
   it("stops as not_configured when the push changes another function, lists it, and starts no container (amendment 1)", () => {
