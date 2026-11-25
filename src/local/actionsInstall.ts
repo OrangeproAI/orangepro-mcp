@@ -276,7 +276,7 @@ function loadSourceProfile(from: string, base: string, version: string, build: s
   const checked = checkActionsProfile({ version: ACTIONS_PROFILE_VERSION, ...value, base_branch: base, orangepro: { version, build_sha256: build } });
   if (!checked.ok) throw new InstallError(`profile.json: ${checked.message}`);
   const profile = checked.profile;
-  const names = [profile.fixture.manifest, profile.fixture.lockfile, profile.target_record, profile.oracle, profile.witness, profile.candidate?.patch, profile.candidate?.assertion].filter(
+  const names = [profile.fixture.manifest, profile.fixture.lockfile, profile.target_record, profile.oracle, profile.witness, profile.fault_edit, profile.candidate?.patch, profile.candidate?.assertion].filter(
     (name): name is string => typeof name === "string"
   );
   const inputs: DesiredFile[] = [];
