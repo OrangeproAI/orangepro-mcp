@@ -11,7 +11,8 @@ const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const fixtureRoot = path.join(root, "tests/local/__fixtures__/dynamic-proof/nest-like");
 const script = path.join(root, "scripts/spikes/dynamic-proof-spike.mjs");
-const vitestBin = require.resolve("vitest/vitest.mjs");
+// vitest 4 no longer exports the "./vitest.mjs" subpath; the bin file is still shipped beside package.json.
+const vitestBin = path.join(path.dirname(require.resolve("vitest/package.json")), "vitest.mjs");
 const mochaBin = require.resolve("mocha/bin/mocha.js");
 const fakeJestBin = path.join(root, "tests/local/__fixtures__/dynamic-proof/fake-jest-bin.cjs");
 const sentinelReturn = "return {\"id\":\"mutant-order\",\"total\":-1,\"source\":\"mutant\"};";

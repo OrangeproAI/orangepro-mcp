@@ -103,7 +103,7 @@ function runSpike(
 // isolated temp sandboxes), so they run CONCURRENTLY. Serially, six ~15-25s cases
 // exceed vitest's worker RPC heartbeat and the run is reported failed despite every
 // assertion passing; concurrency keeps the file's wall time near the slowest case.
-describe.skipIf(!HAS_JAVA_MAVEN)("java dynamic proof spike (J-1)", () => {
+describe.skipIf(!HAS_JAVA_MAVEN)("java dynamic proof spike (J-1)", { concurrent: true }, () => {
   // Resolve JUnit into the shared repo once before the proof cases run, so the
   // subsequent mvn invocations are cache hits rather than repeated cold downloads.
   beforeAll(() => {
@@ -311,7 +311,7 @@ describe.skipIf(!HAS_JAVA_MAVEN)("java dynamic proof spike (J-1)", () => {
     expect(seen).toBe("OPENAI_API_KEY="); // ambient secret was stripped
     expect(seen).not.toContain("sk-test-secret-value");
   }, TEST_TIMEOUT);
-}, { concurrent: true });
+});
 
 describe("java dynamic proof spike: failed copy cleanup (0.2.47)", () => {
   it("removes its temp sandboxes when the module copy fails", () => {
